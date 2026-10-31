@@ -7,7 +7,7 @@ import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
 import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
-import { afterAuth, signedIn } from '../features/auth/after-auth.js';
+import { afterAuth, afterAuthUrl, signedIn } from '../features/auth/after-auth.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 
 // A self-hosted install has one account, so there is no Sign up link;
@@ -76,6 +76,7 @@ function SignIn() {
           signIn.mutate({
             email: String(form.get('email')),
             password: String(form.get('password')),
+            callbackURL: afterAuthUrl(search.invite),
           })
         }
       >

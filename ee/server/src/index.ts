@@ -37,7 +37,8 @@ export function managedExtensions({
 }: ManagedOptions = {}): ServerExtensions {
   return {
     organizations: true,
-    authPlugins: (context) => [organizationPlugin(), managedPolicyPlugin(context)],
+    requireVerifiedEmail: true,
+    authPlugins: (context) => [organizationPlugin(), managedPolicyPlugin(context, email)],
     routes: (app) => {
       app.route('/api/v1', organizationRoutes(email));
     },

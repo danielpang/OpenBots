@@ -68,7 +68,7 @@ function authenticate(c: Context<AppEnv>): Promise<CurrentUser> {
   return authenticateHeaders(c.var.deps, c.req.raw.headers);
 }
 
-type AuthDeps = Pick<AppDeps, 'auth' | 'db' | 'config'>;
+type AuthDeps = Pick<AppDeps, 'auth' | 'db' | 'config' | 'extensions'>;
 
 /**
  * The caller behind a set of request headers, as a member of the active
@@ -129,6 +129,8 @@ export async function authenticateAccount(deps: AuthDeps, headers: Headers): Pro
 
   const [user] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
   if (!user) throw unauthorized();
+  // The managed build verifies email: an account that has not done it uses nothing yet.
+  if (deps.extensions?.requireVerifiedEmail && !user.emailVerified) throw emailNotVerified();
   if (config.deployment === 'self_hosted') organizationId = (await implicitId(db)) ?? null;
   const membership = organizationId ? await membershipOf(db, user.id, organizationId) : null;
   return {
@@ -176,6 +178,9 @@ async function implicitId(db: Db): Promise<string> {
   implicitIds.set(db, id);
   return id;
 }
+
+export const emailNotVerified = () =>
+  new DomainError(403, 'EMAIL_NOT_VERIFIED', 'Verify your email first. We sent you a link.');
 
 export const notOwner = () =>
   new DomainError(403, 'NOT_OWNER', 'This OpenBot has one account, its owner.');

@@ -5,11 +5,12 @@ import { ApiError } from '@openbot/api-client';
 // install closes sign-up once its owner exists.
 
 const MESSAGES: Record<string, string> = {
-  INVITE_REQUIRED: 'Signing up here needs an invite. Ask an admin for an invite link.',
+  INVITE_REQUIRED: 'Signing up here needs an invite. Open the link from your invite.',
   INVITE_INVALID: 'This invite link is invalid, already used, or expired.',
   ACCOUNT_DISABLED: 'This account is disabled. Ask an admin to enable it.',
   SIGNUP_CLOSED: 'This OpenBot already has its owner. Sign in instead.',
   NOT_OWNER: 'This OpenBot has one account, its owner.',
+  EMAIL_NOT_VERIFIED: 'Verify your email first. We sent you a new link.',
 };
 
 export function authErrorMessage(error: unknown): string {

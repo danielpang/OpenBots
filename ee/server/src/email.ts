@@ -43,13 +43,37 @@ export function inviteMessage(invite: InviteEmail) {
 }
 
 /** Sends the invite; true when Resend took it. Never throws. */
-export async function sendInviteEmail(
+export function sendInviteEmail(
   options: EmailOptions,
   invite: InviteEmail,
   log: (error: unknown) => void = () => {},
 ): Promise<boolean> {
+  return send(options, invite.to, inviteMessage(invite), log);
+}
+
+export function verificationMessage(link: string) {
+  const subject = 'Verify your email for OpenBots';
+  const text = `Open this link to verify your email and sign in:\n\n${link}\n\nThe link works for 24 hours.\n`;
+  const html = `<p>Open this link to verify your email and sign in.</p><p><a href="${escape(link)}">Verify my email</a></p><p>The link works for 24 hours.</p>`;
+  return { subject, text, html };
+}
+
+/** Sends the email verification link; true when Resend took it. Never throws. */
+export function sendVerificationEmail(
+  options: EmailOptions,
+  { to, link }: { to: string; link: string },
+  log: (error: unknown) => void = () => {},
+): Promise<boolean> {
+  return send(options, to, verificationMessage(link), log);
+}
+
+async function send(
+  options: EmailOptions,
+  to: string,
+  { subject, text, html }: { subject: string; text: string; html: string },
+  log: (error: unknown) => void,
+): Promise<boolean> {
   if (!emailEnabled(options)) return false;
-  const { subject, text, html } = inviteMessage(invite);
   try {
     const res = await (options.fetch ?? fetch)(RESEND_URL, {
       method: 'POST',
@@ -57,7 +81,7 @@ export async function sendInviteEmail(
         authorization: `Bearer ${options.apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ from: options.from, to: [invite.to], subject, text, html }),
+      body: JSON.stringify({ from: options.from, to: [to], subject, text, html }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`Resend answered ${res.status}`);

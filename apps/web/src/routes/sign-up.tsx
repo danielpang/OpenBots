@@ -7,7 +7,7 @@ import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
 import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
-import { afterAuth, signedIn } from '../features/auth/after-auth.js';
+import { afterAuth, afterAuthUrl, signedIn } from '../features/auth/after-auth.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 
 // An invite link is /sign-up?invite=<id>. Signing up is for the managed
@@ -58,12 +58,24 @@ function SignUp() {
   const [oauthError, setOAuthError] = useState<unknown>(callbackError);
   const signUp = useMutation({
     mutationFn: auth.signUpEmail,
-    onSuccess: async () => {
+    onSuccess: async ({ token }) => {
+      // No session yet: the server sent a link to verify the email first.
+      if (token === null) return;
       queryClient.removeQueries({ queryKey: ['me'] });
       await navigate(afterAuth(invite));
     },
   });
   const error = signUp.error ?? oauthError;
+
+  if (signUp.data?.token === null) {
+    return (
+      <AuthCard title="Check your email">
+        <p role="status" className="text-center text-sm text-muted-foreground">
+          We sent you a link. Open it to finish signing up.
+        </p>
+      </AuthCard>
+    );
+  }
 
   return (
     <AuthCard title="Create your account">
@@ -76,6 +88,8 @@ function SignUp() {
             name: String(form.get('name')),
             email: String(form.get('email')),
             password: String(form.get('password')),
+            ...(invite ? { invite } : {}),
+            callbackURL: afterAuthUrl(invite),
           })
         }
       >

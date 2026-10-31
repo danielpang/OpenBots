@@ -17,7 +17,40 @@ interface Org {
   active: boolean;
 }
 
-const resend = vi.fn(async () => Response.json({ id: 'email_1' }));
+const resend = vi.fn<typeof fetch>(async () => Response.json({ id: 'email_1' }));
+
+/** The session cookie a response sets, if any. */
+function cookieOf(res: Response) {
+  return res.headers
+    .getSetCookie()
+    .map((c) => c.split(';')[0]!)
+    .find((c) => c.includes('session_token='));
+}
+
+async function signIn(t: TestApp, email: string) {
+  const res = await t.app.request('/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: ORIGIN },
+    body: JSON.stringify({ email, password: 'correct horse battery' }),
+  });
+  return { res, cookie: cookieOf(res) };
+}
+
+/**
+ * Signs up, as someone who then opens the verification link: their email is
+ * verified and they sign in. Returns the sign-up response and the session.
+ */
+async function join(t: TestApp, email: string, extra: Record<string, unknown> = {}) {
+  const { res } = await t.signUp(email, extra);
+  if (!res.ok) return { res, cookie: undefined };
+  await t.deps.db
+    .update(schema.users)
+    .set({ emailVerified: true })
+    .where(eq(schema.users.email, email.toLowerCase()));
+  const signedIn = await signIn(t, email);
+  expect(signedIn.res.status).toBe(200);
+  return { res, cookie: signedIn.cookie };
+}
 
 describe('organizations on the managed service', () => {
   let t: TestApp;
@@ -46,7 +79,7 @@ describe('organizations on the managed service', () => {
 
   /** Signs up and creates an organization, as onboarding does. */
   async function founder(email: string, org: string) {
-    const { cookie } = await t.signUp(email);
+    const { cookie } = await join(t, email);
     const created = await json<Org>(call(cookie, 'POST', '/organizations', { name: org }), 201);
     return { cookie: cookie!, org: created.id };
   }
@@ -57,7 +90,7 @@ describe('organizations on the managed service', () => {
       call(inviter, 'POST', '/organization/invitations', { email, role }),
       201,
     );
-    const { res, cookie } = await t.signUp(email);
+    const { res, cookie } = await join(t, email);
     expect(res.status).toBe(200);
     await json(call(cookie, 'POST', `/invitations/${invitation.id}/accept`));
     return { cookie: cookie!, id: await t.userId(email), invitation: invitation.id };
@@ -77,7 +110,7 @@ describe('organizations on the managed service', () => {
   afterAll(() => t.close());
 
   it('starts a new account with no organization, until it creates one as its owner', async () => {
-    const { cookie } = await t.signUp('new@example.com');
+    const { cookie } = await join(t, 'new@example.com');
     expect(await json(call(cookie, 'GET', '/me'))).toMatchObject({ workspace: null, role: null });
     expect(await json(call(cookie, 'GET', '/organizations'))).toEqual({ items: [] });
     expect((await call(cookie, 'GET', '/bots')).status).toBe(403);
@@ -124,7 +157,7 @@ describe('organizations on the managed service', () => {
     expect(String(sent.text)).toContain(res.link);
     expect(String(sent.text)).not.toMatch(/[–—]/);
 
-    const { cookie } = await t.signUp('bea@example.com');
+    const { cookie } = await join(t, 'bea@example.com');
     // The recipient sees it; it names its organization.
     expect(await json(call(cookie, 'GET', `/invitations/${res.id}`))).toMatchObject({
       organization: 'Acme',
@@ -146,11 +179,11 @@ describe('organizations on the managed service', () => {
       call(ada, 'POST', '/organization/invitations', { email: 'cy@example.com' }),
       201,
     );
-    const { cookie: eve } = await t.signUp('eve@example.com');
+    const { cookie: eve } = await join(t, 'eve@example.com');
     expect((await call(eve, 'GET', `/invitations/${res.id}`)).status).toBe(404);
     expect((await call(eve, 'POST', `/invitations/${res.id}/accept`)).status).toBe(404);
 
-    const { cookie: cy } = await t.signUp('cy@example.com');
+    const { cookie: cy } = await join(t, 'cy@example.com');
     await t.deps.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() - 1000) })
@@ -183,7 +216,7 @@ describe('organizations on the managed service', () => {
       { extensions: managedExtensions() },
     );
     try {
-      const { cookie } = await plain.signUp('owner@example.com');
+      const { cookie } = await join(plain, 'owner@example.com');
       const request = (path: string, body?: unknown) =>
         plain.app.request(`/api/v1${path}`, {
           method: 'POST',
@@ -400,10 +433,10 @@ describe('sign-up by invitation only', () => {
   afterAll(() => t.close());
 
   it('lets the first user in, then only addresses with a pending invitation', async () => {
-    const first = await t.signUp('first@example.com');
+    const first = await join(t, 'first@example.com');
     expect(first.res.status).toBe(200);
     const stranger = await t.signUp('stranger@example.com');
-    expect(stranger.res.status).toBe(403);
+    expect(stranger.res.status).toBe(400);
     expect(await stranger.res.json()).toMatchObject({ code: 'INVITE_REQUIRED' });
     const post = (path: string, body: unknown) =>
       t.app.request(`/api/v1${path}`, {
@@ -412,23 +445,183 @@ describe('sign-up by invitation only', () => {
         body: JSON.stringify(body),
       });
     expect((await post('/organizations', { name: 'Private' })).status).toBe(201);
-    expect((await post('/organization/invitations', { email: 'friend@example.com' })).status).toBe(
-      201,
-    );
-    expect((await t.signUp('friend@example.com')).res.status).toBe(200);
+    const invited = (await (
+      await post('/organization/invitations', { email: 'friend@example.com' })
+    ).json()) as { id: string };
+    // Knowing the invited address is not enough: the link's invite must come too.
+    const without = await t.signUp('friend@example.com');
+    expect(without.res.status).toBe(400);
+    expect(await without.res.json()).toMatchObject({ code: 'INVITE_REQUIRED' });
+    const other = (await (
+      await post('/organization/invitations', { email: 'other@example.com' })
+    ).json()) as { id: string };
+    expect((await t.signUp('friend@example.com', { invite: other.id })).res.status).toBe(400);
+    expect((await t.signUp('friend@example.com', { invite: 'not-an-id' })).res.status).toBe(400);
+    // An expired one proves nothing.
+    await t.deps.db
+      .update(schema.invites)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(schema.invites.id, invited.id));
+    expect((await t.signUp('friend@example.com', { invite: invited.id })).res.status).toBe(400);
+    await t.deps.db
+      .update(schema.invites)
+      .set({ expiresAt: new Date(Date.now() + 86_400_000) })
+      .where(eq(schema.invites.id, invited.id));
+    const friend = await join(t, 'friend@example.com', { invite: invited.id });
+    expect(friend.res.status).toBe(200);
+    // Accepted once: it joins them, and the link proves nothing afterwards.
+    const accept = await t.app.request(`/api/v1/invitations/${invited.id}/accept`, {
+      method: 'POST',
+      headers: { origin: ORIGIN, cookie: friend.cookie! },
+    });
+    expect(accept.status).toBe(200);
+    const again = await t.app.request(`/api/v1/invitations/${invited.id}/accept`, {
+      method: 'POST',
+      headers: { origin: ORIGIN, cookie: friend.cookie! },
+    });
+    expect(again.status).toBe(404);
   });
 
   it('signs a returning member in to the organization they joined last', async () => {
-    const res = await t.app.request('/api/auth/sign-in/email', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin: ORIGIN },
-      body: JSON.stringify({ email: 'first@example.com', password: 'correct horse battery' }),
-    });
-    const cookie = res.headers
-      .getSetCookie()
-      .map((c) => c.split(';')[0]!)
-      .find((c) => c.includes('session_token='))!;
-    const me = await t.app.request('/api/v1/me', { headers: { cookie } });
+    const { cookie } = await signIn(t, 'first@example.com');
+    const me = await t.app.request('/api/v1/me', { headers: { cookie: cookie! } });
     expect(await me.json()).toMatchObject({ role: 'owner', workspace: { name: 'Private' } });
+  });
+});
+
+describe('email verification on the managed service', () => {
+  let t: TestApp;
+  const sent: { to: string; subject: string; text: string }[] = [];
+  const mailer = vi.fn<typeof fetch>(async (_url, init) => {
+    const body = JSON.parse(init!.body as string) as {
+      to: string[];
+      subject: string;
+      text: string;
+    };
+    sent.push({ to: body.to[0]!, subject: body.subject, text: body.text });
+    return Response.json({ id: 'email' });
+  });
+  /** The link in the first email to `to`, the one sign-up sent. */
+  const link = (to: string) => {
+    const mail = sent.find((m) => m.to === to);
+    return mail?.text.match(/https?:\/\/\S+/)?.[0];
+  };
+
+  beforeAll(async () => {
+    t = await createTestApp(
+      { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' },
+      {
+        extensions: managedExtensions({
+          email: { apiKey: 're_test', from: 'OpenBots <hi@example.com>', fetch: mailer },
+        }),
+      },
+    );
+  });
+  afterAll(() => t.close());
+
+  it('gives a new account no session until its email is verified, and the link signs it in', async () => {
+    const { res, cookie } = await t.signUp('vera@example.com', {
+      callbackURL: '/onboarding?invite=00000000-0000-4000-8000-000000000000',
+    });
+    expect(res.status).toBe(200);
+    expect(cookie).toBeUndefined();
+    expect(sent.find((m) => m.to === 'vera@example.com')).toMatchObject({
+      subject: 'Verify your email for OpenBots',
+    });
+    const unverified = await signIn(t, 'vera@example.com');
+    expect(unverified.res.status).toBe(403);
+    expect(await unverified.res.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
+
+    const url = new URL(link('vera@example.com')!);
+    expect(url.pathname).toBe('/api/auth/verify-email');
+    const verified = await t.app.request(`${url.pathname}${url.search}`);
+    expect(verified.status).toBe(302);
+    expect(verified.headers.get('location')).toBe(
+      '/onboarding?invite=00000000-0000-4000-8000-000000000000',
+    );
+    const session = cookieOf(verified)!;
+    const me = await t.app.request('/api/v1/me', { headers: { cookie: session } });
+    expect(await me.json()).toMatchObject({ user: { emailVerified: true }, workspace: null });
+  });
+
+  it('refuses an unverified account everywhere, its API keys too', async () => {
+    const { cookie } = await join(t, 'una@example.com');
+    const call = (headers: Record<string, string>, method: string, path: string, body?: unknown) =>
+      t.app.request(`/api/v1${path}`, {
+        method,
+        headers: { origin: ORIGIN, 'content-type': 'application/json', ...headers },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    expect(
+      (await call({ cookie: cookie! }, 'POST', '/organizations', { name: 'Una Co' })).status,
+    ).toBe(201);
+    const key = (await (
+      await call({ cookie: cookie! }, 'POST', '/api-keys', { name: 'k' })
+    ).json()) as {
+      key: string;
+    };
+    // As if the address had never been verified (an account from before).
+    await t.deps.db
+      .update(schema.users)
+      .set({ emailVerified: false })
+      .where(eq(schema.users.email, 'una@example.com'));
+    const both: Record<string, string>[] = [
+      { cookie: cookie! },
+      { authorization: `Bearer ${key.key}` },
+    ];
+    for (const headers of both) {
+      for (const [method, path, body] of [
+        ['GET', '/me', undefined],
+        ['GET', '/bots', undefined],
+        ['POST', '/organizations', { name: 'Again' }],
+        ['POST', '/invitations/00000000-0000-4000-8000-000000000000/accept', undefined],
+      ] as const) {
+        const res = await call(headers, method, path, body);
+        expect(res.status, path).toBe(403);
+        expect(((await res.json()) as { code: string }).code).toBe('EMAIL_NOT_VERIFIED');
+      }
+    }
+  });
+
+  it('does not let an open sign-up as an invited address join without that inbox', async () => {
+    const owner = await join(t, 'boss@example.com');
+    const post = (path: string, body: unknown) =>
+      t.app.request(`/api/v1${path}`, {
+        method: 'POST',
+        headers: { origin: ORIGIN, cookie: owner.cookie!, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    await post('/organizations', { name: 'Boss Co' });
+    const invite = (await (
+      await post('/organization/invitations', { email: 'kim@example.com' })
+    ).json()) as {
+      id: string;
+    };
+    // Someone who knows the address signs up as Kim: no session, and no way in without Kim's inbox.
+    const squatter = await t.signUp('kim@example.com', { invite: invite.id });
+    expect(cookieOf(squatter.res)).toBeUndefined();
+    expect((await signIn(t, 'kim@example.com')).res.status).toBe(403);
+    const pending = await t.deps.db
+      .select()
+      .from(schema.invites)
+      .where(eq(schema.invites.id, invite.id));
+    expect(pending[0]!.status).toBe('pending');
+  });
+
+  it('logs the link when the server cannot send email', async () => {
+    const plain = await createTestApp(
+      { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' },
+      { extensions: managedExtensions() },
+    );
+    try {
+      const info = vi.spyOn(plain.deps.logger, 'info');
+      await plain.signUp('quiet@example.com');
+      const logged = info.mock.calls.find(([, message]) => message === 'email verification link');
+      expect((logged?.[0] as { url?: string } | undefined)?.url).toContain(
+        '/api/auth/verify-email',
+      );
+    } finally {
+      await plain.close();
+    }
   });
 });

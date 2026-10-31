@@ -24,9 +24,19 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
   }
 
   return {
-    signUpEmail: (input: { name: string; email: string; password: string }) =>
-      post<unknown>('/sign-up/email', input),
-    signInEmail: (input: { email: string; password: string }) =>
+    /**
+     * `token` is null when the server wants the email verified first: a
+     * link went to the address, and opening it signs in and goes to
+     * `callbackURL`. `invite` is the invitation the sign-up came from.
+     */
+    signUpEmail: (input: {
+      name: string;
+      email: string;
+      password: string;
+      invite?: string;
+      callbackURL?: string;
+    }) => post<{ token: string | null }>('/sign-up/email', input),
+    signInEmail: (input: { email: string; password: string; callbackURL?: string }) =>
       post<unknown>('/sign-in/email', input),
     /** Returns the provider's authorization URL to navigate to. */
     signInSocial: async (input: {

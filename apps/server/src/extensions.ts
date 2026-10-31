@@ -26,6 +26,12 @@ export interface ServerExtensions {
    * otherwise), since the core alone has no way to make an organization.
    */
   organizations?: boolean;
+  /**
+   * Every request needs an account whose email is verified (403
+   * EMAIL_NOT_VERIFIED otherwise), its API keys included. The managed build
+   * verifies email at sign-up.
+   */
+  requireVerifiedEmail?: boolean;
   /** better-auth plugins added after the core's; they may bring database hooks. */
   authPlugins?(context: ExtensionContext): BetterAuthPlugin[];
   /** Mounts more routes on the app, before the SPA fallback. */

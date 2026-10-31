@@ -3,8 +3,9 @@ import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { organization } from 'better-auth/plugins/organization';
 import { and, count, desc, eq, gt, isNull } from 'drizzle-orm';
 import type { ExtensionContext } from '@openbot/server';
-import { schema } from '@openbot/server/db/client';
+import { schema, type Db } from '@openbot/server/db/client';
 import { ac, roles } from './access.js';
+import { sendVerificationEmail, type EmailOptions } from './email.js';
 
 // better-auth on the managed service (plan 21.5): the organization plugin,
 // mapped onto the core's tables, and the policy the core leaves to this
@@ -20,9 +21,20 @@ import { ac, roles } from './access.js';
 //
 // Sign-up (OPENBOT_SIGNUP_MODE): `open` lets anyone sign up; `invite`
 // (and `first_user_admin`, its old name) lets only the first user and
-// people with a pending invitation. A new session works in the
-// organization its user joined last, among those they are not suspended
-// in, unless it names one already.
+// someone who brings the invitation from their link (`invite` in the
+// sign-up body, as /sign-up?invite=<id> sends it) for the address they
+// sign up with. Knowing an invited address is not enough.
+//
+// Every account verifies its email before it signs in (better-auth's
+// email verification, through Resend, or a link in the server's log when
+// it cannot send email). So nobody uses the app, makes an organization or
+// accepts an invitation as an address they do not hold, whatever the
+// sign-up mode; the core also refuses an unverified account's requests
+// (`requireVerifiedEmail`). An invitation is accepted once, by its
+// address, after verification (organizations.ts).
+//
+// A new session works in the organization its user joined last, among
+// those they are not suspended in, unless it names one already.
 
 export const INVITATION_DAYS = 7;
 /** Organizations one person may belong to (the plugin counts memberships). */
@@ -66,34 +78,62 @@ export function organizationPlugin() {
   });
 }
 
-/** The policy plugin: sign-up, the session's organization, and no organization HTTP endpoints. */
-export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAuthPlugin {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The invitation a sign-up brings, when it is pending, unexpired and for that address. */
+export async function invitationProof(db: Db, email: string, invite: unknown) {
+  if (typeof invite !== 'string' || !UUID.test(invite)) return null;
+  const [row] = await db
+    .select({ id: schema.invites.id })
+    .from(schema.invites)
+    .where(
+      and(
+        eq(schema.invites.id, invite),
+        eq(schema.invites.email, email.toLowerCase()),
+        eq(schema.invites.status, 'pending'),
+        gt(schema.invites.expiresAt, new Date()),
+      ),
+    );
+  return row ?? null;
+}
+
+/** The policy plugin: sign-up, email verification, the session's organization, and no organization HTTP endpoints. */
+export function managedPolicyPlugin(
+  { config, db, logger }: ExtensionContext,
+  email: EmailOptions = {},
+): BetterAuthPlugin {
   return {
     id: 'openbot-managed',
     init: () => ({
       options: {
+        emailAndPassword: { enabled: true, requireEmailVerification: true },
+        emailVerification: {
+          sendOnSignUp: true,
+          sendOnSignIn: true,
+          autoSignInAfterVerification: true,
+          expiresIn: 24 * 3600,
+          sendVerificationEmail: async ({ user, url }) => {
+            const sent = await sendVerificationEmail(email, { to: user.email, link: url }, (err) =>
+              logger.warn({ err, userId: user.id }, 'verification email failed'),
+            );
+            // Without email the link is in the log, for the operator and for development.
+            if (!sent) logger.info({ userId: user.id, url }, 'email verification link');
+          },
+        },
         databaseHooks: {
           user: {
             create: {
-              before: async (user) => {
+              before: async (user, ctx) => {
                 if (config.signupMode === 'open') return;
                 const [users] = await db.select({ n: count() }).from(schema.users);
                 if (!users?.n) return;
-                const [invited] = await db
-                  .select({ id: schema.invites.id })
-                  .from(schema.invites)
-                  .where(
-                    and(
-                      eq(schema.invites.email, user.email.toLowerCase()),
-                      eq(schema.invites.status, 'pending'),
-                      gt(schema.invites.expiresAt, new Date()),
-                    ),
-                  )
-                  .limit(1);
-                if (!invited) {
-                  throw new APIError('FORBIDDEN', {
+                const invite = (ctx?.body as { invite?: unknown } | undefined)?.invite;
+                if (!(await invitationProof(db, user.email, invite))) {
+                  // Not FORBIDDEN: better-auth answers that with a fake success, to hide
+                  // which addresses have accounts, and nothing would be sent.
+                  throw new APIError('BAD_REQUEST', {
                     code: 'INVITE_REQUIRED',
-                    message: 'Signing up here needs an invite',
+                    message: 'Signing up here needs the link from your invite',
                   });
                 }
               },
