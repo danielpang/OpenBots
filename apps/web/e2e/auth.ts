@@ -10,7 +10,8 @@ export const PASSWORD = 'correct horse battery';
  * steps are skipped.
  *
  * The managed service (its server from ee/server, as CI runs it) has no
- * wizard: the account confirms its email with a code (see `verificationCode`), then
+ * wizard: the email comes first, confirmed with a code (see `verificationCode`),
+ * then the name and password; then the account
  * creates its organization, named `organization` or after the person, and
  * owns it. `signUpAt` does the same from an invite link instead.
  */
@@ -42,21 +43,22 @@ export async function signUp(
 }
 
 /**
- * Signs up at `path` (/sign-up, or an invite link), entering the emailed
- * code when the server asks for one, and returns once the page has moved on.
+ * Signs up at `path` (/sign-up, or an invite link) in the managed service's
+ * three steps: the email, the code the server logged, then the name and
+ * password. Returns once the page has moved on.
  */
 export async function signUpAt(page: Page, path: string, name: string, email: string) {
   const seen = logLines().length;
   await page.goto(path);
-  await fillAccount(page, name, email);
-  await submit(page, 'Sign up', '/api/auth/sign-up/email');
-  const checkEmail = page.getByRole('heading', { name: 'Check your email' });
-  await expect(checkEmail.or(page.getByRole('button', { name: /New|Join|Create/ }))).toBeVisible();
-  if (await checkEmail.isVisible()) {
-    await page.getByLabel('Code').fill(await verificationCode(email, seen));
-    await submit(page, 'Confirm', '/api/auth/email-otp/verify-email');
-    await expect(checkEmail).toBeHidden();
-  }
+  await page.getByLabel('Email').fill(email);
+  await submit(page, 'Send code', '/api/auth/sign-up/start');
+  await expect(page.getByRole('heading', { name: 'Enter the code' })).toBeVisible();
+  await page.getByLabel('Code').fill(await verificationCode(email, seen));
+  await submit(page, 'Confirm', '/api/auth/sign-up/verify');
+  await page.getByLabel('Your name').fill(name);
+  await page.getByLabel('Password').fill(PASSWORD);
+  await submit(page, 'Create account', '/api/auth/sign-up/complete');
+  await expect(page.getByRole('heading', { name: 'Finish signing up' })).toBeHidden();
 }
 
 /** The server's log (E2E_SERVER_LOG), one JSON line each, or none. */

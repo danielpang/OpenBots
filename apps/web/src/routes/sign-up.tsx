@@ -1,14 +1,12 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
-import { auth, meQuery } from '../app/api.js';
+import { meQuery } from '../app/api.js';
 import { loadAuthMode, loadDeployment } from '../app/deployment.js';
-import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
-import { CheckEmail } from '../features/auth/check-email.js';
+import { EmailSignUp } from '../features/auth/email-sign-up.js';
 import { LocalOnly } from '../features/auth/local-only.js';
-import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
-import { afterAuth, afterAuthUrl, signedIn } from '../features/auth/after-auth.js';
+import { afterAuth, signedIn } from '../features/auth/after-auth.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 
 // An invite link is /sign-up?invite=<id>. Signing up is for the managed
@@ -16,9 +14,9 @@ import { setupQuery, setupRequired } from '../features/setup/api.js';
 // so this page sends visitors to sign in, which says why. Someone who
 // arrives with an invite goes on to /onboarding with it once they have an
 // account, where the managed build accepts it (plan 21.5); without one, a
-// new account goes there to create its organization. The managed service
-// confirms the email first with a code (plan 21.6), and the invite waits
-// through that step.
+// new account goes there to create its organization. The email comes
+// first, confirmed with a code, then the name and password (plan 21.6); the
+// invite goes with every step.
 
 export const Route = createFileRoute('/sign-up')({
   validateSearch: (search): { invite?: string; error?: string } => ({
@@ -59,59 +57,32 @@ function SignUp() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [oauthError, setOAuthError] = useState<unknown>(callbackError);
+
   async function enter() {
     queryClient.removeQueries({ queryKey: ['me'] });
     await navigate(afterAuth(invite));
   }
-  const signUp = useMutation({
-    mutationFn: auth.signUpEmail,
-    // No session yet: the server emailed a code to confirm the address first.
-    onSuccess: async ({ token }) => (token === null ? undefined : enter()),
-  });
-  const error = signUp.error ?? oauthError;
-
-  if (signUp.data?.token === null && signUp.variables) {
-    return <CheckEmail email={signUp.variables.email} onConfirmed={enter} />;
-  }
 
   return (
-    <AuthCard title="Create your account">
-      <AuthForm
-        submitLabel="Sign up"
-        pending={signUp.isPending}
-        error={error ? authErrorMessage(error) : null}
-        onSubmit={(form) =>
-          signUp.mutate({
-            name: String(form.get('name')),
-            email: String(form.get('email')),
-            password: String(form.get('password')),
-            ...(invite ? { invite } : {}),
-            callbackURL: afterAuthUrl(invite),
-          })
-        }
-      >
-        <Field label="Name" name="name" autoComplete="name" required />
-        <Field label="Email" name="email" type="email" autoComplete="email" required />
-        <Field
-          label="Password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          minLength={8}
-          required
-        />
-      </AuthForm>
-      <OAuthButtons invite={invite} onError={setOAuthError} />
-      <p className="text-center text-sm text-muted-foreground">
-        Have an account?{' '}
-        <Link
-          to="/sign-in"
-          search={invite ? { invite } : {}}
-          className="text-foreground underline underline-offset-4"
-        >
-          Sign in
-        </Link>
-      </p>
-    </AuthCard>
+    <EmailSignUp
+      invite={invite}
+      error={oauthError}
+      onSignedIn={enter}
+      footer={
+        <>
+          <OAuthButtons invite={invite} onError={setOAuthError} />
+          <p className="text-center text-sm text-muted-foreground">
+            Have an account?{' '}
+            <Link
+              to="/sign-in"
+              search={invite ? { invite } : {}}
+              className="text-foreground underline underline-offset-4"
+            >
+              Sign in
+            </Link>
+          </p>
+        </>
+      }
+    />
   );
 }

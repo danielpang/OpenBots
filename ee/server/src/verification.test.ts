@@ -1,23 +1,30 @@
+import { randomUUID } from 'node:crypto';
 import { eq, like } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '@openbot/server/db/client';
-import { ORIGIN, createTestApp, type TestApp } from '@openbot/server/test-app';
+import { createTestApp, type TestApp } from '@openbot/server/test-app';
 import { emailFromEnv, managedExtensions } from './index.js';
 import { readInviteCookie, signInviteCookie } from './plugin.js';
+import { SENDS_PER_HOUR, TRIES_PER_HOUR } from './sign-up.js';
+import {
+  PASSWORD,
+  completeSignUp,
+  createAccount,
+  emailTo,
+  mailbox,
+  post,
+  sessionOf,
+  signIn,
+  signUpByEmail,
+  startSignUp,
+  verifyCode,
+} from './testing.js';
 
-// Sign-up on the managed service (plan 21.6): a 6-digit code confirms the
-// email before the account can do anything; an unconfirmed sign-up holds
-// nothing; codes stay out of logs; and a GitHub sign-up from an invite link
-// carries the invite in a signed cookie.
-
-const PASSWORD = 'correct horse battery';
-
-function cookieOf(res: Response) {
-  return res.headers
-    .getSetCookie()
-    .map((c) => c.split(';')[0]!)
-    .find((c) => c.includes('session_token='));
-}
+// Email sign-up on the managed service (plan 21.6, sign-up.ts): the email
+// first, confirmed with a code bound to its request, then the name and
+// password. Nothing an unauthenticated request does deletes or replaces an
+// account; limits come before work; codes stay out of logs. And a GitHub
+// sign-up from an invite link carries the invite in a signed cookie.
 
 function managedApp(email = {}, env: Record<string, string> = {}) {
   return createTestApp(
@@ -26,169 +33,218 @@ function managedApp(email = {}, env: Record<string, string> = {}) {
   );
 }
 
-/** A fake Resend that keeps each message. */
-function mailbox() {
-  const sent: { to: string; subject: string; text: string }[] = [];
-  const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
-    const body = JSON.parse(init!.body as string) as {
-      to: string[];
-      subject: string;
-      text: string;
-    };
-    sent.push({ to: body.to[0]!, subject: body.subject, text: body.text });
-    return Response.json({ id: 'email' });
-  });
-  return {
-    fetch,
-    sent,
-    /** The newest code sent to `to`. */
-    code(to: string) {
-      return sent
-        .filter((m) => m.to === to)
-        .at(-1)
-        ?.text.match(/\b(\d{6})\b/)?.[1];
-    },
-  };
-}
+const userRows = (t: TestApp, email: string) =>
+  t.deps.db.select().from(schema.users).where(eq(schema.users.email, email));
 
-const post = (t: TestApp, path: string, body: unknown, headers: Record<string, string> = {}) =>
-  t.app.request(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin: ORIGIN, ...headers },
-    body: JSON.stringify(body),
-  });
+const pendingRows = (t: TestApp) =>
+  t.deps.db
+    .select()
+    .from(schema.verifications)
+    .where(like(schema.verifications.identifier, 'sign-up:%'));
 
-const verify = (t: TestApp, email: string, otp: string) =>
-  post(t, '/api/auth/email-otp/verify-email', { email, otp });
+const wrong = (code: string) => (code === '000000' ? '111111' : '000000');
 
-const signIn = (t: TestApp, email: string, password = PASSWORD) =>
-  post(t, '/api/auth/sign-in/email', { email, password });
-
-describe('sign-up codes', () => {
+describe('email sign-up', () => {
   let t: TestApp;
   const mail = mailbox();
-  const email = { apiKey: 're_test', from: 'OpenBots <hi@example.com>', fetch: mail.fetch };
 
   beforeAll(async () => {
-    t = await managedApp(email);
+    t = await managedApp(emailTo(mail));
   });
   afterAll(() => t.close());
 
-  it('confirms an account with the 6-digit code it was sent, and signs it in', async () => {
-    const { res, cookie } = await t.signUp('vera@example.com');
-    expect(res.status).toBe(200);
-    expect(cookie).toBeUndefined();
+  it('takes the email, then the code, then the name and password', async () => {
+    const start = await startSignUp(t, 'vera@example.com');
+    expect(start.res.status).toBe(200);
+    expect(start.request).toBeDefined();
+    const header = start.res.headers.getSetCookie().find((c) => c.startsWith('openbot_sign_up='))!;
+    expect(header).toMatch(/HttpOnly/i);
+    expect(header).toMatch(/SameSite=Lax/i);
+    // No account and no password yet.
+    expect(await userRows(t, 'vera@example.com')).toEqual([]);
     const code = mail.code('vera@example.com')!;
     expect(code).toMatch(/^\d{6}$/);
     expect(mail.sent.at(-1)!.subject).toBe(`${code} is your OpenBots code`);
     expect(mail.sent.at(-1)!.text).not.toMatch(/https?:\/\//);
-    // Unusable until then; signing in sends a new code.
-    const sentBefore = mail.sent.length;
-    const early = await signIn(t, 'vera@example.com');
-    expect(early.status).toBe(403);
-    expect(await early.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
-    expect(mail.sent.length).toBe(sentBefore + 1);
+    // The code is stored as an HMAC, not as itself.
+    expect(JSON.stringify(await pendingRows(t))).not.toContain(code);
 
-    const confirmed = await verify(t, 'vera@example.com', mail.code('vera@example.com')!);
-    expect(confirmed.status).toBe(200);
-    const session = cookieOf(confirmed)!;
-    const me = await t.app.request('/api/v1/me', { headers: { cookie: session } });
-    expect(await me.json()).toMatchObject({ user: { emailVerified: true }, workspace: null });
+    // Credentials before the code are refused.
+    const early = await completeSignUp(t, start.request);
+    expect(early.status).toBe(400);
+    expect(await early.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
+
+    expect((await verifyCode(t, start.request, code)).status).toBe(200);
+    const done = await completeSignUp(t, start.request, { name: 'Vera' });
+    expect(done.status).toBe(200);
+    const me = await t.app.request('/api/v1/me', { headers: { cookie: sessionOf(done)! } });
+    expect(await me.json()).toMatchObject({
+      user: { name: 'Vera', emailVerified: true },
+      workspace: null,
+    });
+    expect((await signIn(t, 'vera@example.com')).status).toBe(200);
+    // Once: the request is spent.
+    expect((await completeSignUp(t, start.request)).status).toBe(400);
+    expect((await verifyCode(t, start.request, code)).status).toBe(400);
   });
 
-  it('refuses a wrong code, and after 5 tries needs a new one', async () => {
-    await t.signUp('wes@example.com');
-    const code = mail.code('wes@example.com')!;
-    const wrong = code === '000000' ? '111111' : '000000';
-    const first = await verify(t, 'wes@example.com', wrong);
-    expect(first.status).toBe(400);
-    expect(await first.json()).toMatchObject({ code: 'INVALID_OTP' });
-    for (let i = 0; i < 4; i++) await verify(t, 'wes@example.com', wrong);
-    // The right code no longer works: five tries are spent.
-    const late = await verify(t, 'wes@example.com', code);
-    expect(late.status).toBe(403);
-    expect(await late.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
-    // "Send a new code"
-    const again = await post(t, '/api/auth/email-otp/send-verification-otp', {
-      email: 'wes@example.com',
-      type: 'email-verification',
+  it('lets no second sign-up set a credential the inbox owner then confirms', async () => {
+    const victim = await startSignUp(t, 'pat@example.com');
+    const victimCode = mail.code('pat@example.com')!;
+    const attacker = await startSignUp(t, 'pat@example.com');
+    expect(attacker.res.status).toBe(200);
+    const attackerCode = mail.code('pat@example.com')!;
+    expect(await userRows(t, 'pat@example.com')).toEqual([]);
+    // The newest email is the attacker's request: its code does not complete the victim's.
+    if (attackerCode !== victimCode) {
+      const crossed = await verifyCode(t, victim.request, attackerCode);
+      expect(crossed.status).toBe(400);
+      expect(await crossed.json()).toMatchObject({ code: 'INVALID_OTP' });
+    }
+    // Nor can the attacker finish theirs without the code from the inbox.
+    expect((await completeSignUp(t, attacker.request, { password: 'attacker pass' })).status).toBe(
+      400,
+    );
+    expect((await verifyCode(t, victim.request, victimCode)).status).toBe(200);
+    const done = await completeSignUp(t, victim.request, { name: 'Pat' });
+    expect(done.status).toBe(200);
+    expect((await signIn(t, 'pat@example.com', 'attacker pass')).status).toBe(401);
+    expect((await signIn(t, 'pat@example.com')).status).toBe(200);
+  });
+
+  it('deletes and replaces nothing for an unauthenticated request', async () => {
+    // An unconfirmed account from before this flow, and a confirmed one.
+    await createAccount(t, 'old@example.com', { password: 'old password' });
+    await signUpByEmail(t, mail, 'kept@example.com', { name: 'Kept' });
+    const before = [
+      ...(await userRows(t, 'old@example.com')),
+      ...(await userRows(t, 'kept@example.com')),
+    ];
+    const credentials = await t.deps.db.select().from(schema.accounts);
+    for (const address of ['old@example.com', 'kept@example.com']) {
+      expect((await startSignUp(t, address)).res.status).toBe(200);
+    }
+    const after = [
+      ...(await userRows(t, 'old@example.com')),
+      ...(await userRows(t, 'kept@example.com')),
+    ];
+    expect(after).toEqual(before);
+    expect(await t.deps.db.select().from(schema.accounts)).toEqual(credentials);
+  });
+
+  it('lets whoever holds the inbox take over an unconfirmed account, ending its sessions', async () => {
+    await createAccount(t, 'legacy@example.com', { name: 'Squatter', password: 'squatter pass' });
+    const [user] = await userRows(t, 'legacy@example.com');
+    await t.deps.db.insert(schema.sessions).values({
+      userId: user!.id,
+      token: randomUUID(),
+      expiresAt: new Date(Date.now() + 86_400_000),
     });
-    expect(again.status).toBe(200);
-    const fresh = mail.code('wes@example.com')!;
-    expect((await verify(t, 'wes@example.com', fresh)).status).toBe(200);
+    // Unusable until confirmed.
+    const early = await signIn(t, 'legacy@example.com', 'squatter pass');
+    expect(early.status).toBe(403);
+    expect(await early.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
+
+    const done = await signUpByEmail(t, mail, 'legacy@example.com', { name: 'Lee' });
+    expect(done.res.status).toBe(200);
+    const [now] = await userRows(t, 'legacy@example.com');
+    expect(now).toMatchObject({ id: user!.id, name: 'Lee', emailVerified: true });
+    const sessions = await t.deps.db
+      .select()
+      .from(schema.sessions)
+      .where(eq(schema.sessions.userId, user!.id));
+    expect(sessions).toHaveLength(1); // the new one only
+    expect((await signIn(t, 'legacy@example.com', 'squatter pass')).status).toBe(401);
+    expect((await signIn(t, 'legacy@example.com')).status).toBe(200);
+  });
+
+  it('tells an existing account by email, and answers the same', async () => {
+    const fresh = await startSignUp(t, 'nobody@example.com');
+    const taken = await startSignUp(t, 'vera@example.com');
+    expect(taken.res.status).toBe(fresh.res.status);
+    expect(await taken.res.json()).toEqual(await fresh.res.json());
+    expect(taken.request).toBeDefined();
+    const notice = mail.sent.at(-1)!;
+    expect(notice).toMatchObject({
+      to: 'vera@example.com',
+      subject: 'Someone tried to sign up with your email',
+    });
+    expect(notice.text).not.toMatch(/\d{6}/);
+    // No code completes it.
+    const res = await verifyCode(t, taken.request, '123456');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'INVALID_OTP' });
   });
 
   it('expires a code after 10 minutes', async () => {
-    await t.signUp('exp@example.com');
+    const start = await startSignUp(t, 'exp@example.com');
     await t.deps.db
       .update(schema.verifications)
       .set({ expiresAt: new Date(Date.now() - 1000) })
-      .where(like(schema.verifications.identifier, '%exp@example.com'));
-    const res = await verify(t, 'exp@example.com', mail.code('exp@example.com')!);
+      .where(like(schema.verifications.identifier, 'sign-up:%'));
+    const res = await verifyCode(t, start.request, mail.code('exp@example.com')!);
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ code: 'OTP_EXPIRED' });
   });
 
-  it('lets a new sign-up replace an unconfirmed one, name, password and code', async () => {
-    await t.signUp('rae@example.com', { name: 'Squatter', password: 'squatter password' });
-    const old = mail.code('rae@example.com')!;
-    await t.signUp('rae@example.com', { name: 'Rae', password: PASSWORD });
-    const users = await t.deps.db
-      .select()
-      .from(schema.users)
-      .where(eq(schema.users.email, 'rae@example.com'));
-    expect(users.map((u) => u.name)).toEqual(['Rae']);
-    const fresh = mail.code('rae@example.com')!;
-    if (fresh !== old) expect((await verify(t, 'rae@example.com', old)).status).toBe(400);
-    expect((await verify(t, 'rae@example.com', fresh)).status).toBe(200);
-    expect((await signIn(t, 'rae@example.com', 'squatter password')).status).toBe(401);
-    expect((await signIn(t, 'rae@example.com')).status).toBe(200);
+  it('checks the send limit before making or sending anything', async () => {
+    for (let i = 0; i < SENDS_PER_HOUR; i++) {
+      expect((await startSignUp(t, 'busy@example.com')).res.status).toBe(200);
+    }
+    const rows = (await pendingRows(t)).length;
+    const sent = mail.sent.length;
+    const over = await startSignUp(t, 'busy@example.com');
+    expect(over.res.status).toBe(429);
+    expect(await over.res.json()).toMatchObject({ code: 'TOO_MANY_CODES' });
+    expect(Number(over.res.headers.get('x-retry-after'))).toBeGreaterThan(0);
+    expect((await pendingRows(t)).length).toBe(rows);
+    expect(mail.sent.length).toBe(sent);
   });
 
-  it('never replaces a confirmed account', async () => {
-    const before = mail.sent.length;
-    const { res } = await t.signUp('rae@example.com', {
-      name: 'Thief',
-      password: 'thief password',
-    });
-    // The same answer as for a new address, which tells nothing.
-    expect(res.status).toBe(200);
-    const [user] = await t.deps.db
-      .select()
-      .from(schema.users)
-      .where(eq(schema.users.email, 'rae@example.com'));
-    expect(user).toMatchObject({ name: 'Rae', emailVerified: true });
-    expect((await signIn(t, 'rae@example.com', 'thief password')).status).toBe(401);
-    expect(mail.sent.slice(before).some((m) => m.to === 'rae@example.com')).toBe(false);
+  it('counts code attempts per address, across new codes', async () => {
+    let start = await startSignUp(t, 'guess@example.com');
+    for (let i = 0; i < TRIES_PER_HOUR; i++) {
+      if (i === TRIES_PER_HOUR / 2) start = await startSignUp(t, 'guess@example.com');
+      const code = mail.code('guess@example.com')!;
+      expect((await verifyCode(t, start.request, wrong(code))).status).toBe(400);
+    }
+    // A new code, and the right one: still refused until the window passes.
+    const last = await startSignUp(t, 'guess@example.com');
+    const res = await verifyCode(t, last.request, mail.code('guess@example.com')!);
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
   });
 
-  it('serves no sign-in, reset or email change by code', async () => {
+  it('needs the request a code was sent for', async () => {
+    await startSignUp(t, 'bound@example.com');
+    const res = await verifyCode(t, undefined, mail.code('bound@example.com')!);
+    expect(res.status).toBe(400);
+    const forged = await verifyCode(t, 'openbot_sign_up=forged', mail.code('bound@example.com')!);
+    expect(forged.status).toBe(400);
+  });
+
+  it("serves none of better-auth's own email sign-up or verification links", async () => {
     for (const [path, body] of [
-      ['/api/auth/sign-in/email-otp', { email: 'vera@example.com', otp: '123456' }],
-      [
-        '/api/auth/email-otp/check-verification-otp',
-        { email: 'vera@example.com', otp: '1', type: 'sign-in' },
-      ],
-      ['/api/auth/forget-password/email-otp', { email: 'vera@example.com' }],
-      ['/api/auth/email-otp/send-verification-otp', { email: 'vera@example.com', type: 'sign-in' }],
+      ['/api/auth/sign-up/email', { name: 'X', email: 'x@example.com', password: PASSWORD }],
+      ['/api/auth/send-verification-email', { email: 'x@example.com' }],
     ] as const) {
       expect((await post(t, path, body)).status, path).toBe(404);
     }
+    const link = await t.app.request('/api/auth/verify-email?token=x');
+    expect(link.status).toBe(404);
+    expect(await userRows(t, 'x@example.com')).toEqual([]);
   });
 });
 
 describe('sign-up codes in the logs', () => {
   it('logs a code only on a development server that asked for it', async () => {
-    for (const [logLinks, expected] of [
-      [false, false],
-      [true, true],
-    ] as const) {
+    for (const logLinks of [false, true]) {
       const app = await managedApp(logLinks ? { logLinks } : {});
       try {
         const info = vi.spyOn(app.deps.logger, 'info');
-        await app.signUp('quiet@example.com');
+        await startSignUp(app, 'quiet@example.com');
         const logged = info.mock.calls.find(([, message]) => message === 'email verification code');
-        expect(Boolean(logged), String(logLinks)).toBe(expected);
+        expect(Boolean(logged), String(logLinks)).toBe(logLinks);
         if (logged) expect((logged[0] as { code: string }).code).toMatch(/^\d{6}$/);
       } finally {
         await app.close();
@@ -217,19 +273,18 @@ describe('sign-up codes in the logs', () => {
       }) as never);
     }
     try {
-      await app.signUp('lost@example.com');
+      await startSignUp(app, 'lost@example.com');
       const code = sentBodies.join('').match(/\b(\d{6})\b/)?.[1];
       expect(code).toBeDefined();
+      await createAccount(app, 'owner@example.com');
       await app.deps.db
         .update(schema.users)
         .set({ emailVerified: true })
-        .where(eq(schema.users.email, 'lost@example.com'));
-      const session = cookieOf(await signIn(app, 'lost@example.com'))!;
-      const call = (path: string, body: unknown) =>
-        post(app, `/api/v1${path}`, body, { cookie: session });
-      await call('/organizations', { name: 'Quiet Co' });
+        .where(eq(schema.users.email, 'owner@example.com'));
+      const session = sessionOf(await signIn(app, 'owner@example.com'))!;
+      await post(app, '/api/v1/organizations', { name: 'Quiet Co' }, session);
       const invite = (await (
-        await call('/organization/invitations', { email: 'guest@example.com' })
+        await post(app, '/api/v1/organization/invitations', { email: 'guest@example.com' }, session)
       ).json()) as { id: string; emailed: boolean };
       expect(invite.emailed).toBe(false);
       await app.app.request(`/api/v1/invitations/${invite.id}`, { headers: { cookie: session } });
@@ -285,14 +340,14 @@ describe('a GitHub sign-up from an invite link', () => {
       }
       return realFetch(input, init);
     });
-    await t.signUp('owner@example.com');
+    await createAccount(t, 'owner@example.com');
     await t.deps.db
       .update(schema.users)
       .set({ emailVerified: true })
       .where(eq(schema.users.email, 'owner@example.com'));
-    ownerCookie = cookieOf(await signIn(t, 'owner@example.com'))!;
+    ownerCookie = sessionOf(await signIn(t, 'owner@example.com'))!;
     const org = (await (
-      await post(t, '/api/v1/organizations', { name: 'Invited Co' }, { cookie: ownerCookie })
+      await post(t, '/api/v1/organizations', { name: 'Invited Co' }, ownerCookie)
     ).json()) as { id: string };
     workspaceId = org.id;
   });
@@ -321,7 +376,7 @@ describe('a GitHub sign-up from an invite link', () => {
   const invite = async (email: string) =>
     (
       (await (
-        await post(t, '/api/v1/organization/invitations', { email }, { cookie: ownerCookie })
+        await post(t, '/api/v1/organization/invitations', { email }, ownerCookie)
       ).json()) as { id: string }
     ).id;
 
@@ -356,7 +411,7 @@ describe('a GitHub sign-up from an invite link', () => {
     const [row] = await t.deps.db.select().from(schema.invites).where(eq(schema.invites.id, id));
     expect(row!.status).toBe('accepted');
     // The session works there now.
-    const me = await t.app.request('/api/v1/me', { headers: { cookie: cookieOf(done)! } });
+    const me = await t.app.request('/api/v1/me', { headers: { cookie: sessionOf(done)! } });
     expect(await me.json()).toMatchObject({ workspace: { id: workspaceId } });
     // The cookie is cleared.
     expect(

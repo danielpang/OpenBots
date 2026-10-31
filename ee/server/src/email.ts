@@ -81,6 +81,24 @@ export function sendVerificationCode(
   return send(options, to, verificationMessage(code), log);
 }
 
+/** To an address that has an account, when someone starts a sign-up with it. */
+export function signUpNoticeMessage() {
+  const subject = 'Someone tried to sign up with your email';
+  const intro =
+    'Someone tried to create an OpenBots account with this email. It already has an account, so nothing changed.';
+  const next = 'If this was you, sign in instead. If not, you can ignore this email.';
+  return { subject, text: `${intro}\n\n${next}\n`, html: `<p>${intro}</p><p>${next}</p>` };
+}
+
+/** Sends the notice; true when Resend took it. Never throws. */
+export function sendSignUpNotice(
+  options: EmailOptions,
+  { to }: { to: string },
+  log: (error: unknown) => void = () => {},
+): Promise<boolean> {
+  return send(options, to, signUpNoticeMessage(), log);
+}
+
 async function send(
   options: EmailOptions,
   to: string,

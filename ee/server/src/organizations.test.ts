@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '@openbot/server/db/client';
 import { ORIGIN, createTestApp, type TestApp } from '@openbot/server/test-app';
 import { managedExtensions } from './index.js';
+import { createAccount, emailTo, mailbox, signUpByEmail, startSignUp } from './testing.js';
 
 // The managed service's organizations end to end (plan 21.6): onboarding,
 // invitations with and without email, roles and the owner rules,
@@ -37,11 +38,11 @@ async function signIn(t: TestApp, email: string) {
 }
 
 /**
- * Signs up, as someone who then opens the verification link: their email is
- * verified and they sign in. Returns the sign-up response and the session.
+ * Makes an account (sign-up.ts has its own tests), confirms its email and
+ * signs in. Returns the sign-up response and the session.
  */
 async function join(t: TestApp, email: string, extra: Record<string, unknown> = {}) {
-  const { res } = await t.signUp(email, extra);
+  const res = await createAccount(t, email, extra);
   if (!res.ok) return { res, cookie: undefined };
   await t.deps.db
     .update(schema.users)
@@ -424,10 +425,11 @@ describe('organizations on the managed service', () => {
 
 describe('sign-up by invitation only', () => {
   let t: TestApp;
+  const mail = mailbox();
   beforeAll(async () => {
     t = await createTestApp(
       { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'invite' },
-      { extensions: managedExtensions() },
+      { extensions: managedExtensions({ email: emailTo(mail) }) },
     );
   });
   afterAll(() => t.close());
@@ -435,7 +437,7 @@ describe('sign-up by invitation only', () => {
   it('lets the first user in, then only addresses with a pending invitation', async () => {
     const first = await join(t, 'first@example.com');
     expect(first.res.status).toBe(200);
-    const stranger = await t.signUp('stranger@example.com');
+    const stranger = await startSignUp(t, 'stranger@example.com');
     expect(stranger.res.status).toBe(400);
     expect(await stranger.res.json()).toMatchObject({ code: 'INVITE_REQUIRED' });
     const post = (path: string, body: unknown) =>
@@ -449,25 +451,27 @@ describe('sign-up by invitation only', () => {
       await post('/organization/invitations', { email: 'friend@example.com' })
     ).json()) as { id: string };
     // Knowing the invited address is not enough: the link's invite must come too.
-    const without = await t.signUp('friend@example.com');
+    const without = await startSignUp(t, 'friend@example.com');
     expect(without.res.status).toBe(400);
     expect(await without.res.json()).toMatchObject({ code: 'INVITE_REQUIRED' });
     const other = (await (
       await post('/organization/invitations', { email: 'other@example.com' })
     ).json()) as { id: string };
-    expect((await t.signUp('friend@example.com', { invite: other.id })).res.status).toBe(400);
-    expect((await t.signUp('friend@example.com', { invite: 'not-an-id' })).res.status).toBe(400);
+    expect((await startSignUp(t, 'friend@example.com', other.id)).res.status).toBe(400);
+    expect((await startSignUp(t, 'friend@example.com', 'not-an-id')).res.status).toBe(400);
+    // A server call is held to the same policy.
+    expect((await createAccount(t, 'friend@example.com', { invite: other.id })).status).toBe(400);
     // An expired one proves nothing.
     await t.deps.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(eq(schema.invites.id, invited.id));
-    expect((await t.signUp('friend@example.com', { invite: invited.id })).res.status).toBe(400);
+    expect((await startSignUp(t, 'friend@example.com', invited.id)).res.status).toBe(400);
     await t.deps.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() + 86_400_000) })
       .where(eq(schema.invites.id, invited.id));
-    const friend = await join(t, 'friend@example.com', { invite: invited.id });
+    const friend = await signUpByEmail(t, mail, 'friend@example.com', { invite: invited.id });
     expect(friend.res.status).toBe(200);
     // Accepted once: it joins them, and the link proves nothing afterwards.
     const accept = await t.app.request(`/api/v1/invitations/${invited.id}/accept`, {

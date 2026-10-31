@@ -25,9 +25,9 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
 
   return {
     /**
-     * `token` is null when the server wants the email confirmed first: a
-     * 6-digit code went to the address, for `verifyEmail`. `invite` is the
-     * invitation the sign-up came from.
+     * better-auth's own sign-up. `token` is null when the server wants the
+     * email confirmed first. The managed service signs up with the three
+     * steps below instead.
      */
     signUpEmail: (input: {
       name: string;
@@ -38,15 +38,18 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
     }) => post<{ token: string | null }>('/sign-up/email', input),
     signInEmail: (input: { email: string; password: string; callbackURL?: string }) =>
       post<unknown>('/sign-in/email', input),
-    /** Confirms the address with the code it was sent, and signs in. */
-    verifyEmail: (input: { email: string; code: string }) =>
-      post<unknown>('/email-otp/verify-email', { email: input.email, otp: input.code }),
-    /** Sends a new code to an address that is not confirmed yet. */
-    sendVerificationCode: (input: { email: string }) =>
-      post<unknown>('/email-otp/send-verification-otp', {
-        email: input.email,
-        type: 'email-verification',
-      }),
+    /**
+     * Managed sign-up, step 1: emails a 6-digit code to the address, for a
+     * request kept in an HttpOnly cookie. Again for a new code. `invite` is
+     * the invitation the sign-up came from.
+     */
+    startSignUp: (input: { email: string; invite?: string }) =>
+      post<unknown>('/sign-up/start', input),
+    /** Step 2: the code of this request. */
+    confirmSignUp: (input: { code: string }) => post<unknown>('/sign-up/verify', input),
+    /** Step 3: creates the account, confirmed, and signs in. */
+    completeSignUp: (input: { name: string; password: string }) =>
+      post<unknown>('/sign-up/complete', input),
     /** Returns the provider's authorization URL to navigate to. */
     signInSocial: async (input: {
       provider: SocialProvider;

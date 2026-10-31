@@ -1,11 +1,9 @@
-import { ApiError } from '@openbot/api-client';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { auth, meQuery } from '../app/api.js';
 import { loadAuthMode, loadDeployment } from '../app/deployment.js';
 import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
-import { CheckEmail } from '../features/auth/check-email.js';
 import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
@@ -14,9 +12,7 @@ import { setupQuery, setupRequired } from '../features/setup/api.js';
 
 // A self-hosted install has one account, so there is no Sign up link;
 // `?signup=closed` (from /sign-up) says why. An invite (`?invite=<id>`)
-// goes on to /onboarding once signed in (plan 21.5). An account whose email
-// is not confirmed yet gets a new code by signing in, and enters it here
-// (plan 21.6).
+// goes on to /onboarding once signed in (plan 21.5).
 
 export const Route = createFileRoute('/sign-in')({
   validateSearch: (search): { error?: string; signup?: 'closed'; invite?: string } => ({
@@ -62,12 +58,6 @@ function SignIn() {
   }
   const signIn = useMutation({ mutationFn: auth.signInEmail, onSuccess: enter });
   const error = signIn.error ?? oauthError;
-
-  const unconfirmed =
-    signIn.error instanceof ApiError && signIn.error.code === 'EMAIL_NOT_VERIFIED';
-  if (unconfirmed && signIn.variables) {
-    return <CheckEmail email={signIn.variables.email} onConfirmed={enter} />;
-  }
 
   return (
     <AuthCard title="Sign in">

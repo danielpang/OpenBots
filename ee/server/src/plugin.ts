@@ -1,16 +1,16 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import type { BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthMiddleware } from 'better-auth/api';
-import { emailOTP } from 'better-auth/plugins/email-otp';
 import { organization } from 'better-auth/plugins/organization';
-import { and, count, desc, eq, gt, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { ExtensionContext } from '@openbot/server';
 import type { Config } from '@openbot/server/config';
-import { schema, type Db } from '@openbot/server/db/client';
+import { schema } from '@openbot/server/db/client';
 import { parseMasterKey } from '@openbot/server/secrets';
 import { recordAudit } from '@openbot/server/services/audit';
 import { ac, roles } from './access.js';
-import { emailEnabled, errorText, sendVerificationCode, type EmailOptions } from './email.js';
+import { invitationProof, UUID } from './invitations.js';
+import { signUpAllowed, inviteRequired } from './sign-up.js';
 
 // better-auth on the managed service (plan 21.5): the organization plugin,
 // mapped onto the core's tables, and the policy the core leaves to this
@@ -33,15 +33,10 @@ import { emailEnabled, errorText, sendVerificationCode, type EmailOptions } from
 // against the provider's verified address. Knowing an invited address is
 // not enough.
 //
-// Every account confirms its email with a 6-digit code before it can sign
-// in (better-auth's email OTP plugin in place of verification links): 10
-// minutes, 5 tries, then a new code; codes stored encrypted and compared in
-// constant time; sends rate limited per address. An unconfirmed sign-up
-// holds nothing: signing up again with the address replaces it (name and
-// password) and sends a new code. A confirmed account is never replaced.
-// Codes reach a log only on a development server that sends no email and
-// sets OPENBOT_DEV_LOG_EMAIL_LINKS (refused in production). The core also
-// refuses an unconfirmed account's requests (`requireVerifiedEmail`).
+// Email sign-up is sign-up.ts: the email first, confirmed with a code, then
+// the name and password. better-auth's own /sign-up/email and verification
+// links are not served. The core also refuses an unconfirmed account's
+// requests (`requireVerifiedEmail`).
 //
 // A new session works in the organization its user joined last, among
 // those they are not suspended in, unless it names one already.
@@ -53,12 +48,6 @@ export const ORGANIZATIONS_PER_USER = 10;
 export const PENDING_INVITATIONS = 100;
 /** Members one organization may have. */
 export const MEMBERS_PER_ORGANIZATION = 500;
-/** Email verification codes: their length, life and tries. */
-export const CODE_LENGTH = 6;
-export const CODE_MINUTES = 10;
-export const CODE_TRIES = 5;
-/** Codes one address may be sent in an hour. */
-export const CODES_PER_HOUR = 10;
 /** How long the invite cookie of a GitHub or Google sign-up lasts. */
 export const INVITE_COOKIE_SECONDS = 600;
 export const INVITE_COOKIE = 'openbot_oauth_invite';
@@ -95,67 +84,6 @@ export function organizationPlugin() {
     disableOrganizationDeletion: true,
     schema: pluginSchema,
   });
-}
-
-/** The email OTP plugin as the managed service uses it: sign-up codes only. */
-export function verificationCodePlugin(
-  { logger, infra }: ExtensionContext,
-  email: EmailOptions = {},
-) {
-  return emailOTP({
-    otpLength: CODE_LENGTH,
-    expiresIn: CODE_MINUTES * 60,
-    allowedAttempts: CODE_TRIES,
-    storeOTP: 'encrypted',
-    resendStrategy: 'rotate',
-    overrideDefaultEmailVerification: true,
-    disableSignUp: true,
-    rateLimit: { window: 60, max: 5 },
-    sendVerificationOTP: async ({ email: to, otp, type }) => {
-      if (type !== 'email-verification') return;
-      const allowed = await infra.limiter.consume(`code:${to.toLowerCase()}`, {
-        window: 3600,
-        max: CODES_PER_HOUR,
-      });
-      if (!allowed.allowed) {
-        logger.warn('email verification code not sent: too many for one address');
-        return;
-      }
-      // The code is a credential: it never reaches a log, except on a
-      // development server that sends no email and asked for it.
-      if (!emailEnabled(email)) {
-        if (email.logLinks) logger.info({ email: to, code: otp }, 'email verification code');
-        else logger.warn('email verification code not sent: no email set up');
-        return;
-      }
-      await sendVerificationCode(email, { to, code: otp }, (err) =>
-        logger.warn({ err: errorText(err) }, 'verification email failed'),
-      );
-    },
-  });
-}
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** The invitation a sign-up brings, when it is pending, unexpired and for that address. */
-export async function invitationProof(db: Db, email: string, invite: unknown) {
-  if (typeof invite !== 'string' || !UUID.test(invite)) return null;
-  const [row] = await db
-    .select({
-      id: schema.invites.id,
-      workspaceId: schema.invites.workspaceId,
-      role: schema.invites.role,
-    })
-    .from(schema.invites)
-    .where(
-      and(
-        eq(schema.invites.id, invite),
-        eq(schema.invites.email, email.toLowerCase()),
-        eq(schema.invites.status, 'pending'),
-        gt(schema.invites.expiresAt, new Date()),
-      ),
-    );
-  return row ?? null;
 }
 
 // --- The invite cookie of a GitHub or Google sign-up ---------------------------
@@ -233,15 +161,12 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
     init: () => ({
       options: {
         emailAndPassword: { enabled: true, requireEmailVerification: true },
-        emailVerification: {
-          sendOnSignUp: true,
-          sendOnSignIn: true,
-          autoSignInAfterVerification: true,
-        },
         databaseHooks: {
           user: {
             create: {
               before: async (user, ctx) => {
+                // sign-up.ts checks the policy itself, at both ends of its flow.
+                if (ctx?.path === '/sign-up/complete') return;
                 const invite = inviteOf(config, ctx);
                 // A GitHub or Google address the provider verified, with the
                 // invite from its link, joins on creation (below).
@@ -249,21 +174,9 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
                   const proof = await invitationProof(db, user.email, invite);
                   if (proof) acceptOnCreate.set(ctx, proof);
                 }
-                if (config.signupMode === 'open') return;
-                const [users] = await db.select({ n: count() }).from(schema.users);
-                if (!users?.n) return;
-                const proven =
-                  isOAuthCallback(ctx) && !user.emailVerified
-                    ? null
-                    : await invitationProof(db, user.email, invite);
-                if (!proven) {
-                  // Not FORBIDDEN: better-auth answers that with a fake success, to hide
-                  // which addresses have accounts, and nothing would be sent.
-                  throw new APIError('BAD_REQUEST', {
-                    code: 'INVITE_REQUIRED',
-                    message: 'Signing up here needs the link from your invite',
-                  });
-                }
+                // A provider address nobody verified proves no invite.
+                const proof = isOAuthCallback(ctx) && !user.emailVerified ? null : invite;
+                if (!(await signUpAllowed(config, db, user.email, proof))) throw inviteRequired();
               },
               after: async (user, ctx) => {
                 const proof = ctx ? acceptOnCreate.get(ctx) : undefined;
@@ -330,31 +243,15 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
           }),
         },
         {
-          // The email OTP plugin serves sign-up codes only: no sign-in, password
-          // reset or email change by code.
+          // Email sign-up is sign-up.ts. better-auth's own, which makes the
+          // account before the email is confirmed, and its verification
+          // links are not served.
           matcher: (ctx) =>
-            (ctx.path?.includes('email-otp') ?? false) &&
-            ctx.path !== '/email-otp/verify-email' &&
-            ctx.path !== '/email-otp/send-verification-otp',
+            ['/sign-up/email', '/send-verification-email', '/verify-email'].includes(
+              ctx.path ?? '',
+            ),
           handler: createAuthMiddleware(async (ctx) => {
             if (ctx.request) throw new APIError('NOT_FOUND', { message: 'Not found' });
-          }),
-        },
-        {
-          matcher: (ctx) => ctx.path === '/email-otp/send-verification-otp',
-          handler: createAuthMiddleware(async (ctx) => {
-            if ((ctx.body as { type?: unknown } | undefined)?.type !== 'email-verification') {
-              throw new APIError('NOT_FOUND', { message: 'Not found' });
-            }
-          }),
-        },
-        {
-          // An unconfirmed sign-up holds nothing: signing up again replaces it.
-          matcher: (ctx) => ctx.path === '/sign-up/email',
-          handler: createAuthMiddleware(async (ctx) => {
-            const address = (ctx.body as { email?: unknown } | undefined)?.email;
-            if (typeof address !== 'string') return;
-            await replaceUnconfirmed(db, address);
           }),
         },
       ],
@@ -369,33 +266,4 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
       ],
     },
   };
-}
-
-/**
- * Deletes the account with this address when it was never confirmed: not
- * verified, in no organization and signed in by no provider. A confirmed
- * account, or one from before verification with a membership, stays.
- */
-export async function replaceUnconfirmed(db: Db, address: string): Promise<boolean> {
-  const [user] = await db
-    .select({ id: schema.users.id, verified: schema.users.emailVerified })
-    .from(schema.users)
-    .where(eq(schema.users.email, address.trim().toLowerCase()));
-  if (!user || user.verified) return false;
-  const [member] = await db
-    .select({ id: schema.workspaceMembers.id })
-    .from(schema.workspaceMembers)
-    .where(eq(schema.workspaceMembers.userId, user.id))
-    .limit(1);
-  if (member) return false;
-  const [social] = await db
-    .select({ id: schema.accounts.id })
-    .from(schema.accounts)
-    .where(and(eq(schema.accounts.userId, user.id), ne(schema.accounts.providerId, 'credential')))
-    .limit(1);
-  if (social) return false;
-  await db
-    .delete(schema.users)
-    .where(and(eq(schema.users.id, user.id), eq(schema.users.emailVerified, false)));
-  return true;
 }
