@@ -61,6 +61,9 @@ function settingsOf(deps: AppDeps, workspace: Workspace) {
   return { ...effectiveSettings(deps.config, workspace, ceilings), ceilings };
 }
 
+/** The least an organization keeps its audit log for on the managed service. */
+export const MIN_MANAGED_AUDIT_DAYS = 30;
+
 export const settingsRoutes = createRouter()
   .openapi(
     createRoute({
@@ -108,6 +111,19 @@ export const settingsRoutes = createRouter()
             `Not available on a self-hosted install: ${managedOnly.join(', ')}`,
           );
         }
+      }
+      // An admin cannot wipe the organization's record of what they did: the
+      // managed service keeps at least 30 days (S-11, plan 21.6).
+      if (
+        config.deployment === 'managed' &&
+        patch.auditRetentionDays !== undefined &&
+        patch.auditRetentionDays < MIN_MANAGED_AUDIT_DAYS
+      ) {
+        throw new DomainError(
+          400,
+          'RETENTION_TOO_SHORT',
+          `Keep the audit log for at least ${MIN_MANAGED_AUDIT_DAYS} days`,
+        );
       }
       // A command would run on the server every organization shares (S-1, plan 21.6).
       if (!config.customStdio && patch.customStdioEnabled) {

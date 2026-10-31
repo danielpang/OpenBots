@@ -103,7 +103,7 @@ function LimitsSection() {
           <Input
             name="auditRetentionDays"
             type="number"
-            min={1}
+            min={30}
             max={3650}
             step={1}
             defaultValue={data.auditRetentionDays}

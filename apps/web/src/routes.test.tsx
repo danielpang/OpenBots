@@ -11,7 +11,9 @@ const server = vi.hoisted(() => {
     if (!(pathname in state.routes)) {
       return Response.json({ title: 'Not signed in', status: 401 }, { status: 401 });
     }
-    return Response.json(state.routes[pathname]);
+    // A route's `__status` answers with that status (an error's problem document).
+    const body = state.routes[pathname] as { __status?: number } | undefined;
+    return Response.json(body, { status: body?.__status ?? 200 });
   };
   return state;
 });
@@ -135,6 +137,16 @@ describe('routes', () => {
     server.routes = { ...managed, '/api/v1/me': me('member') };
     expect((await renderPath('/onboarding')).pathname).toBe('/');
     expect((await renderPath('/onboarding?invite=abc')).pathname).toBe('/onboarding');
+  });
+
+  it('sends an account whose email is not verified to sign in, which says why', async () => {
+    server.routes = {
+      ...managed,
+      '/api/v1/me': { __status: 403, status: 403, code: 'EMAIL_NOT_VERIFIED', title: 'Verify' },
+    };
+    const { pathname, html } = await renderPath('/');
+    expect(pathname).toBe('/sign-in');
+    expect(html).toContain('Verify your email first');
   });
 
   it('gives a self-hosted owner Limits, and no organization tabs', async () => {

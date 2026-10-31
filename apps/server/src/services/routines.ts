@@ -41,6 +41,7 @@ import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { insertRoutineEndpoint } from '../hooks/inbox.js';
+import { ownerActive } from '../membership.js';
 import { parseTriggerRule } from '../hooks/match.js';
 import { assertBotOwner } from '../ownership.js';
 import { recordAudit, userActor } from './audit.js';
@@ -725,6 +726,12 @@ export async function tickRoutines(deps: RoutinesDeps, now: Date = new Date()): 
         .update(schema.routines)
         .set({ nextRunAt: next })
         .where(eq(schema.routines.id, routine.id));
+      // A suspended or removed owner's Routines wait, without a run (plan 21.6).
+      const [bot] = await tx
+        .select({ ownerId: schema.bots.ownerId, workspaceId: schema.bots.workspaceId })
+        .from(schema.bots)
+        .where(eq(schema.bots.id, routine.botId));
+      if (!bot || !(await ownerActive(tx, bot))) continue;
       const started = await claimRoutineRun(deps, tx, routine, { reason: 'schedule', slot });
       if (started) out.push(started);
     }

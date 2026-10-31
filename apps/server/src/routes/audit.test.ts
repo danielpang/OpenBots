@@ -155,6 +155,10 @@ describe('audit log', () => {
   it('records settings changes', async () => {
     const patched = await call(admin, 'PATCH', '/settings', { auditRetentionDays: 90 });
     expect(await patched.json()).toMatchObject({ auditRetentionDays: 90 });
+    // An admin cannot wipe the record of what they did.
+    const short = await call(admin, 'PATCH', '/settings', { auditRetentionDays: 7 });
+    expect(short.status).toBe(400);
+    expect(await short.json()).toMatchObject({ code: 'RETENTION_TOO_SHORT' });
     expect(await rows('settings.update')).toEqual([
       expect.objectContaining({
         actorId: adminId,

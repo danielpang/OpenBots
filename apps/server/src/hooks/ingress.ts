@@ -6,6 +6,7 @@ import type { AppEnv } from '../context.js';
 import { schema } from '../db/client.js';
 import { DomainError, notFound, unauthorized } from '../errors.js';
 import { observeWebhook } from '../metrics.js';
+import { ownerActive } from '../membership.js';
 import { organizationSettings } from '../workspace.js';
 import {
   acceptDelivery,
@@ -113,7 +114,10 @@ async function findEndpoint(c: Context<AppEnv>, bot: string, slug: string) {
   const byId = BOT_ID.test(bot);
   if (!byId && config.deployment === 'managed') throw notFound('No such webhook endpoint');
   const found = await db
-    .select({ endpoint: schema.webhookEndpoints })
+    .select({
+      endpoint: schema.webhookEndpoints,
+      owner: { ownerId: schema.bots.ownerId, workspaceId: schema.bots.workspaceId },
+    })
     .from(schema.webhookEndpoints)
     .innerJoin(schema.bots, eq(schema.bots.id, schema.webhookEndpoints.botId))
     .where(
@@ -127,6 +131,8 @@ async function findEndpoint(c: Context<AppEnv>, bot: string, slug: string) {
   if (found.length !== 1 || !found[0]!.endpoint.enabled) {
     throw notFound('No such webhook endpoint');
   }
+  // A suspended or removed owner's endpoints take nothing (plan 21.6).
+  if (!(await ownerActive(db, found[0]!.owner))) throw notFound('No such webhook endpoint');
   return found[0]!.endpoint;
 }
 

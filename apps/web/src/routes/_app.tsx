@@ -32,6 +32,11 @@ export const Route = createFileRoute('/_app')({
       }
       return { me, deployment, localAuth: authMode === 'local' };
     } catch (error) {
+      // An account from before email verification (the managed service): signing in
+      // again sends the link, so sign-in says so.
+      if (error instanceof ApiError && error.code === 'EMAIL_NOT_VERIFIED') {
+        throw redirect({ to: '/sign-in', search: { error: 'EMAIL_NOT_VERIFIED' } });
+      }
       if (error instanceof ApiError && error.status === 401) {
         // The Mac app signs a local owner in again from /sign-in.
         if (authMode === 'local') throw redirect({ to: '/sign-in' });

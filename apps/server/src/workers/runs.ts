@@ -66,6 +66,7 @@ import { observeProviderStep } from '../metrics.js';
 import { announceApproval, approvalTtlMs, storeApproval } from '../services/approvals.js';
 import { artifactServices } from '../services/artifacts.js';
 import { setState } from '../services/bot-state.js';
+import { ownerActive } from '../membership.js';
 import { canUseProvider } from '../services/bots.js';
 import {
   chatBots,
@@ -225,6 +226,16 @@ async function processRun(
       ? await deps.db.select().from(schema.chats).where(eq(schema.chats.id, run.chatId))
       : [];
     if (!bot || !chat) throw new Error('The run has no Bot or chat');
+    // Suspended or removed: the owner's Bots do no work in the organization (plan 21.6).
+    if (!(await ownerActive(deps.db, bot))) {
+      await blockRun(
+        deps,
+        run,
+        `@${bot.handle}'s owner has no access to this organization now.`,
+        'An admin can restore them.',
+      );
+      return;
+    }
 
     const checked = await resolveRunModel(deps, options, bot);
     if (!checked.ok) {
