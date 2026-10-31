@@ -48,6 +48,18 @@ export const SHAPES = {
 export type AvatarShape = keyof typeof SHAPES;
 export const AVATAR_SHAPES = Object.keys(SHAPES) as AvatarShape[];
 
+/**
+ * The bodies a new Bot gets and its owner picks from, named as the landing
+ * page names them. The other shapes stay for existing avatars and the app icon.
+ */
+export const BOT_SHAPES = [
+  { shape: 'bean', label: 'Moon' },
+  { shape: 'rounded', label: 'Box' },
+  { shape: 'blob', label: 'Egg' },
+] as const satisfies readonly { shape: AvatarShape; label: string }[];
+
+export type BotShape = (typeof BOT_SHAPES)[number]['shape'];
+
 export const AVATAR_EYES = ['round', 'dot', 'pill', 'sleepy', 'visor', 'cyclops'] as const;
 export type AvatarEyes = (typeof AVATAR_EYES)[number];
 

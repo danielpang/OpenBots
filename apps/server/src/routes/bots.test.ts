@@ -1,6 +1,8 @@
+import { EVENTS_CHANNEL, type WsEvent } from '@openbot/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nextSeq, schema } from '../db/client.js';
+import type { Message } from '../schemas.js';
 import { createTestApp, type TestApp } from '../test-app.js';
 import { ensureWorkspace, updateSettings } from '../workspace.js';
 
@@ -10,7 +12,7 @@ interface Bot {
   name: string;
   label: string | null;
   description: string;
-  avatar: { kind: string; seed?: string };
+  avatar: { kind: string; seed?: string; shape?: string };
   modelConfig: { provider_id: string; model_id: string } | null;
   toolPolicy: Record<string, unknown>;
   pinned: boolean;
@@ -83,6 +85,8 @@ describe('/api/v1/bots', () => {
       state: { botId: bot.id, state: 'idle', currentAction: null, runId: null },
     });
     expect(bot.avatar.kind).toBe('generated');
+    // A random one of the Bot shapes, Moon, Box or Egg, pinned.
+    expect(['bean', 'rounded', 'blob']).toContain(bot.avatar.shape);
 
     const chats = await t.deps.db.select().from(schema.chats).where(eq(schema.chats.botId, bot.id));
     expect(chats).toMatchObject([{ id: bot.chatId, type: 'bot_dm', ownerId: aliceId }]);
@@ -93,70 +97,66 @@ describe('/api/v1/bots', () => {
     expect(second).toMatchObject({ handle: 'ada-lovelace-2', isMain: false });
   });
 
-  it('creates a Bot with its connector settings and first Routine, all or nothing (B2)', async () => {
-    const { db } = t.deps;
-    const [connector] = await db
-      .insert(schema.connectors)
-      .values({
-        workspaceId,
-        ownerId: aliceId,
-        name: 'Inbox',
-        slug: 'guided-inbox',
-        kind: 'mcp_http',
-        status: 'ok',
-      })
-      .returning();
-    const off = {
-      connectorId: connector!.id,
-      toolAllowlist: [],
-      toolDenylist: [],
-      approvalOverride: null,
-    };
-    const routine = {
-      name: 'Morning digest',
-      prompt: 'Summarize what came in overnight.',
-      trigger: { type: 'schedule', preset: { kind: 'daily', time: '09:00' } },
-      timezone: 'Europe/London',
-    };
-    const handles = async () =>
-      (await db.select({ handle: schema.bots.handle }).from(schema.bots)).map((b) => b.handle);
+  it('creates a Bot from a name and an avatar, and it speaks first', async () => {
+    const events: WsEvent[] = [];
+    const off = await t.deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
+    const avatar = { kind: 'generated', seed: 'picked-in-new' };
+    const bot = await create(alice, { name: 'Scout', avatar });
+    await off();
+    expect(bot).toMatchObject({ name: 'Scout', handle: 'scout', avatar, description: '' });
 
-    // A Routine the server refuses leaves no Bot behind, so trying again makes one Bot.
-    const before = await handles();
-    const refused = await call(alice, 'POST', '/bots', {
-      name: 'Guided',
-      connectors: [off],
-      routine: { ...routine, timezone: 'Mars/Olympus' },
-    });
-    expect(refused.status).toBe(400);
-    expect(await handles()).toEqual(before);
-    // So does a connector that is not the caller's.
-    const foreign = await call(bob, 'POST', '/bots', { name: 'Guided', connectors: [off] });
-    expect(foreign.status).toBe(404);
-    expect(await handles()).toEqual(before);
-
-    const bot = await create(alice, { name: 'Guided', connectors: [off], routine });
-    expect(bot.handle).toBe('guided');
-    const permissions = await db
-      .select()
-      .from(schema.botConnectors)
-      .where(eq(schema.botConnectors.botId, bot.id));
-    expect(permissions).toEqual([
-      expect.objectContaining({ connectorId: connector!.id, toolAllowlist: [] }),
-    ]);
-    const routines = await db
-      .select()
-      .from(schema.routines)
-      .where(eq(schema.routines.botId, bot.id));
-    expect(routines).toEqual([
+    // Its transcript opens with its own message, written without a model call.
+    const res = await call(alice, 'GET', `/chats/${bot.chatId}/messages`);
+    const { messages } = (await res.json()) as { messages: Message[] };
+    expect(messages).toEqual([
       expect.objectContaining({
-        name: 'Morning digest',
-        promptMd: 'Summarize what came in overnight.',
-        timezone: 'Europe/London',
-        enabled: true,
+        seq: 1,
+        authorType: 'bot',
+        authorId: bot.id,
+        status: 'complete',
+        runId: null,
+        parts: [{ type: 'text', text: "Hi, I'm Scout. What would you like me to work on?" }],
       }),
     ]);
-    expect(routines[0]!.nextRunAt).not.toBeNull();
+    expect(await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id))).toEqual(
+      [],
+    );
+    // Published like any Bot message, to the chat's and the Bot's subscribers.
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'message.created',
+        chat_id: bot.chatId,
+        bot_id: bot.id,
+        payload: { message: expect.objectContaining({ id: messages[0]!.id }) },
+      }),
+    );
+    // Profile and memory start empty: the owner's answer is how it learns its job.
+    expect(
+      await t.deps.db.select().from(schema.botMemories).where(eq(schema.botMemories.botId, bot.id)),
+    ).toEqual([]);
+  });
+
+  it('refuses what creating no longer takes', async () => {
+    for (const body of [
+      { name: 'Guided', routine: { name: 'R', trigger: { type: 'manual' } } },
+      { name: 'Guided', connectors: [] },
+    ]) {
+      expect((await call(alice, 'POST', '/bots', body)).status).toBe(400);
+    }
+  });
+
+  it('has no template routes', async () => {
+    const bot = await create(alice, { name: 'Plain' });
+    for (const [method, path, body] of [
+      ['POST', `/bots/${bot.id}/template`, {}],
+      ['GET', '/templates', undefined],
+      ['GET', '/templates/some-token', undefined],
+      ['PATCH', '/templates/some-token', { visibility: 'public' }],
+      ['DELETE', '/templates/some-token', undefined],
+      ['POST', '/bots/from-template', { token: 'some-token' }],
+    ] as const) {
+      expect((await call(alice, method, path, body)).status, `${method} ${path}`).toBe(404);
+    }
   });
 
   it('validates and enforces unique handles', async () => {
@@ -325,14 +325,6 @@ describe('/api/v1/bots', () => {
 
     const copy = (await (await call(alice, 'POST', `/bots/${second.id}/duplicate`)).json()) as Bot;
     expect(copy.isMain).toBe(false);
-    const template = (await (
-      await call(alice, 'POST', `/bots/${second.id}/template`, {})
-    ).json()) as { token: string };
-    const fromTemplate = await call(alice, 'POST', '/bots/from-template', {
-      token: template.token,
-    });
-    expect(fromTemplate.status).toBe(201);
-    expect(((await fromTemplate.json()) as Bot).isMain).toBe(false);
     expect(await mains(alice)).toEqual([second.id]);
 
     expect((await patch(alice, second.id, false)).isMain).toBe(false);
@@ -435,7 +427,10 @@ describe('/api/v1/bots', () => {
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, copy.chatId));
-    expect(messages).toEqual([]);
+    // None of the history: only its own greeting, like any new Bot.
+    expect(messages).toMatchObject([
+      { authorType: 'bot', authorId: copy.id, parts: [{ type: 'text', text: expect.any(String) }] },
+    ]);
     const memories = await db
       .select()
       .from(schema.botMemories)
@@ -629,23 +624,6 @@ describe("a member's first Bot is their main Bot (K8)", () => {
     expect(after.isMain).toBe(true);
     expect(await me.mains()).toEqual([after.id]);
     expect((await me.call('GET', `/bots/${kept.id}`))!.isMain).toBe(false);
-  });
-
-  it('counts a Bot made from a template', async () => {
-    const author = await member();
-    const source = await author.create('Source');
-    const { token } = (await author.call('POST', `/bots/${source.id}/template`, {})) as unknown as {
-      token: string;
-    };
-
-    const me = await member();
-    const first = (await me.call('POST', '/bots/from-template', { token }))!;
-    expect(first.isMain).toBe(true);
-    const second = (await me.call('POST', '/bots/from-template', { token }))!;
-    expect(second.isMain).toBe(false);
-    expect(await me.mains()).toEqual([first.id]);
-    // The template's author keeps theirs.
-    expect(await author.mains()).toEqual([source.id]);
   });
 
   it('counts a duplicate only when the member has no main Bot', async () => {

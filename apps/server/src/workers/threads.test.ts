@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/client.js';
 import type { Message } from '../schemas.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel } from './runs.js';
 
 // Threads, Bot reactions and rolling chat summaries (C7, C8; plan 5.3, 18.6)
@@ -164,7 +164,9 @@ describe('threads, reactions and chat summaries', () => {
     ]);
     await say(bot, 'start');
     await until(() => allDone(bot.id, 1));
-    const root = (await messagesOf(bot.chatId)).find((m) => m.authorType === 'bot')!;
+    const root = (await messagesOf(bot.chatId)).find(
+      (m) => m.authorType === 'bot' && !isGreeting(m),
+    )!;
     await say(bot, 'thread question', root.id);
     await until(() => allDone(bot.id, 2));
     await say(bot, 'top question');
@@ -216,6 +218,8 @@ describe('threads, reactions and chat summaries', () => {
       return [{ text: 'Dana counted to one with @summer.' }];
     };
     smallModels.set(bot.id, scriptedModel(Array.from({ length: 10 }, () => small)));
+    // Without the Bot's greeting, so the window holds just this exchange.
+    await t.deps.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
 
     await say(bot, 'count one');
     await until(() => allDone(bot.id, 1));

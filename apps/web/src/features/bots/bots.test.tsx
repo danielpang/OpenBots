@@ -11,13 +11,7 @@ import { createAppRouter } from '../../app/router.js';
 import { me } from '../../test-utils.js';
 import { memoriesQuery } from '../memory/memory-tab.js';
 import { DESCRIPTION_HELP, MAIN_BOT_HELP } from './bot-settings.js';
-import {
-  createBotBody,
-  guidedDescription,
-  newBotBody,
-  scheduleRoutineBody,
-  scheduleRoutineName,
-} from './create.js';
+import { createBotBody, startingAvatar } from './create.js';
 import {
   applyBotState,
   botsQuery,
@@ -174,142 +168,33 @@ describe('roster', () => {
 });
 
 describe('New', () => {
-  it('offers the guided path, a name to start with, and New chat once there are two Bots', () => {
+  it('asks for a name and an icon, and offers New chat once there are two Bots', () => {
     const html = renderInRouter(<NewFlow onDone={() => {}} />);
-    expect(html).toContain('Create new Bot');
+    expect(html).toContain('New Bot');
     expect(html).toContain('aria-label="Bot name"');
-    expect(html).toContain('>Start</button>');
+    expect(html).toContain('aria-label="Icon preview"');
+    for (const shape of ['Moon', 'Box', 'Egg']) expect(html).toContain(`title="${shape}"`);
+    expect(html).toContain('>Shuffle</button>');
+    expect(html).toContain('>Create</button>');
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>New chat/);
     expect(html).toContain('needs two Bots');
-    expect(html).not.toMatch(/schedul/i);
+    expect(html).not.toMatch(/template|schedul|<textarea|<select/i);
   });
 
-  it('asks for the name first, then the optional questions', () => {
-    const first = renderInRouter(
-      <NewFlow onDone={() => {}} initial={{ kind: 'guided', step: 0 }} />,
-    );
-    expect(first).toContain('aria-label="Name"');
-    expect(first).toContain('1 of 6');
-
-    const goal = renderInRouter(
-      <NewFlow onDone={() => {}} initial={{ kind: 'guided', step: 1 }} />,
-    );
-    expect(goal).toContain('Goal or area of ownership');
-    expect(goal).toContain('Optional');
-
-    const approval = renderInRouter(
-      <NewFlow onDone={() => {}} initial={{ kind: 'guided', step: 4 }} />,
-    );
-    expect(approval).toContain('Approval boundary');
-    expect(approval).toContain('Always ask first before using');
-    expect(approval).toContain('Every connector tool, even ones that only read');
-    expect(approval).toContain('It already asks before sending email');
-    expect(approval).toContain('>Next</button>');
-
-    // The optional recurring schedule closes the flow (B2), off until turned on.
-    const last = renderInRouter(
-      <NewFlow onDone={() => {}} initial={{ kind: 'guided', step: 5 }} />,
-    );
-    expect(last).toContain('Recurring schedule');
-    expect(last).toContain('Run on a schedule');
-    expect(last).not.toContain('aria-label="Repeats"');
-    expect(last).toContain('6 of 6');
-    expect(last).toContain('>Create</button>');
+  it('creates from the name and the picked icon alone', () => {
+    const avatar = { kind: 'generated' as const, seed: 's', shape: 'blob' };
+    expect(createBotBody('  Finance ', avatar)).toEqual({ name: 'Finance', avatar });
   });
 
-  it('turns the schedule step into the Bot’s first Routine', () => {
-    expect(
-      scheduleRoutineBody({
-        preset: { kind: 'weekdays', time: '08:00' },
-        prompt: ' Summarize the support inbox\nand flag anything urgent ',
-        timezone: 'Europe/London',
-      }),
-    ).toEqual({
-      name: 'Summarize the support inbox',
-      prompt: 'Summarize the support inbox\nand flag anything urgent',
-      trigger: { type: 'schedule', preset: { kind: 'weekdays', time: '08:00' } },
-      timezone: 'Europe/London',
-    });
-    expect(scheduleRoutineName('x'.repeat(80))).toHaveLength(58);
-  });
-
-  it('sends the Bot, its connector settings and first Routine in one request (B2)', () => {
-    const connector = '00000000-0000-4000-8000-0000000000c1';
-    const body = newBotBody(
-      {
-        name: 'Support',
-        answers: { goal: 'Triage the inbox' },
-        connectorsOff: [connector],
-        schedule: {
-          preset: { kind: 'daily', time: '09:00' },
-          prompt: 'Summarize overnight mail',
-          timezone: 'UTC',
-        },
-      },
-      [],
-      'seed',
-    );
-    expect(body).toMatchObject({
-      name: 'Support',
-      description: 'Goal: Triage the inbox',
-      connectors: [
-        { connectorId: connector, toolAllowlist: [], toolDenylist: [], approvalOverride: null },
-      ],
-      routine: {
-        name: 'Summarize overnight mail',
-        trigger: { type: 'schedule', preset: { kind: 'daily', time: '09:00' } },
-        timezone: 'UTC',
-      },
-    });
-    // By name alone: no connector settings and no Routine.
-    const plain = newBotBody({ name: 'Plain' }, [], 'seed');
-    expect(plain).not.toHaveProperty('connectors');
-    expect(plain).not.toHaveProperty('routine');
-  });
-
-  it('writes the approval step’s ticked groups to the tool policy as Ask first (B2, T5)', () => {
-    const body = newBotBody(
-      { name: 'Careful', answers: { approval: 'Ask before replying' }, askFirst: ['connector'] },
-      [],
-      'seed',
-    );
-    expect(body.toolPolicy).toEqual({ groups: { connector: 'ask' } });
-    // The answer stays a standing rule as well.
-    expect(body.description).toBe('Ask first: Ask before replying');
-    expect(newBotBody({ name: 'Both', askFirst: ['connector', 'builtin'] }).toolPolicy).toEqual({
-      groups: { connector: 'ask', builtin: 'ask' },
-    });
-    expect(newBotBody({ name: 'Default', askFirst: [] })).not.toHaveProperty('toolPolicy');
-  });
-
-  it('writes guided answers into the description as standing rules', () => {
-    expect(
-      guidedDescription({
-        goal: ' Triage the support inbox ',
-        tools: 'Gmail',
-        style: '',
-        approval: 'Ask before replying to customers',
-      }),
-    ).toBe(
-      'Goal: Triage the support inbox\nTools and sources: Gmail\nAsk first: Ask before replying to customers',
-    );
-  });
-
-  it('creates from a name alone with an avatar unlike the rest of the roster', () => {
+  it('starts on a Bot shape with an avatar unlike the rest of the roster', () => {
     const taken = takenAvatars([
       bot('Ada'),
       bot('Pic', { avatar: { kind: 'upload', file_id: 'x' } }),
     ]);
     expect(taken).toHaveLength(1);
-    const body = createBotBody('  Finance ', undefined, taken, 'seed');
-    expect(body).toEqual({
-      name: 'Finance',
-      avatar: { kind: 'generated', seed: expect.any(String) },
-    });
-    expect(body).not.toHaveProperty('toolPolicy');
-    expect(createBotBody('Finance', { tools: 'Stripe' }, [], 'seed')).toMatchObject({
-      description: 'Tools and sources: Stripe',
-    });
+    const avatar = startingAvatar(taken, 'seed');
+    expect(avatar).toEqual({ kind: 'generated', seed: expect.any(String), shape: avatar.shape });
+    expect(['bean', 'rounded', 'blob']).toContain(avatar.shape);
   });
 });
 

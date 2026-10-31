@@ -16,7 +16,7 @@ import {
 } from '../services/logins.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { useTestComputer, type TestComputer } from '../test-computer.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel, type RunWorkerOptions } from './runs.js';
 
 // Sign-in requests end to end (K1, K8): a Bot calls request_login and waits.
@@ -316,7 +316,7 @@ describe('request_login', () => {
     });
     expect(await requestsIn(first.bot.chatId)).toEqual([]);
     const askerParts = (await messagesIn(first.bot.chatId))
-      .filter((m) => m.authorType === 'bot')
+      .filter((m) => m.authorType === 'bot' && !isGreeting(m))
       .flatMap((m) => m.parts as MessagePart[]);
     expect(askerParts.map((p) => p.type)).toEqual(['tool_call', 'tool_result']);
     expect(askerParts[1]).toMatchObject({ label: 'Asked for a sign-in to gitlab.com' });

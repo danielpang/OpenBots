@@ -275,3 +275,48 @@ describe('skills_content backfill (S1)', () => {
     expect(row).toMatchObject({ content: 'Go', source: 'manual' });
   });
 });
+
+describe('drop_templates (B2)', () => {
+  let client: PGlite;
+  let db: Db;
+  const ws = ID(41);
+  const user = ID(42);
+
+  beforeAll(async () => {
+    client = new PGlite({ extensions: { vector } });
+    db = drizzle(client, { schema }) as unknown as Db;
+    await migrateBefore(db, 'drop_templates');
+    await client.exec(`
+      INSERT INTO workspaces (id, name, settings)
+      VALUES ('${ws}', 'Home', '{"signupMode": "open", "publicTemplatesEnabled": true}');
+      INSERT INTO users (id, name, email) VALUES ('${user}', 'Ada', 'ada@example.com');
+      INSERT INTO bot_templates (id, workspace_id, owner_id, name, snapshot)
+      VALUES ('${ID(43)}', '${ws}', '${user}', 'T', '{}');
+      INSERT INTO bots (workspace_id, owner_id, handle, name, template_id)
+      VALUES ('${ws}', '${user}', 'ada', 'Ada', '${ID(43)}');
+    `);
+    await migrateBefore(db);
+  }, 60_000);
+
+  afterAll(async () => {
+    await client?.close();
+  });
+
+  it('drops the templates, their column and the public links setting, and keeps the Bots', async () => {
+    const tables = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'bot_templates'`,
+    );
+    expect(tables.rows[0]!.n).toBe(0);
+    const columns = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_name = 'bots' AND column_name = 'template_id'`,
+    );
+    expect(columns.rows[0]!.n).toBe(0);
+    expect((await db.select().from(schema.bots)).map((b) => b.handle)).toEqual(['ada']);
+    const [workspace] = await db
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, ws));
+    expect(workspace!.settings).toEqual({ signupMode: 'open' });
+  });
+});

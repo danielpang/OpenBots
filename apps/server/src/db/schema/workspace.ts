@@ -9,7 +9,7 @@ export const workspaceRole = pgEnum('workspace_role', ['admin', 'member']);
 export const workspaces = pgTable('workspaces', {
   id: id(),
   name: text('name').notNull(),
-  /** Admin controls (U3): signup mode, public template sharing, limit overrides. */
+  /** Admin controls (U3): signup mode, limit overrides. */
   settings: jsonb('settings').notNull().default({}),
   createdAt: createdAt(),
 });

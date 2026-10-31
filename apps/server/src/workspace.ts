@@ -11,7 +11,7 @@ import { schema, type Db } from './db/client.js';
 // A self-hosted install (OPENBOT_DEPLOYMENT) has one owner and no admin
 // screens, so the settings that only matter with members keep their defaults
 // whatever is stored: sign-up closes after the first account (auth.ts refuses
-// it), template links stay workspace-only and the audit log keeps 180 days.
+// it) and the audit log keeps 180 days.
 // The limits and custom stdio connectors stay the owner's to change.
 
 export type Workspace = typeof schema.workspaces.$inferSelect;
@@ -22,17 +22,12 @@ export type SignupMode = Config['signupMode'];
 export const DEFAULT_AUDIT_RETENTION_DAYS = 180;
 
 /** The settings a self-hosted install does not offer; they keep their defaults there. */
-export const MANAGED_ONLY_SETTINGS = [
-  'signupMode',
-  'publicTemplatesEnabled',
-  'auditRetentionDays',
-] as const;
+export const MANAGED_ONLY_SETTINGS = ['signupMode', 'auditRetentionDays'] as const;
 
 const limitKeys = Object.keys(DEFAULT_LIMITS) as [keyof Limits, ...(keyof Limits)[]];
 
 export const storedSettingsSchema = z.object({
   signupMode: z.enum(['first_user_admin', 'invite', 'open']).optional(),
-  publicTemplatesEnabled: z.boolean().optional(),
   // A limit stored by an older version that is no longer a setting (computers
   // per account, computer tasks per Bot) is dropped, not a reason to ignore
   // every other setting.
@@ -58,7 +53,6 @@ export type StoredSettings = z.infer<typeof storedSettingsSchema>;
 
 export interface Settings {
   signupMode: SignupMode;
-  publicTemplatesEnabled: boolean;
   limits: Limits;
   auditRetentionDays: number;
   customStdioEnabled: boolean;
@@ -105,7 +99,6 @@ export function effectiveSettings(config: Config, workspace: Workspace): Setting
     return {
       // First user, then no invites: closed once the owner exists.
       signupMode: 'first_user_admin',
-      publicTemplatesEnabled: false,
       limits: { ...config.limits, ...stored.limits },
       auditRetentionDays: DEFAULT_AUDIT_RETENTION_DAYS,
       customStdioEnabled: stored.customStdioEnabled ?? false,
@@ -113,7 +106,6 @@ export function effectiveSettings(config: Config, workspace: Workspace): Setting
   }
   return {
     signupMode: stored.signupMode ?? config.signupMode,
-    publicTemplatesEnabled: stored.publicTemplatesEnabled ?? false,
     limits: { ...config.limits, ...stored.limits },
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     customStdioEnabled: stored.customStdioEnabled ?? false,

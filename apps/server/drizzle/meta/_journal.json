@@ -141,6 +141,13 @@
       "when": 1793410198908,
       "tag": "0019_skills_content",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793422141994,
+      "tag": "0020_drop_templates",
+      "breakpoints": true
     }
   ]
 }

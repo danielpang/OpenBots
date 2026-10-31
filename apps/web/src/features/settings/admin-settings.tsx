@@ -5,8 +5,8 @@ import type { FormEvent } from 'react';
 import { api, meQuery } from '../../app/api.js';
 import { useLocalAuth } from '../../app/deployment.js';
 
-// Admin controls (U3): signup mode, public template links, limits and how
-// long the audit log keeps its rows, on the managed service. A self-hosted
+// Admin controls (U3): signup mode, limits and how long the audit log keeps
+// its rows, on the managed service. A self-hosted
 // install has one owner and only the limits (`LimitsSettings`); the rest
 // keep their defaults there.
 
@@ -66,7 +66,6 @@ export function limitsPatch(form: FormData, current: Limits): Partial<Limits> {
 export function settingsPatch(form: FormData, current: Limits) {
   return {
     signupMode: form.get('signupMode') as SignupMode,
-    publicTemplatesEnabled: form.get('publicTemplatesEnabled') === 'on',
     limits: limitsPatch(form, current),
     auditRetentionDays: Number(form.get('auditRetentionDays')),
   };
@@ -160,20 +159,6 @@ export function AdminSettings() {
             </option>
           ))}
         </select>
-      </label>
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          name="publicTemplatesEnabled"
-          defaultChecked={data.publicTemplatesEnabled}
-          className="mt-0.5"
-        />
-        <span className="flex flex-col gap-0.5">
-          <span className="font-medium">Public template links</span>
-          <span className="text-muted-foreground">
-            Lets members share templates with anyone who has the link.
-          </span>
-        </span>
       </label>
       <LimitFields limits={data.limits} />
       <label className="flex flex-col gap-1.5 text-sm">

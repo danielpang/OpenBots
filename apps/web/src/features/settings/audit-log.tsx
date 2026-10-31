@@ -21,7 +21,6 @@ export const ACTION_GROUPS: { value: string; label: string }[] = [
   { value: '', label: 'All actions' },
   { value: 'auth.', label: 'Sign-in and sign-out' },
   { value: 'api_key.', label: 'API keys' },
-  { value: 'template.', label: 'Template links' },
   { value: 'invite.', label: 'Invites' },
   { value: 'member.', label: 'Members' },
   { value: 'settings.', label: 'Admin settings' },

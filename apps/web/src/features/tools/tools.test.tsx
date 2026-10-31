@@ -41,7 +41,6 @@ import {
   setDecision,
   setToolEnabled,
   toolEnabled,
-  turnedOff,
   defaultPermission,
 } from './policy.js';
 import { oauthNotice } from './tools-page.js';
@@ -600,9 +599,6 @@ describe('policy editor', () => {
     expect(toolEnabled(off, 'delete')).toBe(false);
     expect(toolEnabled(setToolEnabled(off, 'delete', true), 'delete')).toBe(true);
     expect(permissionItems([p, off])).toEqual([off]);
-    expect(turnedOff(['c2'])).toEqual([
-      { connectorId: 'c2', toolAllowlist: [], toolDenylist: [], approvalOverride: null },
-    ]);
   });
 
   it('saves the Bot tab and reads the stored shape back', async () => {

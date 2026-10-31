@@ -1,7 +1,7 @@
 import { Resvg } from '@resvg/resvg-js';
 import { generate, type AvatarParams } from './generate.js';
 
-// Static PNGs for notifications and templates (plan 13). Node only:
+// Static PNGs for notifications (plan 13). Node only:
 // `@openbot/avatars/png`.
 
 export const PNG_MIN_SIZE = 16;

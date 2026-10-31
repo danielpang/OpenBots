@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { newBotAvatar } from '@openbot/avatars';
 import {
   EventTriggerSchema,
   handleFromName,
@@ -16,16 +17,20 @@ import { assertBotOwner } from '../ownership.js';
 import { assertBotModel } from './providers.js';
 import type { Config } from '../config.js';
 import { effectiveSettings, ensureWorkspace, raiseLimitHint } from '../workspace.js';
-import { writeBotConnectors, type BotConnectorPermission } from './connectors.js';
 import { avatarFileStatus, invalidAvatar } from './files.js';
-import { createRoutine, type RoutineInput } from './routines.js';
+import { announceMessage, storeMessage } from './messages.js';
 
 // Bots and the roster (B1 to B5, B7, B8). A Bot always comes with its one
 // transcript (a `bot_dm` chat, B4) and its `bot_state` row. Every function
 // here is owner-scoped: another user's Bot is not found.
+//
+// A new Bot is only a name and an avatar. It speaks first: its transcript
+// opens with its own message asking what to work on (`greeting`), written
+// with the Bot and costing no model call, and the owner's answer is how it
+// learns its job.
 
 type Owner = Pick<CurrentUser, 'id' | 'workspaceId'>;
-type BotsDeps = Pick<AppDeps, 'db' | 'config'>;
+type BotsDeps = Pick<AppDeps, 'db' | 'config' | 'infra' | 'logger'>;
 
 export type BotRow = typeof schema.bots.$inferSelect;
 export type BotStateRow = typeof schema.botState.$inferSelect;
@@ -44,14 +49,6 @@ export interface BotInput {
   avatar?: Avatar;
   modelConfig?: ModelConfig | null;
   toolPolicy?: ToolPolicy;
-}
-
-/** What New's guided create sets up with the Bot, all or nothing (B2). */
-export interface NewBotInput extends BotInput {
-  /** Per-connector settings (T1), as `PUT /bots/{id}/connectors` takes them. */
-  connectors?: BotConnectorPermission[];
-  /** The first Routine (R1), from the recurring-schedule step. */
-  routine?: RoutineInput;
 }
 
 export type BotPatch = Partial<BotInput> & {
@@ -101,19 +98,14 @@ export async function getBot(db: Db, owner: Owner, botId: string): Promise<BotRe
   return row;
 }
 
-/**
- * A new Bot with its transcript, and with any connector settings and first
- * Routine in the same transaction, so a step that fails leaves no Bot behind
- * and a retry does not make a second one (B2).
- */
-export async function createBot(
-  deps: BotsDeps,
-  owner: Owner,
-  input: NewBotInput,
-): Promise<BotRecord> {
+/** The first message in a new Bot's transcript, from the Bot. */
+export const greeting = (name: string) => `Hi, I'm ${name}. What would you like me to work on?`;
+
+/** A new Bot with its transcript, which opens with the Bot's greeting. */
+export async function createBot(deps: BotsDeps, owner: Owner, input: BotInput): Promise<BotRecord> {
   await assertOwnRefs(deps.db, owner, input);
   if (input.modelConfig) await assertBotModel(deps.db, input.modelConfig);
-  const botId = await deps.db.transaction(async (tx) => {
+  const { botId, hello } = await deps.db.transaction(async (tx) => {
     await reserveSlot(deps, tx, owner);
     const handle = input.handle
       ? await assertHandleFree(tx, owner, input.handle)
@@ -123,15 +115,15 @@ export async function createBot(
       name: input.name,
       label: input.label ?? null,
       description: input.description ?? '',
-      avatar: input.avatar ?? { kind: 'generated', seed: randomUUID() },
+      // One of the Bot shapes (Moon, Box, Egg), pinned, like New picks.
+      avatar: input.avatar ?? newBotAvatar(randomUUID()),
       modelConfig: input.modelConfig ?? {},
       toolPolicy: input.toolPolicy ?? {},
     });
-    if (input.connectors?.length) await writeBotConnectors(tx, owner, bot.id, input.connectors);
-    if (input.routine) await createRoutine(deps, owner, bot.id, input.routine, tx);
     await audit(tx, owner, 'bot.create', bot.id, { handle, name: bot.name });
-    return bot.id;
+    return { botId: bot.id, hello: await storeGreeting(tx, owner, bot) };
   });
+  await announceMessage(deps, hello);
   return getBot(deps.db, owner, botId);
 }
 
@@ -267,7 +259,8 @@ export async function deleteBot(db: Db, owner: Owner, botId: string): Promise<vo
  * per-Bot connector settings, enabled Skills and Routines. Conversation
  * history, memories and attachments are not copied. Nor are webhook
  * endpoints: the copy gets its own inbox, and its event Routines start
- * without an endpoint until the owner adds one (as from a template, B6).
+ * without an endpoint until the owner adds one. Like any new Bot, the copy
+ * opens its transcript with its greeting.
  */
 export async function duplicateBot(
   deps: BotsDeps,
@@ -275,7 +268,7 @@ export async function duplicateBot(
   botId: string,
 ): Promise<BotRecord> {
   const source = await getBot(deps.db, owner, botId);
-  const copyId = await deps.db.transaction(async (tx) => {
+  const { copyId, hello } = await deps.db.transaction(async (tx) => {
     await reserveSlot(deps, tx, owner);
     const { bot } = source;
     const handle = await freeHandle(tx, owner, withHandleSuffix(bot.handle, 'copy'));
@@ -345,9 +338,26 @@ export async function duplicateBot(
     }
 
     await audit(tx, owner, 'bot.duplicate', copy.id, { sourceBotId: bot.id, handle });
-    return copy.id;
+    return { copyId: copy.id, hello: await storeGreeting(tx, owner, copy) };
   });
+  await announceMessage(deps, hello);
   return getBot(deps.db, owner, copyId);
+}
+
+/**
+ * Stores the Bot's greeting in its new transcript, inside the transaction
+ * that creates the Bot; the caller announces it once that has committed.
+ */
+function storeGreeting(
+  tx: Db,
+  owner: Owner,
+  bot: Pick<BotRow, 'id' | 'name'> & { chatId: string },
+) {
+  return storeMessage(
+    tx,
+    { id: bot.chatId, workspaceId: owner.workspaceId },
+    { authorType: 'bot', authorId: bot.id, parts: [{ type: 'text', text: greeting(bot.name) }] },
+  );
 }
 
 /**
@@ -372,8 +382,7 @@ export async function insertBot(
   values: Pick<
     typeof schema.bots.$inferInsert,
     'handle' | 'name' | 'label' | 'description' | 'avatar' | 'modelConfig' | 'toolPolicy'
-  > &
-    Partial<Pick<typeof schema.bots.$inferInsert, 'templateId'>>,
+  >,
 ): Promise<BotRow & { chatId: string }> {
   const ids = { workspaceId: owner.workspaceId, ownerId: owner.id };
   const isMain = !(await mainBotOf(tx, owner.id));
@@ -439,7 +448,7 @@ export async function freeHandle(tx: Db, owner: Owner, base: string): Promise<st
 export async function audit(
   tx: Db,
   owner: Owner,
-  action: 'bot.create' | 'bot.delete' | 'bot.duplicate' | 'bot.from_template',
+  action: 'bot.create' | 'bot.delete' | 'bot.duplicate',
   botId: string,
   metadata: Record<string, unknown>,
 ) {

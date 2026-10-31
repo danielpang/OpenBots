@@ -1,12 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PickerGroup } from '../models/api.js';
-import {
-  firstBotNeeds,
-  keyPlaceholder,
-  keyStatusText,
-  setupRequired,
-  usableProvider,
-} from './api.js';
+import { keyPlaceholder, keyStatusText, setupRequired, usableProvider } from './api.js';
 
 describe('setup wizard helpers', () => {
   it('treats an unreachable setup endpoint as set up, so sign-in still shows', async () => {
@@ -49,18 +42,5 @@ describe('setup wizard helpers', () => {
     expect(keyPlaceholder({ hasKey: false, keyHint: null })).toBe('API key');
     expect(keyPlaceholder({ hasKey: true, keyHint: 'sk-ant-…a1b2' })).toBe('sk-ant-…a1b2 saved');
     expect(keyPlaceholder({ hasKey: true, keyHint: null })).toBe('Key set (from .env or earlier)');
-  });
-
-  it('asks for vision for the first Bot when there is a computer and a model has it (L4)', () => {
-    const groups = (vision: boolean) =>
-      [
-        { models: [{ enabled: true, capabilities: { vision: false } }] },
-        { models: [{ enabled: false, capabilities: { vision: true } }] },
-        { models: [{ enabled: true, capabilities: { vision } }] },
-      ] as unknown as PickerGroup[];
-    expect(firstBotNeeds(true, groups(true))).toEqual(['tools', 'vision']);
-    expect(firstBotNeeds(false, groups(true))).toEqual(['tools']);
-    // Only a turned-off model can see: tool calling alone, so the wizard can finish.
-    expect(firstBotNeeds(true, groups(false))).toEqual(['tools']);
   });
 });

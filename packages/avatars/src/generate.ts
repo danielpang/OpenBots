@@ -4,6 +4,7 @@ import {
   AVATAR_EYES,
   AVATAR_PALETTES,
   AVATAR_SHAPES,
+  BOT_SHAPES,
   PALETTES,
   SHAPES,
   backMarkup,
@@ -83,16 +84,32 @@ export function generate(params: AvatarParams): AvatarDrawing {
  * New params for the editor's Shuffle: a fresh seed derived from `seed`, so
  * repeated shuffles walk a reproducible chain. The result never repeats the
  * parts of `seed` itself or of anything in `taken` (the rest of the roster),
- * which is how a roster avoids look-alikes.
+ * which is how a roster avoids look-alikes. Parts in `pinned` (the shape the
+ * owner chose) stay pinned in the result; the rest are reshuffled.
  */
-export function shuffle(seed: string, taken: readonly AvatarParams[] = []): GeneratedAvatar {
+export function shuffle(
+  seed: string,
+  taken: readonly AvatarParams[] = [],
+  pinned: Partial<Pick<AvatarParams, 'shape' | 'palette' | 'eyes' | 'accessory'>> = {},
+): GeneratedAvatar {
   const random = createRandom(`${seed}:shuffle`);
-  const avoid = new Set([{ seed }, ...taken].map((params) => partsKey(resolveParts(params))));
+  const avoid = new Set(
+    [{ seed, ...pinned }, ...taken].map((params) => partsKey(resolveParts(params))),
+  );
   let next = seed;
   for (let attempt = 0; attempt < 256; attempt++) {
     next =
       Math.floor(random() * 2 ** 32).toString(36) + Math.floor(random() * 2 ** 32).toString(36);
-    if (!avoid.has(partsKey(resolveParts({ seed: next })))) break;
+    if (!avoid.has(partsKey(resolveParts({ seed: next, ...pinned })))) break;
   }
-  return { kind: 'generated', seed: next };
+  return { kind: 'generated', seed: next, ...pinned };
+}
+
+/**
+ * A new Bot's avatar: one of the three Bot shapes (Moon, Box, Egg), picked
+ * from `seed` and pinned, with the other parts shuffled away from `taken`.
+ */
+export function newBotAvatar(seed: string, taken: readonly AvatarParams[] = []): GeneratedAvatar {
+  const shape = pick(createRandom(`${seed}:shape`), BOT_SHAPES).shape;
+  return shuffle(seed, taken, { shape });
 }

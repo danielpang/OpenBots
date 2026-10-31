@@ -176,9 +176,11 @@ describe('Bot Settings model section', () => {
 });
 
 describe('setup wizard first Bot', () => {
-  it('starts on the default model a new Bot gets (plan 3)', async () => {
+  it('asks only for a name and an icon; the server picks the default model (plan 3)', async () => {
     const html = await render(seeded(false), <BotStep />);
-    expect(html).toMatch(/<option value="[^"]*\/seer" selected="">/);
-    expect(html).not.toContain('Pick a model');
+    expect(html).toContain('value="Assistant"');
+    expect(html).toContain('aria-label="Icon preview"');
+    expect(html).toContain('>Create Bot</button>');
+    expect(html).not.toContain('<select');
   });
 });

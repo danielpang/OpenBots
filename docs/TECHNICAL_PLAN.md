@@ -94,9 +94,8 @@ All tables carry `workspace_id` (one workspace in v1) and, where ownership matte
 
 | Table | Key columns | Notes |
 | --- | --- | --- |
-| `bots` | id, owner_id, handle (unique `@slug`), name, label, description, avatar jsonb, model_config jsonb, tool_policy jsonb, pinned, hidden, is_main boolean, archived_at, template_id, created_at | `avatar`: generator params (seed, shape, palette, eyes, accessory) or an uploaded file id. `description` holds standing rules (B3). `model_config`: provider, model, temperature, reasoning, max_steps. `is_main` marks the owner's main Bot for sign-in requests (K8); a partial unique index on `owner_id` where `is_main` allows at most one per owner. A new Bot gets `is_main` when its owner has no main Bot, so a member's first Bot is it (`insertBot`, under the owner's roster lock); migration `0018_first_bot_main` marked each existing member's earliest visible Bot. Duplicates and templates never copy `is_main` (B5, B6) |
+| `bots` | id, owner_id, handle (unique `@slug`), name, label, description, avatar jsonb, model_config jsonb, tool_policy jsonb, pinned, hidden, is_main boolean, archived_at, created_at | `avatar`: generator params (seed, shape, palette, eyes, accessory) or an uploaded file id. `description` holds standing rules (B3). `model_config`: provider, model, temperature, reasoning, max_steps. `is_main` marks the owner's main Bot for sign-in requests (K8); a partial unique index on `owner_id` where `is_main` allows at most one per owner. A new Bot gets `is_main` when its owner has no main Bot, so a member's first Bot is it (`insertBot`, under the owner's roster lock); migration `0018_first_bot_main` marked each existing member's earliest visible Bot. Duplicates never copy `is_main` (B5). A Bot is created from a name and an avatar alone, and its transcript opens with its own message asking what to work on, written with the Bot and costing no model call (B2); migration `0020_drop_templates` dropped `bot_templates` and `template_id` |
 | `bot_state` | bot_id, state (`idle`, `thinking`, `working`, `waiting`, `blocked`, `done`), current_action, run_id, updated_at | Denormalized for the roster (I2, I3) |
-| `bot_templates` | id, owner_id, name, visibility (`workspace`, `public`), token, snapshot jsonb, created_at | Snapshot: profile, settings, enabled Skills (embedded), Routines, avatar (B5, B6); never `is_main` (K8) |
 
 ### 4.2 Chats and messages (C1 to C9)
 
@@ -312,7 +311,7 @@ Tokens per step, estimated cost from a pricing table, shown in the activity log 
 | `blocked` | Run failed, connector needs login, computer unavailable | Owner opens the transcript or the next run starts |
 | `done` | Run completed | Three seconds later, to `idle` |
 
-State changes publish `bot.state {bot_id, state, current_action, run_id}` and update `bot_state`. The roster avatar animates on this event; the title bar shows the computer icon when `current_action` is a computer tool (I5).
+State changes publish `bot.state {bot_id, state, current_action, run_id}` and update `bot_state`. The roster avatar animates on this event; the title bar's Preview button shows a green dot when `current_action` is a computer tool (I5).
 
 ### 6.2 Activity labels
 
@@ -437,7 +436,7 @@ The Bot has DOM mode (`browser_*`, cheap and reliable) and pixel mode (`computer
 
 | Level | UI | Implementation |
 | --- | --- | --- |
-| Status | Title-bar computer icon lights up while the Bot's current action is a computer tool | `bot.state.current_action` |
+| Status | A green dot on the title bar's Preview button while the Bot's current action is a computer tool | `bot.state.current_action` |
 | Preview | Pinned right panel with a view-only noVNC canvas of the Bot's screen; the transcript stays in view | WS `/bots/:id/screen/vnc`, proxied by the server to the agent's `/vnc/:n` |
 | Takeover | Full-screen screen view with "Take control" and "Hand back" | Sets `bot_screens.controlled_by_user_id`; while set, the Bot's computer-use calls on that screen return a tool result "The owner has the screen; wait" and the Bot state shows `waiting`. Hand back clears it, syncs the screen's cookies (section 9.6), and resumes. Takeover's screen socket is a control socket (`?control=1`): if the tab closes and it does not return within 30 seconds, the server hands the screen back the same way |
 
@@ -461,7 +460,7 @@ Limit: only cookies carry over. Sessions that a site keeps only in localStorage 
 
 ### 9.7 Sign-in requests and the main Bot (K8)
 
-The owner can mark one Bot as the main Bot (`bots.is_main`, toggled in Bot Settings). A member's first Bot is their main Bot, and so is a Bot made while they have none, whether it is created, made from a template or duplicated. A Bot that needs a login it does not have calls `request_login({site, reason})` instead of asking for credentials (section 5.3).
+The owner can mark one Bot as the main Bot (`bots.is_main`, toggled in Bot Settings). A member's first Bot is their main Bot, and so is a Bot made while they have none, whether it is created or duplicated. A Bot that needs a login it does not have calls `request_login({site, reason})` instead of asking for credentials (section 5.3).
 
 1. The runtime normalizes `site` to its registrable domain (for example `github.com`) and picks the target: the main Bot when one is set and it is not the caller, otherwise the caller itself. The registrable domain comes from a small rule, not the public suffix list: the last two labels of the host, or three under a country code's public second level (`bbc.co.uk`) or a shared hosting domain (`dana.github.io`). So `accounts.google.com` and `mail.google.com` are one request for `google.com`, since the sign-in is a cookie on that domain. The screen opens on the host the request names (a subdomain, or the site itself), or on the sign-in url when the Bot gave one.
 2. When the target is the main Bot, the request is written as a message from the caller in the pair's `bot_to_bot` chat ("Needs sign-in: github.com", with the reason), visible to the owner (C6). The server writes it without calling `route()`, so the main Bot starts no run.
@@ -554,7 +553,7 @@ Widget actions post to `POST /messages/:id/widgets/:part/action`. If a run is wa
 
 ## 13. Avatars (I1, I2)
 
-`packages/avatars` is a deterministic generator: seed to base shape (circle, rounded square, blob variants), palette from a curated set, eye style (several expressive designs), and an accessory (glasses, headphones, antenna, hat, scarf, none). Output is an SVG React component with a `state` prop that maps to CSS keyframes: idle (slow breathing, blinks, eye drift), thinking (eyes up, slight tilt), working (bob, focused eyes), waiting (eyes to the viewer, small bounce), blocked (still, eyes down, muted color), done (single settle). Reduced-motion preference disables motion and keeps a subtle color cue. The server renders static PNGs with resvg for notifications and templates. The profile editor offers "shuffle" and per-part pickers plus image upload.
+`packages/avatars` is a deterministic generator: seed to base shape (circle, rounded square, blob variants; a new Bot gets one of Moon (`bean`), Box (`rounded`) or Egg (`blob`), pinned, and the pickers offer those three), palette from a curated set, eye style (several expressive designs), and an accessory (glasses, headphones, antenna, hat, scarf, none). Output is an SVG React component with a `state` prop that maps to CSS keyframes: idle (slow breathing, blinks, eye drift), thinking (eyes up, slight tilt), working (bob, focused eyes), waiting (eyes to the viewer, small bounce), blocked (still, eyes down, muted color), done (single settle). Reduced-motion preference disables motion and keeps a subtle color cue. The server renders static PNGs with resvg for notifications. The profile editor offers "shuffle" and per-part pickers plus image upload.
 
 ---
 
@@ -565,7 +564,7 @@ Widget actions post to `POST /messages/:id/widgets/:part/action`. If a run is wa
 | Group | Endpoints |
 | --- | --- |
 | Auth | better-auth under `/api/auth/*`, `GET /me`, API keys CRUD (U4) |
-| Bots | `GET/POST /bots`, `GET/PATCH/DELETE /bots/:id` (`PATCH` also sets `is_main`, K8), `POST /bots/:id/duplicate`, `POST /bots/:id/pin|hide`, `GET/PUT /bots/:id/connectors`, `GET/PUT /bots/:id/skills`, `GET/POST/DELETE /bots/:id/memories`, `GET /bots/:id/artifacts`, `GET /bots/:id/state`, templates: `POST /bots/:id/template`, `GET /templates/:token`, `POST /bots/from-template` |
+| Bots | `GET/POST /bots`, `GET/PATCH/DELETE /bots/:id` (`PATCH` also sets `is_main`, K8), `POST /bots/:id/duplicate`, `POST /bots/:id/pin|hide`, `GET/PUT /bots/:id/connectors`, `GET/PUT /bots/:id/skills`, `GET/POST/DELETE /bots/:id/memories`, `GET /bots/:id/artifacts`, `GET /bots/:id/state` |
 | Chats | `GET /chats` (groups and Bot to Bot), `POST /chats` (group, 2 to 6 Bots), `GET /bots/:id/chat` (the transcript), `POST/DELETE /chats/:id/members`, `GET /chats/:id/messages?before=seq&thread=`, `POST /chats/:id/messages`, `POST /messages/:id/reactions`, `POST /messages/:id/widgets/:part/action`, `GET /chats/:id/resync?since=seq` |
 | Runs | `GET /runs/:id`, `GET /runs/:id/steps` (activity log), `POST /runs/:id/cancel`, `GET /runs/:id/events` (SSE), `POST /approvals/:id/decide` |
 | Tools | `GET /connectors/catalog`, `GET/POST /connectors`, `PATCH/DELETE /connectors/:id`, `POST /connectors/:id/test`, `GET /connectors/:id/tools`, `GET /connectors/:id/oauth/start`, `GET /connectors/oauth/callback`, `POST /connectors/discover`, `POST /connectors/import`, admin `GET/PUT /connector-policy` |
@@ -576,9 +575,9 @@ Widget actions post to `POST /messages/:id/widgets/:part/action`. If a run is wa
 | Artifacts | `GET /artifacts/:id`, `GET /artifacts/:id/versions`, `PUT /artifacts/:id` (user edit), `GET /artifacts/:id/download` |
 | Files | `POST /files`, `GET /files` (attachments for the Computer page), `GET /files/:id` |
 | Models | `GET/POST /providers`, `PATCH/DELETE /providers/:id`, `POST /providers/:id/test`, `POST /providers/:id/discover`, `GET/PUT /providers/:id/models`, `GET /models` |
-| Settings | `GET/PATCH /settings` (limits and custom stdio; signup mode, public template links and audit retention on the managed service only), `GET /capabilities` (`deployment`: `self_hosted` or `managed`), managed only: `GET /admin/members`, `PATCH /admin/members/:id`, `GET/POST /admin/invites`, `DELETE /admin/invites/:id`, `GET /admin/audit` |
+| Settings | `GET/PATCH /settings` (limits and custom stdio; signup mode and audit retention on the managed service only), `GET /capabilities` (`deployment`: `self_hosted` or `managed`), managed only: `GET /admin/members`, `PATCH /admin/members/:id`, `GET/POST /admin/invites`, `DELETE /admin/invites/:id`, `GET /admin/audit` |
 
-`OPENBOT_DEPLOYMENT` decides the account model. `self_hosted` (the default) is single-owner: the setup wizard creates the one account (an admin internally, so every role check passes, but called the owner in all copy), every later signup is refused with `SIGNUP_CLOSED` whatever the stored signup mode or an invite, the `/admin/*` routes answer 404, and signup mode, public template links and audit retention keep their defaults. Audit rows are still recorded. The web app reads `deployment` from `/capabilities` and shows no Admin or Audit log tab, invites, member lists, roles or "admin" wording; the owner's limits are in Settings > Limits. `managed` is for the hosted OpenBots service: admins, members, invites, signup modes and the audit log as described here.
+`OPENBOT_DEPLOYMENT` decides the account model. `self_hosted` (the default) is single-owner: the setup wizard creates the one account (an admin internally, so every role check passes, but called the owner in all copy), every later signup is refused with `SIGNUP_CLOSED` whatever the stored signup mode or an invite, the `/admin/*` routes answer 404, and signup mode and audit retention keep their defaults. Audit rows are still recorded. The web app reads `deployment` from `/capabilities` and shows no Admin or Audit log tab, invites, member lists, roles or "admin" wording; the owner's limits are in Settings > Limits. `managed` is for the hosted OpenBots service: admins, members, invites, signup modes and the audit log as described here.
 
 Routes are declared with zod schemas; the OpenAPI document and the TypeScript client in `packages/api-client` are generated.
 
@@ -600,7 +599,7 @@ Every message carries `seq`; `resync` replays after reconnect. A message also ca
 ### 14.3 Web app (PRD section 5)
 
 - Sidebar: New (`Cmd/Ctrl+N`), pinned Bots, Bots, Groups, then Connectors, Skills, Computer, Settings. Roster rows are avatar plus name plus label; the avatar animates with `bot.state` (B1, I2).
-- Bot view: title bar (name, label, computer icon, Preview toggle), tabs (Chat, Routines, Artifacts, Memory, Settings), transcript with prose, widgets, event rows, artifact cards, threads, reactions, and a composer with `/`, `@`, and attachments (C1, C2).
+- Bot view: title bar (name, label, Preview toggle with its computer dot), tabs (Chat, Routines, Artifacts, Memory, Settings), transcript with prose, widgets, event rows, artifact cards, threads, reactions, and a composer with `/`, `@`, and attachments (C1, C2).
 - Group view: the transcript and composer as in a Bot view, with the members' avatars in the title bar. They open a members menu that removes a Bot while two stay; a Bot joins when the owner mentions it with `@` (C4).
 - Right panel (one at a time): computer preview, activity log, artifact viewer, thread.
 - Bot Settings: profile, model, tools and permissions, enabled Skills, a Main Bot toggle for sign-in requests (K8), and webhook settings where the owner generates the inbox token (H1). Turning the Main Bot toggle on for one Bot turns it off on the owner's other Bots in the same transaction.
@@ -768,7 +767,7 @@ Two to three engineers. Phases are sequential except that the Mac app can start 
 | 5. Groups and Bot to Bot | 13 to 14 | Group chats (2 to 6), `@` and `@everyone`, `shouldReply` router, Bot to Bot chats, loop guards, threads, reactions, `status_summary` widget, chat summaries, the main Bot toggle and sign-in requests routed to it | C4 to C9, W1 (status), K8 | A Chief of Staff Bot routes work to three specialists with visible handoffs; loop guard stops a ping-pong; two Bots needing the same site produce one sign-in request on the main Bot, and both resume after Done |
 | 6. Skills and Routines | 15 to 17 | Skills library, `/` references, `use_skill`, `save_skill` with draft widget, Routines tab, schedule presets, scheduler, webhook ingress with presets and matching rules, GitHub and Slack event triggers, Bot inbox endpoint, sync and async modes, run records with trim, `routine_*` widgets, outbound subscriptions | S1 to S3, R1 to R5, H1 to H6, W1 (routine widgets), W3 | Weekday 8:00 Routine posts a briefing; a GitHub PR event triggers a review; a script hits the inbox and gets a sync reply |
 | 7. Mac app | 18 to 20 | Electron shell, server profiles, Keychain-backed token storage, notifications with deep links, menu bar approvals, quick-ask, updater, local stack management, signed and notarized DMG | N1, N2, D2 | Install from Releases, approve from the menu bar, auto-update |
-| 8. Templates, polish, 1.0 | 21 to 22 | Bot templates (workspace and optional public), setup wizard, README with tunnels, backups and upgrades, metrics, soak test, threat-model review, UI removal pass against principle 10 | B6, U3, U4, D1, D3 | Clean install on a Mac and a Linux VPS, both reachable through ngrok and Cloudflare; every PRD "Must" closed |
+| 8. Polish, 1.0 | 21 to 22 | Setup wizard, README with tunnels, backups and upgrades, metrics, soak test, threat-model review, UI removal pass against principle 10 | U3, U4, D1, D3 | Clean install on a Mac and a Linux VPS, both reachable through ngrok and Cloudflare; every PRD "Must" closed |
 | 9. After 1.0 | ongoing | Demonstration-recorded Skills, multi-human groups, widget registry for extensions, MCP runner isolation, web push and PWA, SQLite lite mode, Firecracker or E2B providers, enterprise controls, Windows and Linux desktop | S4, C10, W4, T6, P4, N3, D4 | |
 
 ### 18.1 Phase 0 detail
@@ -835,7 +834,6 @@ Two to three engineers. Phases are sequential except that the Mac app can start 
 
 ### 18.9 Phase 8 detail
 
-- Templates: snapshot and restore, workspace links, admin toggle for public links, JSON export.
 - Setup wizard, README, backup and restore scripts, install script, metrics and dashboards.
 - Soak test: twenty concurrent runs across ten Bots with two accounts' computers for an hour.
 - Threat-model review, dependency audit, license headers, and a UI removal pass: every control must answer "did this help someone delegate?"
@@ -874,7 +872,7 @@ Decided on 2026-10-29 by the product owner while reviewing the MVP:
 - Default model: a new Bot gets its provider's catalog default, `claude-opus-5-5` with adaptive thinking for Anthropic (section 3).
 - Routine results (W3): they stay the `routine_run` widget card, not an event row (section 12.2).
 - Every N minutes (R1): any N from 1 to 1440, scheduled as an interval (section 10.2).
-- Bot inbox (H1): created with every Bot, including duplicates and Bots from a template; the token is shown once when the owner generates it (section 11).
+- Bot inbox (H1): created with every Bot, including duplicates; the token is shown once when the owner generates it (section 11).
 - Attachments are listed on the account-level Computer page next to the computer's files; there is no Files page (section 12.1).
 
 Still to confirm:

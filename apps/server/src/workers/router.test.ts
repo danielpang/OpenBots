@@ -11,7 +11,7 @@ import type { Message } from '../schemas.js';
 import { loadRunPolicy, runSource } from '../services/policy.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import type { RouterOptions } from '../services/router.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel } from './runs.js';
 
 // Group chats and Bot to Bot end to end (plan 7, 18.6): the hook routes owner
@@ -657,7 +657,9 @@ describe('router', () => {
       ]);
       await say(bot.chatId, 'say hi to nobody');
       await settled(bot.chatId);
-      const reply = (await messagesIn(bot.chatId)).find((m) => m.authorType === 'bot')!;
+      const reply = (await messagesIn(bot.chatId)).find(
+        (m) => m.authorType === 'bot' && !isGreeting(m),
+      )!;
       const result = (reply.parts as MessagePart[]).find((p) => p.type === 'tool_result');
       expect(result).toMatchObject({ is_error: true });
       expect(JSON.stringify(result)).toContain('no other Bot called @nobody');

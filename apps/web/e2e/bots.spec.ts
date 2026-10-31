@@ -8,41 +8,35 @@ const signUpRoster = (page: Page) =>
 
 const roster = (page: Page) => page.getByRole('navigation');
 
-test('type a name and start', async ({ page }) => {
+test('create a Bot from a name and an icon, and it asks what to work on', async ({ page }) => {
   await signUpRoster(page);
   await page.getByRole('button', { name: /New/ }).click();
-  await page.getByLabel('Bot name').fill('Finance');
-  await page.getByRole('button', { name: 'Start' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: 'New Bot' })).toBeVisible();
+  // The icon: pick a shape, then shuffle the rest; the shape stays.
+  const shapes = dialog.getByRole('group', { name: 'Shape' });
+  await shapes.getByRole('button', { name: 'Egg' }).click();
+  await dialog.getByRole('button', { name: 'Shuffle' }).click();
+  await expect(shapes.getByRole('button', { name: 'Egg' })).toHaveAttribute('aria-pressed', 'true');
+  await dialog.getByLabel('Bot name').fill('Finance');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
 
   await expect(page).toHaveURL(/\/bots\/[0-9a-f-]+$/);
   await expect(page.getByRole('heading', { name: 'Finance' })).toBeVisible();
   await expect(roster(page).getByRole('link', { name: /Finance/ })).toBeVisible();
-});
+  // The Bot spoke first, in its chat.
+  await expect(
+    page.getByRole('log').getByText("Hi, I'm Finance. What would you like me to work on?"),
+  ).toBeVisible();
 
-test('create a Bot step by step', async ({ page }) => {
-  await signUpRoster(page);
-  await page.getByRole('button', { name: /New/ }).click();
-  await page.getByRole('button', { name: 'Create new Bot' }).click();
-  await page.getByLabel('Name').fill('Support triage');
-  await page.getByRole('button', { name: 'Next' }).click();
-  await page
-    .getByRole('textbox', { name: 'Goal or area of ownership' })
-    .fill('Keep the support inbox triaged');
-  for (let step = 0; step < 3; step++) await page.getByRole('button', { name: 'Next' }).click();
-  await page
-    .getByRole('textbox', { name: 'Approval boundary' })
-    .fill('Ask before replying to a customer');
-  // The last step, an optional recurring schedule (B2), is left off.
-  await page.getByRole('button', { name: 'Next' }).click();
-  const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('heading', { name: 'Recurring schedule' })).toBeVisible();
-  await expect(dialog.getByRole('checkbox', { name: 'Run on a schedule' })).not.toBeChecked();
-  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
-
-  await expect(page).toHaveURL(/\/bots\/[0-9a-f-]+$/);
-  await expect(roster(page).getByRole('link', { name: /Support triage/ })).toBeVisible();
+  // Its shape can change later in Settings.
   await page.getByRole('tab', { name: 'Settings' }).click();
-  await expect(page.getByRole('textbox', { name: /^Description/ })).toHaveValue(
-    'Goal: Keep the support inbox triaged\nAsk first: Ask before replying to a customer',
-  );
+  await page.getByRole('group', { name: 'Shape' }).getByRole('button', { name: 'Box' }).click();
+  const save = page.getByRole('button', { name: 'Save', exact: true }).first();
+  await save.click();
+  await expect(save).toBeDisabled();
+  await page.reload();
+  await expect(
+    page.getByRole('group', { name: 'Shape' }).getByRole('button', { name: 'Box' }),
+  ).toHaveAttribute('aria-pressed', 'true');
 });

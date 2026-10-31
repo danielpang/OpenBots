@@ -54,11 +54,11 @@ Each requirement has an ID for traceability into the technical plan. "Must" is v
 | ID | Requirement | Priority |
 | --- | --- | --- |
 | B1 | The sidebar is a roster of Bots plus group chats, not a list of conversations. Pinned Bots stay at the top. Bots can be hidden from the sidebar without deletion. | Must |
-| B2 | Create a Bot with **New** in the sidebar or `Cmd/Ctrl+N`: either "Create new Bot" (guided) or type a name and start. Creation asks for a goal or area of ownership, tools and sources, working style, approval boundary, and optional recurring schedule. All are optional and editable later. | Must |
+| B2 | Create a Bot with **New** in the sidebar or `Cmd/Ctrl+N`. Creation asks only for a name and an icon: the generated avatar, with a body shape to pick (Moon, Box or Egg) and Shuffle for the rest. Everything else (model, description, tools) has defaults and is editable later in Settings. The Bot's chat opens with its own first message asking what it should work on, so the owner tells it its task and it learns from that. | Must |
 | B3 | Bot profile fields: name, label (title shown under the name), description (rules that should remain true), avatar, model. "Use the description for rules that should remain true. Use the conversation for task-specific instructions." | Must |
 | B4 | Opening a Bot opens its one persistent transcript. There is no "new chat" with a Bot. | Must |
 | B5 | Duplicate a Bot: carries profile, settings, enabled Skills, Routines, and avatar; excludes conversation history, learned memory, attachments, and the main Bot mark (K8); the copy is the main Bot only when the owner has none. | Must |
-| B6 | Bot templates: create a template from a Bot, share as a link (workspace-only by default; public link when the admin allows it), create a Bot from a template. A template never carries the main Bot mark (K8); a Bot made from one is the main Bot only when the owner has none. | Must |
+| B6 | Removed: there are no Bot templates. A Bot starts from a name and an icon and learns its task by asking (B2). | n/a |
 | B7 | Delete removes profile, conversation, and Routines; the UI recommends hiding instead when unsure. | Must |
 | B8 | Limits: 50 Bots per account, six Bots per group chat. Limits are configurable by the self-host admin but default to Grok Bot's. | Must |
 
@@ -183,7 +183,7 @@ Grok Bot exposes webhooks only as a Routine trigger. OpenBot keeps that and adds
 
 ### 4.13 Accounts, sharing, and administration
 
-Self-hosted (the default) is single-owner: the setup wizard creates the one account, sign-up is then closed, and the admin controls below that only matter with members (signup mode, public template links, audit log retention) keep their defaults. The owner still sets the limits (Settings > Limits) and the connector policy. U1 and U3 as written are for the managed service.
+Self-hosted (the default) is single-owner: the setup wizard creates the one account, sign-up is then closed, and the admin controls below that only matter with members (signup mode, audit log retention) keep their defaults. The owner still sets the limits (Settings > Limits) and the connector policy. U1 and U3 as written are for the managed service.
 
 The Mac app running OpenBots on This Mac has no sign-in at all. It is one person on their own computer, so there is no account concept in the UI: no sign-up, no account step in the setup wizard, no sign-in, no sign-out and no Account settings. The app opens signed in as the install's owner, and Settings starts with General, which holds the name Bots use to address the owner, notifications and API keys. A self-hosted server reached over the network or from a browser keeps the usual sign-in. Admins, members and organizations come later with the managed service, likely through better-auth's organization plugin.
 
@@ -191,7 +191,7 @@ The Mac app running OpenBots on This Mac has no sign-in at all. It is one person
 | --- | --- | --- |
 | U1 | First user becomes admin; signup mode is first-user-admin, invite, or open. Optional GitHub and Google sign-in. | Must |
 | U2 | Each member owns their Bots, computer, connectors, and Skills library. | Must |
-| U3 | Admin controls: signup mode, connector allow and block list, public template sharing on or off (off by default), limits. | Must |
+| U3 | Admin controls: signup mode, connector allow and block list, limits. | Must |
 | U4 | API keys for programmatic access to the same API the apps use. | Must |
 
 ### 4.14 Platforms and self-hosting
@@ -274,15 +274,14 @@ The admin can change the other limits (B8, U3). One computer per account and one
 
 ## 7. Non-goals for v1
 
-Multi-human group chats, mobile apps, a template marketplace, demonstration-recorded Skills, enterprise controls, billing, and non-Docker computer providers. Each has a hook in the technical plan.
+Multi-human group chats, mobile apps, demonstration-recorded Skills, enterprise controls, billing, and non-Docker computer providers. Each has a hook in the technical plan.
 
 ---
 
 ## 8. Open questions
 
 1. Should a Bot have exactly one transcript (Grok Bot) or allow archived transcripts for a fresh start? Recommendation: one transcript, with a "start fresh" action that archives the old one and keeps memory.
-2. Public template links on a self-hosted instance leak the instance URL. Recommendation: export as a JSON file by default; public links only when the admin enables them.
-3. How much of the avatar system to ship: generated SVG variations only, or also animated presets? Recommendation: generated SVG with six CSS motion states at 1.0.
+2. How much of the avatar system to ship: generated SVG variations only, or also animated presets? Recommendation: generated SVG with six CSS motion states at 1.0.
 
 ---
 

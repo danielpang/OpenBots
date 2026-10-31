@@ -116,29 +116,6 @@ describe('ownership', () => {
       expect(patched.status).toBe(200);
       expect(((await patched.json()) as Bot).avatar).toEqual(avatar(own));
     });
-
-    it('turns another user’s file in an imported template into a generated avatar', async () => {
-      const source = await newBot(alice, 'Exported');
-      const template = (await (
-        await call(alice, 'POST', `/bots/${source.id}/template`, {})
-      ).json()) as { token: string };
-      const file = (await (await call(alice, 'GET', `/templates/${template.token}`)).json()) as {
-        snapshot: { profile: { avatar: unknown } };
-      };
-
-      const bobs = await fileOf(bobId);
-      file.snapshot.profile.avatar = { kind: 'upload', file_id: bobs };
-      const res = await call(alice, 'POST', '/bots/from-template', { file });
-      expect(res.status).toBe(201);
-      expect(((await res.json()) as Bot).avatar.kind).toBe('generated');
-
-      const own = await fileOf(aliceId);
-      file.snapshot.profile.avatar = { kind: 'upload', file_id: own };
-      const kept = (await (
-        await call(alice, 'POST', '/bots/from-template', { file })
-      ).json()) as Bot;
-      expect(kept.avatar).toEqual({ kind: 'upload', file_id: own });
-    });
   });
 
   describe('an uploaded avatar is a raster image', () => {
@@ -169,20 +146,6 @@ describe('ownership', () => {
         const res = await call(alice, 'PATCH', `/bots/${bot.id}`, { avatar: avatar(file) });
         expect(res.status, mime).toBe(200);
       }
-    });
-
-    it('turns a non-image avatar in an imported template into a generated one', async () => {
-      const source = await newBot(alice, 'Exported');
-      const template = (await (
-        await call(alice, 'POST', `/bots/${source.id}/template`, {})
-      ).json()) as { token: string };
-      const file = (await (await call(alice, 'GET', `/templates/${template.token}`)).json()) as {
-        snapshot: { profile: { avatar: unknown } };
-      };
-      file.snapshot.profile.avatar = avatar(await fileOf(aliceId, { mime: 'application/pdf' }));
-      const res = await call(alice, 'POST', '/bots/from-template', { file });
-      expect(res.status).toBe(201);
-      expect(((await res.json()) as Bot).avatar.kind).toBe('generated');
     });
   });
 
@@ -275,23 +238,6 @@ describe('ownership', () => {
         trigger: trigger(own.endpoint.id),
       });
       expect(patched.status).toBe(200);
-
-      // A template file naming an endpoint gets the Routine without it.
-      const template = (await (
-        await call(alice, 'POST', `/bots/${bot.id}/template`, {})
-      ).json()) as { token: string };
-      const file = (await (await call(alice, 'GET', `/templates/${template.token}`)).json()) as {
-        snapshot: { routines: { trigger: Record<string, unknown> }[] };
-      };
-      file.snapshot.routines[0]!.trigger.endpoint_id = foreign;
-      const restored = (await (
-        await call(alice, 'POST', '/bots/from-template', { file })
-      ).json()) as Bot;
-      const [copy] = await t.deps.db
-        .select()
-        .from(schema.routines)
-        .where(eq(schema.routines.botId, restored.id));
-      expect(copy!.trigger).toMatchObject({ type: 'event', endpoint_id: null });
     });
   });
 

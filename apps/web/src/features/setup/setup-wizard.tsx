@@ -1,5 +1,3 @@
-import { unwrap } from '@openbot/api-client';
-import type { ModelConfig } from '@openbot/shared';
 import {
   Button,
   CheckIcon,
@@ -13,13 +11,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useState, type FormEvent } from 'react';
-import { api, capabilitiesQuery } from '../../app/api.js';
 import { AuthCard, AuthForm, Field } from '../auth/auth-form.js';
 import { authErrorMessage } from '../auth/messages.js';
-import { createBotBody } from '../bots/create.js';
+import { NewBotForm } from '../bots/new-bot-form.js';
 import {
   createProvider,
-  pickerModelsQuery,
   presetsQuery,
   providersQuery,
   testProvider,
@@ -27,11 +23,9 @@ import {
   type Provider,
   type ProviderPreset,
 } from '../models/api.js';
-import { ModelPicker, pickerNeeds } from '../models/ModelPicker.js';
 import { BUILT_IN_KINDS } from '../models/format.js';
 import {
   createAdmin,
-  firstBotNeeds,
   keyPlaceholder,
   keyStatusText,
   SANDBOX_LABELS,
@@ -240,59 +234,19 @@ function KeyWorks() {
   );
 }
 
+/** The first Bot: a name and an icon, like New (B2). It opens on its chat. */
 export function BotStep() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [name, setName] = useState('Assistant');
-  const { data: capabilities } = useQuery(capabilitiesQuery);
-  const { data: all } = useQuery(pickerModelsQuery(pickerNeeds()));
-  // Vision too when the Bot will have a computer to see (L4), as Bot Settings filters.
-  const computer = capabilities?.computer ?? false;
-  const needs = firstBotNeeds(computer, all?.groups ?? []);
-  const { data: models } = useQuery({
-    ...pickerModelsQuery(needs),
-    enabled: !!capabilities && !!all,
-  });
-  const [picked, setModelConfig] = useState<ModelConfig | null>(null);
-  // The model every new Bot gets (plan 3), until the owner picks another.
-  const modelConfig = picked ?? models?.default ?? null;
-  const create = useMutation({
-    mutationFn: () =>
-      unwrap(
-        api.POST('/api/v1/bots', { body: { ...createBotBody(name), modelConfig: modelConfig! } }),
-      ),
-    onSuccess: async (bot) => {
-      queryClient.removeQueries({ queryKey: ['setup'] });
-      await navigate({ to: '/bots/$botId', params: { botId: bot.id } });
-    },
-  });
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (name.trim() && modelConfig) create.mutate();
-  }
-
   return (
-    <form className="flex flex-col gap-4" onSubmit={submit}>
-      <Field label="Name" value={name} onChange={(e) => setName(e.target.value)} required />
-      <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor="setup-model">
-        Model
-        <ModelPicker id="setup-model" value={modelConfig} onChange={setModelConfig} needs={needs} />
-      </label>
-      {computer && !needs.includes('vision') && (
-        <p className="text-xs text-muted-foreground">
-          None of these models can see images. Add one with vision in {'Settings > Models'}.
-        </p>
-      )}
-      {create.error && (
-        <p role="alert" className="text-sm text-destructive">
-          {create.error.message}
-        </p>
-      )}
-      <Button type="submit" disabled={!name.trim() || !modelConfig || create.isPending}>
-        Create Bot
-      </Button>
-    </form>
+    <NewBotForm
+      defaultName="Assistant"
+      submitLabel="Create Bot"
+      onCreated={(bot) => {
+        queryClient.removeQueries({ queryKey: ['setup'] });
+        void navigate({ to: '/bots/$botId', params: { botId: bot.id } });
+      }}
+    />
   );
 }
 

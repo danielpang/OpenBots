@@ -309,12 +309,11 @@ describe('settings', () => {
       body: JSON.stringify(body),
     });
 
-  it('starts from the environment with public templates off', async () => {
+  it('starts from the environment', async () => {
     const res = await t.app.request('/api/v1/settings', { headers: { cookie } });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       signupMode: 'first_user_admin',
-      publicTemplatesEnabled: false,
       limits: { botsPerAccount: 20, botsPerGroup: 6 },
     });
   });
@@ -322,19 +321,16 @@ describe('settings', () => {
   it('persists changes on the workspace row and applies the signup mode', async () => {
     const res = await patch({
       signupMode: 'open',
-      publicTemplatesEnabled: true,
       limits: { botsPerGroup: 4 },
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       signupMode: 'open',
-      publicTemplatesEnabled: true,
       limits: { botsPerAccount: 20, botsPerGroup: 4 },
     });
     const [workspace] = await t.testDb.db.select().from(schema.workspaces);
     expect(workspace!.settings).toEqual({
       signupMode: 'open',
-      publicTemplatesEnabled: true,
       limits: { botsPerGroup: 4 },
     });
 

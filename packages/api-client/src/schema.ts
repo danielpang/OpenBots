@@ -1006,7 +1006,7 @@ export interface paths {
     put?: never;
     /**
      * Create a Bot with its transcript
-     * @description With `connectors` and `routine`, the Bot is created with its connector settings and first Routine in one transaction: when any part fails, nothing is created, so retrying cannot make a second Bot (B2).
+     * @description A name and an avatar are all a Bot needs; everything else has defaults and is editable later. The transcript opens with the Bot's own message asking what to work on, also published as `message.created`.
      */
     post: {
       parameters: {
@@ -1030,7 +1030,7 @@ export interface paths {
             'application/json': components['schemas']['Bot'];
           };
         };
-        /** @description Invalid request, a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`), a connector named twice (`DUPLICATE_CONNECTOR`), or a Routine that is not valid (`INVALID_SCHEDULE`, `EMPTY_ROUTINE`) */
+        /** @description Invalid request, or a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`) */
         400: {
           headers: {
             [name: string]: unknown;
@@ -1048,7 +1048,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description An avatar file, model provider, connector or Skill that is not the caller's */
+        /** @description An avatar file or model provider that is not the caller's */
         404: {
           headers: {
             [name: string]: unknown;
@@ -1057,7 +1057,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description Bot limit reached (`BOT_LIMIT_REACHED`), handle taken (`HANDLE_TAKEN`) or Routine limit reached (`ROUTINE_LIMIT_REACHED`) */
+        /** @description Bot limit reached (`BOT_LIMIT_REACHED`) or handle taken (`HANDLE_TAKEN`) */
         409: {
           headers: {
             [name: string]: unknown;
@@ -1628,374 +1628,6 @@ export interface paths {
     };
     put?: never;
     post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/bots/{id}/template': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /**
-     * Save a Bot as a template
-     * @description Snapshots the profile, settings, avatar, enabled Skills and Routines; never the transcript, memories or attachments.
-     */
-    post: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          id: string;
-        };
-        cookie?: never;
-      };
-      requestBody?: {
-        content: {
-          'application/json': components['schemas']['CreateTemplate'];
-        };
-      };
-      responses: {
-        /** @description The template */
-        201: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['Template'];
-          };
-        };
-        /** @description Invalid request */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Public links are off (`PUBLIC_TEMPLATES_DISABLED`) */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such Bot */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/templates': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** The workspace's templates, newest first */
-    get: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Templates */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': {
-              items: components['schemas']['Template'][];
-              /** @description Whether the admin allows public links, so a template can be public */
-              publicEnabled: boolean;
-            };
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/templates/{token}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Open a template link; the JSON export
-     * @description Members of the workspace open any template. Without a session, only a public template answers, and only while the admin has public links on.
-     */
-    get: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          token: string;
-        };
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description The template file */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['TemplateFile'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such template */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    put?: never;
-    post?: never;
-    /** Delete one of your templates; its link stops working */
-    delete: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          token: string;
-        };
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Deleted */
-        204: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content?: never;
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such template of yours */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    options?: never;
-    head?: never;
-    /**
-     * Change one of your templates' visibility
-     * @description Making a template public needs the admin to allow public links; making it workspace-only closes its public link.
-     */
-    patch: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          token: string;
-        };
-        cookie?: never;
-      };
-      requestBody: {
-        content: {
-          'application/json': components['schemas']['UpdateTemplate'];
-        };
-      };
-      responses: {
-        /** @description The template */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['Template'];
-          };
-        };
-        /** @description Invalid request */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Public links are off (`PUBLIC_TEMPLATES_DISABLED`) */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such template of yours */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    trace?: never;
-  };
-  '/api/v1/bots/from-template': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Create a Bot from a template link or an imported file */
-    post: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody: {
-        content: {
-          'application/json': components['schemas']['FromTemplate'];
-        };
-      };
-      responses: {
-        /** @description The new Bot, and whether it runs on the template's model */
-        201: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['BotFromTemplate'];
-          };
-        };
-        /** @description Invalid template (`INVALID_TEMPLATE`, `INVALID_SCHEDULE`) */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such template */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Bot limit (`BOT_LIMIT_REACHED`), Routine limit (`ROUTINE_LIMIT_REACHED`) or Skill limit (`SKILL_LIMIT_REACHED`) reached */
-        409: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
     delete?: never;
     options?: never;
     head?: never;
@@ -8269,7 +7901,6 @@ export interface components {
     };
     Settings: {
       signupMode: components['schemas']['SignupMode'];
-      publicTemplatesEnabled: boolean;
       limits: components['schemas']['Limits'];
       /** @description Audit log rows older than this many days are deleted (default 180) */
       auditRetentionDays: number;
@@ -8280,7 +7911,6 @@ export interface components {
     SignupMode: 'first_user_admin' | 'invite' | 'open';
     SettingsPatch: {
       signupMode?: components['schemas']['SignupMode'];
-      publicTemplatesEnabled?: boolean;
       limits?: {
         botsPerAccount?: number;
         botsPerGroup?: number;
@@ -8769,7 +8399,7 @@ export interface components {
       currentAction: string | null;
       /** Format: uuid */
       runId: string | null;
-      /** @description The tool running while `working`; a computer tool lights the title-bar computer icon (I5) */
+      /** @description The tool running while `working`; a computer tool shows a dot on the Preview button (I5) */
       currentTool?: string | null;
       /** Format: date-time */
       updatedAt: string;
@@ -8978,84 +8608,7 @@ export interface components {
         };
         httpAllowlist?: string[];
       };
-      /** @description Per-connector settings, as `PUT /bots/{id}/connectors` takes them; connectors left out keep the defaults (T1) */
-      connectors?: components['schemas']['BotConnectorPermission'][];
-      routine?: components['schemas']['CreateRoutine'];
     };
-    BotConnectorPermission: {
-      /** Format: uuid */
-      connectorId: string;
-      /** @description Null allows every tool; [] allows none */
-      toolAllowlist: string[] | null;
-      toolDenylist: string[];
-      /**
-       * @description Forces a decision for every tool of this connector; null keeps the policy
-       * @enum {string|null}
-       */
-      approvalOverride: 'auto' | 'ask' | 'deny' | null;
-    };
-    /** @description The Bot's first Routine, as `POST /bots/{id}/routines` takes it (guided create, B2). The Bot, its connector settings and this Routine are created together or not at all */
-    CreateRoutine: {
-      name: string;
-      trigger: components['schemas']['RoutineTriggerInput'];
-      prompt?: string;
-      /** Format: uuid */
-      skillId?: string | null;
-      enabled?: boolean;
-      /** @description IANA name; defaults to UTC */
-      timezone?: string;
-    };
-    /** @description A schedule needs only its preset; the server derives the cron */
-    RoutineTriggerInput:
-      | {
-          /** @enum {string} */
-          type: 'schedule';
-          preset:
-            | {
-                /** @enum {string} */
-                kind: 'daily';
-                time: string;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'weekdays';
-                time: string;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'weekly';
-                day: number;
-                time: string;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'monthly';
-                date: number | 'last';
-                time: string;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'every_minutes';
-                minutes: number;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'custom';
-                cron: string;
-              };
-          cron?: string;
-        }
-      | {
-          /** @enum {string} */
-          type: 'event';
-          /** @enum {string} */
-          source: 'webhook' | 'github' | 'slack';
-          /** Format: uuid */
-          endpoint_id?: string | null;
-          match?: {
-            [key: string]: unknown;
-          };
-        };
     UpdateBot: {
       name?: string;
       /** @description Made from the name when omitted; a leading `@` is ignored */
@@ -9314,335 +8867,6 @@ export interface components {
         /** @description Runs whose model has no pricing, which the estimate leaves out */
         unpricedRuns: number;
       }[];
-    };
-    Template: {
-      /** Format: uuid */
-      id: string;
-      name: string;
-      visibility: components['schemas']['TemplateVisibility'];
-      /** @description The link token, for `GET /templates/{token}` */
-      token: string;
-      owner: {
-        /** Format: uuid */
-        id: string;
-        name: string;
-      };
-      botName: string;
-      /** @description Skills in the snapshot */
-      skills: number;
-      /** @description Routines in the snapshot */
-      routines: number;
-      /** Format: date-time */
-      createdAt: string;
-    };
-    /**
-     * @description `public` links open without signing in, while the admin allows them
-     * @enum {string}
-     */
-    TemplateVisibility: 'workspace' | 'public';
-    CreateTemplate: {
-      /** @description The Bot's name when omitted */
-      name?: string;
-      visibility?: components['schemas']['TemplateVisibility'] & unknown;
-    };
-    /** @description A template as a file: the JSON export, and what an import takes */
-    TemplateFile: {
-      /** @enum {string} */
-      format: 'openbot.template';
-      /** @enum {number} */
-      version: 1;
-      name: string;
-      snapshot: {
-        profile: {
-          name: string;
-          label: string | null;
-          description: string;
-          avatar:
-            | {
-                /** @enum {string} */
-                kind: 'generated';
-                seed: string;
-                shape?: string;
-                palette?: string;
-                eyes?: string;
-                accessory?: string;
-              }
-            | {
-                /** @enum {string} */
-                kind: 'upload';
-                /** Format: uuid */
-                file_id: string;
-              };
-        };
-        settings: {
-          modelConfig: {
-            /** Format: uuid */
-            provider_id: string;
-            model_id: string;
-            temperature?: number;
-            reasoning?: boolean | ('low' | 'medium' | 'high');
-            max_steps?: number;
-          } | null;
-          toolPolicy: {
-            tools?: {
-              [key: string]: 'auto' | 'ask' | 'deny';
-            };
-            groups?: {
-              /** @enum {string} */
-              conversation?: 'auto' | 'ask' | 'deny';
-              /** @enum {string} */
-              artifacts?: 'auto' | 'ask' | 'deny';
-              /** @enum {string} */
-              builtin?: 'auto' | 'ask' | 'deny';
-              /** @enum {string} */
-              connector?: 'auto' | 'ask' | 'deny';
-              /** @enum {string} */
-              computer?: 'auto' | 'ask' | 'deny';
-            };
-            triggers?: {
-              message?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              mention?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              bot_message?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              bot_dm?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              widget_action?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              webhook?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              routine?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-              resume?: {
-                /** @enum {string} */
-                default?: 'auto' | 'ask' | 'deny';
-                groups?: {
-                  /** @enum {string} */
-                  conversation?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  artifacts?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  builtin?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  connector?: 'auto' | 'ask' | 'deny';
-                  /** @enum {string} */
-                  computer?: 'auto' | 'ask' | 'deny';
-                };
-                tools?: {
-                  [key: string]: 'auto' | 'ask' | 'deny';
-                };
-              };
-            };
-            httpAllowlist?: string[];
-          };
-        };
-        skills: {
-          ref: string;
-          name: string;
-          content?: string;
-          sections?: {
-            [key: string]: string;
-          };
-          /** @enum {string} */
-          status?: 'draft' | 'ready';
-          enabled: boolean;
-        }[];
-        routines: {
-          name: string;
-          trigger:
-            | {
-                /** @enum {string} */
-                type: 'schedule';
-                cron?: string;
-                preset:
-                  | {
-                      /** @enum {string} */
-                      kind: 'daily';
-                      time: string;
-                    }
-                  | {
-                      /** @enum {string} */
-                      kind: 'weekdays';
-                      time: string;
-                    }
-                  | {
-                      /** @enum {string} */
-                      kind: 'weekly';
-                      day: number;
-                      time: string;
-                    }
-                  | {
-                      /** @enum {string} */
-                      kind: 'monthly';
-                      date: number | 'last';
-                      time: string;
-                    }
-                  | {
-                      /** @enum {string} */
-                      kind: 'every_minutes';
-                      minutes: number;
-                    }
-                  | {
-                      /** @enum {string} */
-                      kind: 'custom';
-                      cron: string;
-                    };
-              }
-            | {
-                /** @enum {string} */
-                type: 'event';
-                /** @enum {string} */
-                source: 'webhook' | 'github' | 'slack';
-                /** Format: uuid */
-                endpoint_id?: string | null;
-                match?: {
-                  [key: string]: unknown;
-                };
-              };
-          prompt: string;
-          skillRef: string | null;
-          enabled: boolean;
-          timezone: string;
-          postsToTranscript: boolean;
-        }[];
-      };
-    };
-    UpdateTemplate: {
-      visibility: components['schemas']['TemplateVisibility'];
-    };
-    BotFromTemplate: components['schemas']['Bot'] & {
-      /** @description Null when the template names no model */
-      templateModel: {
-        /** @description The model the template names */
-        modelId: string;
-        /** @description False when it is not available here (another instance's or another member's provider, or a model that is missing or turned off), so the Bot got the default model instead */
-        used: boolean;
-      } | null;
-    };
-    FromTemplate: {
-      /** @description A template link token */
-      token?: string;
-      file?: components['schemas']['TemplateFile'] & unknown;
     };
     Chat: {
       /** Format: uuid */
@@ -10304,6 +9528,18 @@ export interface components {
       /** @description False means the defaults: every tool, policy approvals */
       customized: boolean;
     };
+    BotConnectorPermission: {
+      /** Format: uuid */
+      connectorId: string;
+      /** @description Null allows every tool; [] allows none */
+      toolAllowlist: string[] | null;
+      toolDenylist: string[];
+      /**
+       * @description Forces a decision for every tool of this connector; null keeps the policy
+       * @enum {string|null}
+       */
+      approvalOverride: 'auto' | 'ask' | 'deny' | null;
+    };
     BotTool: {
       /** @description The name in `tool_policy.tools`: `<connector>__<tool>` for MCP */
       name: string;
@@ -10541,6 +9777,67 @@ export interface components {
       resultMessageId: string | null;
       exception: string | null;
     } | null;
+    CreateRoutine: {
+      name: string;
+      trigger: components['schemas']['RoutineTriggerInput'];
+      prompt?: string;
+      /** Format: uuid */
+      skillId?: string | null;
+      enabled?: boolean;
+      /** @description IANA name; defaults to UTC */
+      timezone?: string;
+    };
+    /** @description A schedule needs only its preset; the server derives the cron */
+    RoutineTriggerInput:
+      | {
+          /** @enum {string} */
+          type: 'schedule';
+          preset:
+            | {
+                /** @enum {string} */
+                kind: 'daily';
+                time: string;
+              }
+            | {
+                /** @enum {string} */
+                kind: 'weekdays';
+                time: string;
+              }
+            | {
+                /** @enum {string} */
+                kind: 'weekly';
+                day: number;
+                time: string;
+              }
+            | {
+                /** @enum {string} */
+                kind: 'monthly';
+                date: number | 'last';
+                time: string;
+              }
+            | {
+                /** @enum {string} */
+                kind: 'every_minutes';
+                minutes: number;
+              }
+            | {
+                /** @enum {string} */
+                kind: 'custom';
+                cron: string;
+              };
+          cron?: string;
+        }
+      | {
+          /** @enum {string} */
+          type: 'event';
+          /** @enum {string} */
+          source: 'webhook' | 'github' | 'slack';
+          /** Format: uuid */
+          endpoint_id?: string | null;
+          match?: {
+            [key: string]: unknown;
+          };
+        };
     UpdateRoutine: {
       name?: string;
       trigger?: components['schemas']['RoutineTriggerInput'];

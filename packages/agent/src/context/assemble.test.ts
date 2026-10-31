@@ -156,11 +156,47 @@ describe('assembleContext', () => {
       ],
     });
     expect(messages).toEqual([
+      { role: 'user', content: '[system] The conversation below opens with your message.' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Hi' }] },
       {
         role: 'user',
         content:
           '[@researcher (bot)] <bot_message from="researcher">\nFound it\n' +
           "[used tools: Searched web 'x'; web_fetch]\nSummary follows.\n</bot_message>",
+      },
+    ]);
+  });
+
+  it("keeps a new Bot's greeting as its own first message", () => {
+    const context = assembleContext({
+      ...base,
+      bot: { ...base.bot, description: '' },
+      messages: [
+        {
+          seq: 1,
+          author: { kind: 'bot', handle: 'scout', self: true },
+          parts: [{ type: 'text', text: "Hi, I'm Scout. What would you like me to work on?" }],
+        },
+        {
+          seq: 2,
+          author: { kind: 'owner', handle: 'dana' },
+          parts: [{ type: 'text', text: 'Watch our competitors and tell me what changes.' }],
+        },
+      ],
+    });
+    // Without standing rules, the owner's answer is how it learns its job.
+    expect(instructionsText(context)).toContain(
+      '## Standing rules from your owner\n(none set. Your owner tells you your job in this chat;',
+    );
+    expect(context.messages).toEqual([
+      { role: 'user', content: '[system] The conversation below opens with your message.' },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: "Hi, I'm Scout. What would you like me to work on?" }],
+      },
+      {
+        role: 'user',
+        content: '[@dana (owner)] Watch our competitors and tell me what changes.',
       },
     ]);
   });

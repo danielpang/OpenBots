@@ -3,4 +3,10 @@
 
 export { Avatar, defaultFileUrl, type AvatarProps } from './avatar.js';
 export { AvatarEditor, type AvatarEditorProps } from './editor.js';
+export {
+  AvatarPicker,
+  ShapePicker,
+  type AvatarPickerProps,
+  type ShapePickerProps,
+} from './picker.js';
 export { AVATAR_IMAGE_TYPES, uploadAvatarImage } from './upload.js';

@@ -26,8 +26,6 @@ export const botStateKind = pgEnum('bot_state_kind', [
   'done',
 ]);
 
-export const templateVisibility = pgEnum('template_visibility', ['workspace', 'public']);
-
 export const bots = pgTable(
   'bots',
   {
@@ -52,14 +50,11 @@ export const bots = pgTable(
     /**
      * The owner's main Bot (K8): other Bots' sign-in requests go to it. At
      * most one per owner. A new Bot is it when the owner has none (their
-     * first Bot, or one made after the main Bot went); duplicates and
-     * templates never carry it over.
+     * first Bot, or one made after the main Bot went); duplicates never
+     * carry it over.
      */
     isMain: boolean('is_main').notNull().default(false),
     archivedAt: timestamptz('archived_at'),
-    templateId: uuid('template_id').references((): AnyPgColumn => botTemplates.id, {
-      onDelete: 'set null',
-    }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -81,23 +76,8 @@ export const botState = pgTable('bot_state', {
     .references(() => bots.id, { onDelete: 'cascade' }),
   state: botStateKind('state').notNull().default('idle'),
   currentAction: text('current_action'),
-  /** The tool running while `working` (I5: a computer tool lights the title-bar icon). */
+  /** The tool running while `working` (I5: a computer tool shows on the Preview button). */
   currentTool: text('current_tool'),
   runId: uuid('run_id').references((): AnyPgColumn => runs.id, { onDelete: 'set null' }),
   updatedAt: updatedAt(),
-});
-
-/** Snapshot: profile, settings, enabled Skills (embedded), Routines, avatar (B5, B6). */
-export const botTemplates = pgTable('bot_templates', {
-  id: id(),
-  workspaceId: workspaceId(),
-  ownerId: uuid('owner_id')
-    .notNull()
-    .references(() => users.id),
-  name: text('name').notNull(),
-  visibility: templateVisibility('visibility').notNull().default('workspace'),
-  /** Share-link token; null until a link is made. */
-  token: text('token').unique(),
-  snapshot: jsonb('snapshot').notNull(),
-  createdAt: createdAt(),
 });

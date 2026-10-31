@@ -29,7 +29,6 @@ const server = vi.hoisted(() => {
     if (path === '/api/v1/settings') {
       return Response.json({
         signupMode: 'first_user_admin',
-        publicTemplatesEnabled: false,
         auditRetentionDays: 180,
         customStdioEnabled: false,
         limits: {

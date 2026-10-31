@@ -127,7 +127,7 @@ describe('audit log', () => {
     expect(JSON.stringify(failed)).not.toContain('wrong password');
   });
 
-  it('records API keys and template links created and revoked', async () => {
+  it('records API keys created and revoked', async () => {
     const key = (await (await call(member, 'POST', '/api-keys', { name: 'ci' })).json()) as {
       id: string;
       key: string;
@@ -140,25 +140,6 @@ describe('audit log', () => {
       expect.objectContaining({ actorId: memberId, targetId: key.id, metadata: { name: 'ci' } }),
     ]);
     expect(JSON.stringify(await read())).not.toContain(key.key);
-
-    const bot = (await (await call(member, 'POST', '/bots', { name: 'Shared' })).json()) as {
-      id: string;
-    };
-    const template = (await (
-      await call(member, 'POST', `/bots/${bot.id}/template`, {})
-    ).json()) as { id: string; token: string };
-    expect((await call(member, 'DELETE', `/templates/${template.token}`)).status).toBe(204);
-    expect(await rows('template.share')).toEqual([
-      expect.objectContaining({
-        actorId: memberId,
-        targetId: template.id,
-        metadata: { botId: bot.id, visibility: 'workspace' },
-      }),
-    ]);
-    expect(await rows('template.revoke')).toEqual([
-      expect.objectContaining({ actorId: memberId, targetId: template.id }),
-    ]);
-    expect(JSON.stringify(await read())).not.toContain(template.token);
   });
 
   it('records invites made and redeemed, and settings changes', async () => {

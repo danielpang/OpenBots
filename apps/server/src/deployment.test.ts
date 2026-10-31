@@ -96,10 +96,7 @@ describe('a self-hosted install', () => {
 
   it('keeps the limits and custom stdio for the owner, and the rest at defaults', async () => {
     const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, {
-      publicTemplatesEnabled: true,
-      auditRetentionDays: 7,
-    });
+    await updateSettings(t.deps.db, workspace, { signupMode: 'open', auditRetentionDays: 7 });
     const res = await call(t, 'PATCH', '/api/v1/settings', owner, {
       limits: { botsPerGroup: 4 },
       customStdioEnabled: true,
@@ -107,17 +104,12 @@ describe('a self-hosted install', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       signupMode: 'first_user_admin',
-      publicTemplatesEnabled: false,
       auditRetentionDays: 180,
       customStdioEnabled: true,
       limits: { botsPerGroup: 4 },
     });
 
-    for (const body of [
-      { signupMode: 'open' },
-      { publicTemplatesEnabled: true },
-      { auditRetentionDays: 30 },
-    ]) {
+    for (const body of [{ signupMode: 'open' }, { auditRetentionDays: 30 }]) {
       const refused = await call(t, 'PATCH', '/api/v1/settings', owner, body);
       expect(refused.status).toBe(400);
       expect(await refused.json()).toMatchObject({ code: 'MANAGED_ONLY' });

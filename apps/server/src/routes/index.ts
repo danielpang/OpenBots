@@ -25,7 +25,6 @@ import { runRoutes } from './runs.js';
 import { settingsRoutes } from './settings.js';
 import { setupRoutes } from './setup.js';
 import { skillRoutes } from './skills.js';
-import { templateRoutes } from './templates.js';
 import { webhookRoutes } from './webhooks.js';
 import { hookIngressRoutes } from '../hooks/ingress.js';
 
@@ -42,7 +41,6 @@ export function mountRoutes(app: OpenAPIHono<AppEnv>) {
   app.route('/api/v1', resyncRoutes);
   app.route('/api/v1', capabilityRoutes);
   app.route('/api/v1', botRoutes);
-  app.route('/api/v1', templateRoutes);
   app.route('/api/v1', avatarRoutes);
   app.route('/api/v1', chatRoutes);
   app.route('/api/v1', messageRoutes);

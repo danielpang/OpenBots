@@ -28,7 +28,7 @@ import {
   type RunJob,
   type RunState,
 } from '../services/runs.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import {
   createRunWorker,
   MAX_TAKEOVERS,
@@ -138,7 +138,7 @@ describe('run worker', () => {
         .from(schema.messages)
         .where(eq(schema.messages.chatId, chatId))
         .orderBy(asc(schema.messages.seq))
-    ).filter((m) => m.authorType !== 'user');
+    ).filter((m) => m.authorType !== 'user' && !isGreeting(m));
 
   const statesOf = (botId: string, from: WsEvent[] = events) =>
     from
@@ -238,6 +238,19 @@ describe('run worker', () => {
     ]);
     const got = await call('GET', `/runs/${run!.id}`);
     expect(await got.json()).toMatchObject({ id: run!.id, status: 'completed', waiting: null });
+  });
+
+  it('reads its greeting as its own first message when the owner answers it', async () => {
+    const { bot, model } = await newBot('Greeter', [[{ text: 'Noted, competitors it is.' }]]);
+    await say(bot, 'Watch our competitors.');
+    await settled(bot.id, 'completed');
+    expect(promptText(model.calls[0]!)).toContain(
+      [
+        'user: [system] The conversation below opens with your message.',
+        "assistant: Hi, I'm Greeter. What would you like me to work on?",
+        'user: [@dana (owner)] Watch our competitors.',
+      ].join('\n'),
+    );
   });
 
   it('sets working while a tool runs and records a labeled step', async () => {
@@ -577,8 +590,9 @@ describe('run worker', () => {
       const state = (await runsOf(bot.id))[0]!.state as RunState;
       expect(state.checkpoint?.calls).toMatchObject([{ toolCallId: 'r1' }]);
       expect(state.checkpoint?.calls[0]!.output).toBeUndefined();
-      // A takeover that overflows may cut only this many leading messages (plan 5.7).
-      expect(state.checkpoint?.contextLength).toBe(1);
+      // A takeover that overflows may cut only this many leading messages (plan 5.7):
+      // the opening line, the Bot's greeting and the owner's message.
+      expect(state.checkpoint?.contextLength).toBe(3);
     });
     const [run] = await runsOf(bot.id);
 

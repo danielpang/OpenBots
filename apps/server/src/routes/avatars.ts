@@ -5,7 +5,7 @@ import { requireUser } from '../middleware/auth.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
 import { getBot } from '../services/bots.js';
 
-// Static avatar PNGs for notifications and templates (I1, plan 13): the
+// Static avatar PNGs for notifications (I1, plan 13): the
 // resting pose only; motion lives in the web component.
 
 export const avatarRoutes = createRouter().openapi(

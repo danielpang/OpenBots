@@ -48,6 +48,13 @@ export interface TestApp {
 
 export const ORIGIN = 'http://localhost:3000';
 
+/**
+ * A new Bot's greeting (services/bots.ts): the first message in its
+ * transcript, from the Bot itself, written without a run.
+ */
+export const isGreeting = (m: { seq: number; authorType: string; runId?: string | null }) =>
+  m.seq === 1 && m.authorType === 'bot' && !m.runId;
+
 export interface TestAppOptions {
   /** better-auth's rate limit; off by default, as tests sign up many people from no address. */
   rateLimit?: boolean;

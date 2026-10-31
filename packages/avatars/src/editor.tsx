@@ -3,15 +3,16 @@ import { Button, cn } from '@openbot/ui';
 import { useRef, useState, type ChangeEvent } from 'react';
 import { Avatar, defaultFileUrl } from './avatar.js';
 import { resolveParts, shuffle, type AvatarParams, type GeneratedAvatar } from './generate.js';
-import { AVATAR_ACCESSORIES, AVATAR_EYES, AVATAR_PALETTES, AVATAR_SHAPES } from './parts.js';
+import { AVATAR_ACCESSORIES, AVATAR_EYES, AVATAR_PALETTES } from './parts.js';
+import { ShapePicker } from './picker.js';
 import { AVATAR_STATES } from './states.js';
 import { AVATAR_IMAGE_TYPES, uploadAvatarImage } from './upload.js';
 
-// The profile avatar editor (I1, plan 13): shuffle, a picker per part, a
-// preview of all six states, and an image upload.
+// The profile avatar editor (I1, plan 13): shuffle, the Bot shapes (Moon,
+// Box, Egg) and a picker per other part, a preview of all six states, and an
+// image upload. A shape picked here is pinned, so Shuffle keeps it.
 
 const PICKERS = [
-  { part: 'shape', label: 'Shape', options: AVATAR_SHAPES },
   { part: 'palette', label: 'Colours', options: AVATAR_PALETTES },
   { part: 'eyes', label: 'Eyes', options: AVATAR_EYES },
   { part: 'accessory', label: 'Accessory', options: AVATAR_ACCESSORIES },
@@ -81,7 +82,10 @@ export function AvatarEditor({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => change(shuffle((generated ?? lastGenerated).seed, taken))}
+              onClick={() => {
+                const from = generated ?? lastGenerated;
+                change(shuffle(from.seed, taken, from.shape ? { shape: from.shape } : {}));
+              }}
             >
               Shuffle
             </Button>
@@ -123,6 +127,13 @@ export function AvatarEditor({
           </figure>
         ))}
       </div>
+
+      {generated && (
+        <fieldset className="flex flex-col gap-1.5">
+          <legend className="mb-1.5 text-xs font-medium text-muted-foreground">Shape</legend>
+          <ShapePicker value={generated} onChange={change} className="self-start" />
+        </fieldset>
+      )}
 
       {generated &&
         parts &&

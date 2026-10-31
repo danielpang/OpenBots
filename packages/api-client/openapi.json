@@ -275,9 +275,6 @@
           "signupMode": {
             "$ref": "#/components/schemas/SignupMode"
           },
-          "publicTemplatesEnabled": {
-            "type": "boolean"
-          },
           "limits": {
             "$ref": "#/components/schemas/Limits"
           },
@@ -290,13 +287,7 @@
             "description": "Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)"
           }
         },
-        "required": [
-          "signupMode",
-          "publicTemplatesEnabled",
-          "limits",
-          "auditRetentionDays",
-          "customStdioEnabled"
-        ]
+        "required": ["signupMode", "limits", "auditRetentionDays", "customStdioEnabled"]
       },
       "SignupMode": {
         "type": "string",
@@ -307,9 +298,6 @@
         "properties": {
           "signupMode": {
             "$ref": "#/components/schemas/SignupMode"
-          },
-          "publicTemplatesEnabled": {
-            "type": "boolean"
           },
           "limits": {
             "type": "object",
@@ -1490,7 +1478,7 @@
           },
           "currentTool": {
             "type": ["string", "null"],
-            "description": "The tool running while `working`; a computer tool lights the title-bar computer icon (I5)"
+            "description": "The tool running while `working`; a computer tool shows a dot on the Preview button (I5)"
           },
           "updatedAt": {
             "type": "string",
@@ -1992,238 +1980,10 @@
               }
             },
             "additionalProperties": false
-          },
-          "connectors": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BotConnectorPermission"
-            },
-            "maxItems": 500,
-            "description": "Per-connector settings, as `PUT /bots/{id}/connectors` takes them; connectors left out keep the defaults (T1)"
-          },
-          "routine": {
-            "$ref": "#/components/schemas/CreateRoutine"
           }
         },
         "required": ["name"],
         "additionalProperties": false
-      },
-      "BotConnectorPermission": {
-        "type": "object",
-        "properties": {
-          "connectorId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "toolAllowlist": {
-            "type": ["array", "null"],
-            "items": {
-              "type": "string"
-            },
-            "description": "Null allows every tool; [] allows none"
-          },
-          "toolDenylist": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "approvalOverride": {
-            "type": ["string", "null"],
-            "enum": ["auto", "ask", "deny", null],
-            "description": "Forces a decision for every tool of this connector; null keeps the policy"
-          }
-        },
-        "required": ["connectorId", "toolAllowlist", "toolDenylist", "approvalOverride"]
-      },
-      "CreateRoutine": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 120
-          },
-          "trigger": {
-            "$ref": "#/components/schemas/RoutineTriggerInput"
-          },
-          "prompt": {
-            "type": "string",
-            "maxLength": 8000
-          },
-          "skillId": {
-            "type": ["string", "null"],
-            "format": "uuid"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "timezone": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64,
-            "description": "IANA name; defaults to UTC"
-          }
-        },
-        "required": ["name", "trigger"],
-        "additionalProperties": false,
-        "description": "The Bot's first Routine, as `POST /bots/{id}/routines` takes it (guided create, B2). The Bot, its connector settings and this Routine are created together or not at all"
-      },
-      "RoutineTriggerInput": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["schedule"]
-              },
-              "preset": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["daily"]
-                      },
-                      "time": {
-                        "type": "string",
-                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                      }
-                    },
-                    "required": ["kind", "time"],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["weekdays"]
-                      },
-                      "time": {
-                        "type": "string",
-                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                      }
-                    },
-                    "required": ["kind", "time"],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["weekly"]
-                      },
-                      "day": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 6
-                      },
-                      "time": {
-                        "type": "string",
-                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                      }
-                    },
-                    "required": ["kind", "day", "time"],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["monthly"]
-                      },
-                      "date": {
-                        "anyOf": [
-                          {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 31
-                          },
-                          {
-                            "type": "string",
-                            "enum": ["last"]
-                          }
-                        ]
-                      },
-                      "time": {
-                        "type": "string",
-                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                      }
-                    },
-                    "required": ["kind", "date", "time"],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["every_minutes"]
-                      },
-                      "minutes": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 1440
-                      }
-                    },
-                    "required": ["kind", "minutes"],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "type": "string",
-                        "enum": ["custom"]
-                      },
-                      "cron": {
-                        "type": "string",
-                        "minLength": 9,
-                        "maxLength": 120
-                      }
-                    },
-                    "required": ["kind", "cron"],
-                    "additionalProperties": false
-                  }
-                ]
-              },
-              "cron": {
-                "type": "string"
-              }
-            },
-            "required": ["type", "preset"],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["event"]
-              },
-              "source": {
-                "type": "string",
-                "enum": ["webhook", "github", "slack"]
-              },
-              "endpoint_id": {
-                "type": ["string", "null"],
-                "format": "uuid"
-              },
-              "match": {
-                "type": "object",
-                "additionalProperties": {}
-              }
-            },
-            "required": ["type", "source"],
-            "additionalProperties": false
-          }
-        ],
-        "description": "A schedule needs only its preset; the server derives the cron"
       },
       "UpdateBot": {
         "type": "object",
@@ -2873,916 +2633,6 @@
           }
         },
         "required": ["days", "since", "totals", "daily", "models"]
-      },
-      "Template": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "name": {
-            "type": "string"
-          },
-          "visibility": {
-            "$ref": "#/components/schemas/TemplateVisibility"
-          },
-          "token": {
-            "type": "string",
-            "description": "The link token, for `GET /templates/{token}`"
-          },
-          "owner": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": ["id", "name"]
-          },
-          "botName": {
-            "type": "string"
-          },
-          "skills": {
-            "type": "integer",
-            "description": "Skills in the snapshot"
-          },
-          "routines": {
-            "type": "integer",
-            "description": "Routines in the snapshot"
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "visibility",
-          "token",
-          "owner",
-          "botName",
-          "skills",
-          "routines",
-          "createdAt"
-        ]
-      },
-      "TemplateVisibility": {
-        "type": "string",
-        "enum": ["workspace", "public"],
-        "description": "`public` links open without signing in, while the admin allows them"
-      },
-      "CreateTemplate": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 80,
-            "description": "The Bot's name when omitted"
-          },
-          "visibility": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TemplateVisibility"
-              },
-              {
-                "description": "`workspace` by default"
-              }
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
-      "TemplateFile": {
-        "type": "object",
-        "properties": {
-          "format": {
-            "type": "string",
-            "enum": ["openbot.template"]
-          },
-          "version": {
-            "type": "number",
-            "enum": [1]
-          },
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 80
-          },
-          "snapshot": {
-            "type": "object",
-            "properties": {
-              "profile": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 80
-                  },
-                  "label": {
-                    "type": ["string", "null"],
-                    "maxLength": 80
-                  },
-                  "description": {
-                    "type": "string",
-                    "maxLength": 20000
-                  },
-                  "avatar": {
-                    "oneOf": [
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "enum": ["generated"]
-                          },
-                          "seed": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          },
-                          "shape": {
-                            "type": "string",
-                            "maxLength": 64
-                          },
-                          "palette": {
-                            "type": "string",
-                            "maxLength": 64
-                          },
-                          "eyes": {
-                            "type": "string",
-                            "maxLength": 64
-                          },
-                          "accessory": {
-                            "type": "string",
-                            "maxLength": 64
-                          }
-                        },
-                        "required": ["kind", "seed"]
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "type": "string",
-                            "enum": ["upload"]
-                          },
-                          "file_id": {
-                            "type": "string",
-                            "format": "uuid"
-                          }
-                        },
-                        "required": ["kind", "file_id"]
-                      }
-                    ]
-                  }
-                },
-                "required": ["name", "label", "description", "avatar"],
-                "additionalProperties": false
-              },
-              "settings": {
-                "type": "object",
-                "properties": {
-                  "modelConfig": {
-                    "type": ["object", "null"],
-                    "properties": {
-                      "provider_id": {
-                        "type": "string",
-                        "format": "uuid"
-                      },
-                      "model_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 256
-                      },
-                      "temperature": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 2
-                      },
-                      "reasoning": {
-                        "anyOf": [
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "string",
-                            "enum": ["low", "medium", "high"]
-                          }
-                        ]
-                      },
-                      "max_steps": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 500
-                      }
-                    },
-                    "required": ["provider_id", "model_id"]
-                  },
-                  "toolPolicy": {
-                    "type": "object",
-                    "properties": {
-                      "tools": {
-                        "type": "object",
-                        "additionalProperties": {
-                          "type": "string",
-                          "enum": ["auto", "ask", "deny"]
-                        }
-                      },
-                      "groups": {
-                        "type": "object",
-                        "properties": {
-                          "conversation": {
-                            "type": "string",
-                            "enum": ["auto", "ask", "deny"]
-                          },
-                          "artifacts": {
-                            "type": "string",
-                            "enum": ["auto", "ask", "deny"]
-                          },
-                          "builtin": {
-                            "type": "string",
-                            "enum": ["auto", "ask", "deny"]
-                          },
-                          "connector": {
-                            "type": "string",
-                            "enum": ["auto", "ask", "deny"]
-                          },
-                          "computer": {
-                            "type": "string",
-                            "enum": ["auto", "ask", "deny"]
-                          }
-                        }
-                      },
-                      "triggers": {
-                        "type": "object",
-                        "properties": {
-                          "message": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "mention": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "bot_message": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "bot_dm": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "widget_action": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "webhook": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "routine": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          },
-                          "resume": {
-                            "type": "object",
-                            "properties": {
-                              "default": {
-                                "type": "string",
-                                "enum": ["auto", "ask", "deny"]
-                              },
-                              "groups": {
-                                "type": "object",
-                                "properties": {
-                                  "conversation": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "artifacts": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "builtin": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "connector": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  },
-                                  "computer": {
-                                    "type": "string",
-                                    "enum": ["auto", "ask", "deny"]
-                                  }
-                                }
-                              },
-                              "tools": {
-                                "type": "object",
-                                "additionalProperties": {
-                                  "type": "string",
-                                  "enum": ["auto", "ask", "deny"]
-                                }
-                              }
-                            },
-                            "additionalProperties": false
-                          }
-                        }
-                      },
-                      "httpAllowlist": {
-                        "type": "array",
-                        "items": {
-                          "type": "string",
-                          "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
-                        },
-                        "maxItems": 200
-                      }
-                    },
-                    "additionalProperties": false
-                  }
-                },
-                "required": ["modelConfig", "toolPolicy"],
-                "additionalProperties": false
-              },
-              "skills": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "ref": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
-                    },
-                    "name": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 100
-                    },
-                    "content": {
-                      "type": "string",
-                      "maxLength": 100000
-                    },
-                    "sections": {
-                      "type": "object",
-                      "additionalProperties": {
-                        "type": "string",
-                        "maxLength": 8000
-                      }
-                    },
-                    "status": {
-                      "type": "string",
-                      "enum": ["draft", "ready"]
-                    },
-                    "enabled": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": ["ref", "name", "enabled"],
-                  "additionalProperties": false
-                },
-                "maxItems": 500
-              },
-              "routines": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "name": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 100
-                    },
-                    "trigger": {
-                      "oneOf": [
-                        {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "enum": ["schedule"]
-                            },
-                            "cron": {
-                              "type": "string"
-                            },
-                            "preset": {
-                              "oneOf": [
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["daily"]
-                                    },
-                                    "time": {
-                                      "type": "string",
-                                      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                                    }
-                                  },
-                                  "required": ["kind", "time"],
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["weekdays"]
-                                    },
-                                    "time": {
-                                      "type": "string",
-                                      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                                    }
-                                  },
-                                  "required": ["kind", "time"],
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["weekly"]
-                                    },
-                                    "day": {
-                                      "type": "integer",
-                                      "minimum": 0,
-                                      "maximum": 6
-                                    },
-                                    "time": {
-                                      "type": "string",
-                                      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                                    }
-                                  },
-                                  "required": ["kind", "day", "time"],
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["monthly"]
-                                    },
-                                    "date": {
-                                      "anyOf": [
-                                        {
-                                          "type": "integer",
-                                          "minimum": 1,
-                                          "maximum": 31
-                                        },
-                                        {
-                                          "type": "string",
-                                          "enum": ["last"]
-                                        }
-                                      ]
-                                    },
-                                    "time": {
-                                      "type": "string",
-                                      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
-                                    }
-                                  },
-                                  "required": ["kind", "date", "time"],
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["every_minutes"]
-                                    },
-                                    "minutes": {
-                                      "type": "integer",
-                                      "minimum": 1,
-                                      "maximum": 1440
-                                    }
-                                  },
-                                  "required": ["kind", "minutes"],
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "kind": {
-                                      "type": "string",
-                                      "enum": ["custom"]
-                                    },
-                                    "cron": {
-                                      "type": "string",
-                                      "minLength": 9,
-                                      "maxLength": 120
-                                    }
-                                  },
-                                  "required": ["kind", "cron"],
-                                  "additionalProperties": false
-                                }
-                              ]
-                            }
-                          },
-                          "required": ["type", "preset"],
-                          "additionalProperties": false
-                        },
-                        {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "enum": ["event"]
-                            },
-                            "source": {
-                              "type": "string",
-                              "enum": ["webhook", "github", "slack"]
-                            },
-                            "endpoint_id": {
-                              "type": ["string", "null"],
-                              "format": "uuid"
-                            },
-                            "match": {
-                              "type": "object",
-                              "additionalProperties": {}
-                            }
-                          },
-                          "required": ["type", "source"],
-                          "additionalProperties": false
-                        }
-                      ]
-                    },
-                    "prompt": {
-                      "type": "string",
-                      "maxLength": 20000
-                    },
-                    "skillRef": {
-                      "type": ["string", "null"],
-                      "minLength": 1,
-                      "maxLength": 64
-                    },
-                    "enabled": {
-                      "type": "boolean"
-                    },
-                    "timezone": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
-                    },
-                    "postsToTranscript": {
-                      "type": "boolean"
-                    }
-                  },
-                  "required": [
-                    "name",
-                    "trigger",
-                    "prompt",
-                    "skillRef",
-                    "enabled",
-                    "timezone",
-                    "postsToTranscript"
-                  ],
-                  "additionalProperties": false
-                },
-                "maxItems": 500
-              }
-            },
-            "required": ["profile", "settings", "skills", "routines"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["format", "version", "name", "snapshot"],
-        "additionalProperties": false,
-        "description": "A template as a file: the JSON export, and what an import takes"
-      },
-      "UpdateTemplate": {
-        "type": "object",
-        "properties": {
-          "visibility": {
-            "$ref": "#/components/schemas/TemplateVisibility"
-          }
-        },
-        "required": ["visibility"],
-        "additionalProperties": false
-      },
-      "BotFromTemplate": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/Bot"
-          },
-          {
-            "type": "object",
-            "properties": {
-              "templateModel": {
-                "type": ["object", "null"],
-                "properties": {
-                  "modelId": {
-                    "type": "string",
-                    "description": "The model the template names"
-                  },
-                  "used": {
-                    "type": "boolean",
-                    "description": "False when it is not available here (another instance's or another member's provider, or a model that is missing or turned off), so the Bot got the default model instead"
-                  }
-                },
-                "required": ["modelId", "used"],
-                "description": "Null when the template names no model"
-              }
-            },
-            "required": ["templateModel"]
-          }
-        ]
-      },
-      "FromTemplate": {
-        "type": "object",
-        "properties": {
-          "token": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200,
-            "description": "A template link token"
-          },
-          "file": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TemplateFile"
-              },
-              {
-                "description": "An exported template file"
-              }
-            ]
-          }
-        },
-        "additionalProperties": false
       },
       "Chat": {
         "type": "object",
@@ -5547,6 +4397,34 @@
         },
         "required": ["connector", "permission", "customized"]
       },
+      "BotConnectorPermission": {
+        "type": "object",
+        "properties": {
+          "connectorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "toolAllowlist": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "string"
+            },
+            "description": "Null allows every tool; [] allows none"
+          },
+          "toolDenylist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "approvalOverride": {
+            "type": ["string", "null"],
+            "enum": ["auto", "ask", "deny", null],
+            "description": "Forces a decision for every tool of this connector; null keeps the policy"
+          }
+        },
+        "required": ["connectorId", "toolAllowlist", "toolDenylist", "approvalOverride"]
+      },
       "BotTool": {
         "type": "object",
         "properties": {
@@ -6175,6 +5053,194 @@
           "resultMessageId",
           "exception"
         ]
+      },
+      "CreateRoutine": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/RoutineTriggerInput"
+          },
+          "prompt": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "skillId": {
+            "type": ["string", "null"],
+            "format": "uuid"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "IANA name; defaults to UTC"
+          }
+        },
+        "required": ["name", "trigger"],
+        "additionalProperties": false
+      },
+      "RoutineTriggerInput": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["schedule"]
+              },
+              "preset": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["daily"]
+                      },
+                      "time": {
+                        "type": "string",
+                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+                      }
+                    },
+                    "required": ["kind", "time"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["weekdays"]
+                      },
+                      "time": {
+                        "type": "string",
+                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+                      }
+                    },
+                    "required": ["kind", "time"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["weekly"]
+                      },
+                      "day": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 6
+                      },
+                      "time": {
+                        "type": "string",
+                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+                      }
+                    },
+                    "required": ["kind", "day", "time"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["monthly"]
+                      },
+                      "date": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 31
+                          },
+                          {
+                            "type": "string",
+                            "enum": ["last"]
+                          }
+                        ]
+                      },
+                      "time": {
+                        "type": "string",
+                        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+                      }
+                    },
+                    "required": ["kind", "date", "time"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["every_minutes"]
+                      },
+                      "minutes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1440
+                      }
+                    },
+                    "required": ["kind", "minutes"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": ["custom"]
+                      },
+                      "cron": {
+                        "type": "string",
+                        "minLength": 9,
+                        "maxLength": 120
+                      }
+                    },
+                    "required": ["kind", "cron"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "cron": {
+                "type": "string"
+              }
+            },
+            "required": ["type", "preset"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["event"]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["webhook", "github", "slack"]
+              },
+              "endpoint_id": {
+                "type": ["string", "null"],
+                "format": "uuid"
+              },
+              "match": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            },
+            "required": ["type", "source"],
+            "additionalProperties": false
+          }
+        ],
+        "description": "A schedule needs only its preset; the server derives the cron"
       },
       "UpdateRoutine": {
         "type": "object",
@@ -8330,7 +7396,7 @@
       "post": {
         "tags": ["bots"],
         "summary": "Create a Bot with its transcript",
-        "description": "With `connectors` and `routine`, the Bot is created with its connector settings and first Routine in one transaction: when any part fails, nothing is created, so retrying cannot make a second Bot (B2).",
+        "description": "A name and an avatar are all a Bot needs; everything else has defaults and is editable later. The transcript opens with the Bot's own message asking what to work on, also published as `message.created`.",
         "security": [
           {
             "session": []
@@ -8361,7 +7427,7 @@
             }
           },
           "400": {
-            "description": "Invalid request, a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`), a connector named twice (`DUPLICATE_CONNECTOR`), or a Routine that is not valid (`INVALID_SCHEDULE`, `EMPTY_ROUTINE`)",
+            "description": "Invalid request, or a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8381,7 +7447,7 @@
             }
           },
           "404": {
-            "description": "An avatar file, model provider, connector or Skill that is not the caller's",
+            "description": "An avatar file or model provider that is not the caller's",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8391,7 +7457,7 @@
             }
           },
           "409": {
-            "description": "Bot limit reached (`BOT_LIMIT_REACHED`), handle taken (`HANDLE_TAKEN`) or Routine limit reached (`ROUTINE_LIMIT_REACHED`)",
+            "description": "Bot limit reached (`BOT_LIMIT_REACHED`) or handle taken (`HANDLE_TAKEN`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9004,414 +8070,6 @@
           },
           "404": {
             "description": "No such Bot",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/bots/{id}/template": {
-      "post": {
-        "tags": ["templates"],
-        "summary": "Save a Bot as a template",
-        "description": "Snapshots the profile, settings, avatar, enabled Skills and Routines; never the transcript, memories or attachments.",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateTemplate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "The template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Template"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Public links are off (`PUBLIC_TEMPLATES_DISABLED`)",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such Bot",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/templates": {
-      "get": {
-        "tags": ["templates"],
-        "summary": "The workspace's templates, newest first",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Templates",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Template"
-                      }
-                    },
-                    "publicEnabled": {
-                      "type": "boolean",
-                      "description": "Whether the admin allows public links, so a template can be public"
-                    }
-                  },
-                  "required": ["items", "publicEnabled"]
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/templates/{token}": {
-      "get": {
-        "tags": ["templates"],
-        "summary": "Open a template link; the JSON export",
-        "description": "Members of the workspace open any template. Without a session, only a public template answers, and only while the admin has public links on.",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          },
-          {}
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "required": true,
-            "name": "token",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The template file",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TemplateFile"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such template",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": ["templates"],
-        "summary": "Change one of your templates' visibility",
-        "description": "Making a template public needs the admin to allow public links; making it workspace-only closes its public link.",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "required": true,
-            "name": "token",
-            "in": "path"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateTemplate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Template"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Public links are off (`PUBLIC_TEMPLATES_DISABLED`)",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such template of yours",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": ["templates"],
-        "summary": "Delete one of your templates; its link stops working",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "required": true,
-            "name": "token",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Deleted"
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such template of yours",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/bots/from-template": {
-      "post": {
-        "tags": ["templates"],
-        "summary": "Create a Bot from a template link or an imported file",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FromTemplate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "The new Bot, and whether it runs on the template's model",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BotFromTemplate"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid template (`INVALID_TEMPLATE`, `INVALID_SCHEDULE`)",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such template",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Bot limit (`BOT_LIMIT_REACHED`), Routine limit (`ROUTINE_LIMIT_REACHED`) or Skill limit (`SKILL_LIMIT_REACHED`) reached",
             "content": {
               "application/problem+json": {
                 "schema": {

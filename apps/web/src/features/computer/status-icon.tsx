@@ -1,10 +1,9 @@
 import { isComputerTool } from '@openbot/shared';
-import { cn } from '@openbot/ui';
 import type { SVGProps } from 'react';
 import type { Bot } from '../bots/queries.js';
 
-// Status (I5, K3, plan 9.4): the title-bar computer icon, lit while the Bot's
-// current tool is a computer tool and dim otherwise.
+// Status (I5, K3, plan 9.4): a green dot on the title bar's Preview button
+// while the Bot's current tool is a computer tool, and the computer glyph.
 
 export function ComputerIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -19,20 +18,19 @@ export function ComputerIcon(props: SVGProps<SVGSVGElement>) {
 export const computerActive = (state: Bot['state']) =>
   state.state === 'working' && isComputerTool(state.currentTool);
 
-export function ComputerStatusIcon({ bot }: { bot: Bot }) {
-  const active = computerActive(bot.state);
+/**
+ * The green dot on the title bar's Preview button while the Bot is using its
+ * computer, with the current action as its tooltip; nothing otherwise.
+ */
+export function ComputerActiveDot({ bot }: { bot: Bot }) {
+  if (!computerActive(bot.state)) return null;
   return (
     <span
       role="img"
-      aria-label={active ? 'Using its computer' : 'Computer idle'}
-      title={active ? (bot.state.currentAction ?? 'Using its computer') : undefined}
-      data-active={active || undefined}
-      className={cn(
-        'inline-flex size-9 items-center justify-center transition-colors',
-        active ? 'text-emerald-500' : 'text-muted-foreground/40',
-      )}
-    >
-      <ComputerIcon className="size-4" />
-    </span>
+      aria-label="Using its computer"
+      title={bot.state.currentAction ?? 'Using its computer'}
+      data-active
+      className="absolute top-1 right-1 size-2 rounded-full bg-emerald-500 ring-2 ring-background"
+    />
   );
 }

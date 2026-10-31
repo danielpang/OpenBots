@@ -46,11 +46,13 @@ test('send a message and watch a streamed reply arrive', async ({ page }) => {
 
   await page.reload();
   await page.getByRole('link', { name }).first().click();
+  const log = page.getByRole('log');
+  // A new Bot opens its chat by asking what to work on.
+  await expect(log.getByText(`Hi, I'm ${name}. What would you like me to work on?`)).toBeVisible();
   const composer = page.getByRole('textbox', { name: 'Message' });
   await composer.fill('Hello there');
   await composer.press('Enter');
 
-  const log = page.getByRole('log');
   await expect(log.getByText('Hello there')).toBeVisible();
   if (model) {
     // Streaming: the first words show before the last ones have been written.

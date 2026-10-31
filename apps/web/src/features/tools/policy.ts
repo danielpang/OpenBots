@@ -170,7 +170,3 @@ export const isDefaultPermission = (p: BotConnectorPermission) =>
 /** The `PUT /bots/{id}/connectors` items: only connectors that differ from the defaults. */
 export const permissionItems = (permissions: readonly BotConnectorPermission[]) =>
   permissions.filter((p) => !isDefaultPermission(p));
-
-/** For a new Bot: the connectors the owner unticked, turned off. */
-export const turnedOff = (connectorIds: readonly string[]): BotConnectorPermission[] =>
-  connectorIds.map((id) => setConnectorEnabled(defaultPermission(id), false));

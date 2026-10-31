@@ -15,7 +15,6 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { useState, type MouseEvent } from 'react';
 import { SidebarSection } from '../../app/sidebar.js';
 import { GroupsSection } from '../chats/groups.js';
-import { SaveTemplateDialog } from '../templates/save-template-dialog.js';
 import { DeleteBotDialog } from './delete-bot-dialog.js';
 import { botsQuery, hoverAction, rosterSections, useBotActions, type Bot } from './queries.js';
 
@@ -27,7 +26,6 @@ export function Roster() {
   const { data } = useQuery(botsQuery);
   const [showHidden, setShowHidden] = useState(false);
   const [deleting, setDeleting] = useState<Bot | null>(null);
-  const [templating, setTemplating] = useState<Bot | null>(null);
 
   return (
     <>
@@ -36,10 +34,8 @@ export function Roster() {
         showHidden={showHidden}
         onShowHidden={setShowHidden}
         onDelete={setDeleting}
-        onSaveTemplate={setTemplating}
       />
       <DeleteBotDialog bot={deleting} onClose={() => setDeleting(null)} />
-      <SaveTemplateDialog bot={templating} onClose={() => setTemplating(null)} />
     </>
   );
 }
@@ -49,13 +45,11 @@ export function RosterView({
   showHidden,
   onShowHidden,
   onDelete,
-  onSaveTemplate,
 }: {
   items: readonly Bot[];
   showHidden: boolean;
   onShowHidden(show: boolean): void;
   onDelete(bot: Bot): void;
-  onSaveTemplate?(bot: Bot): void;
 }) {
   const { pinned, bots, hidden } = rosterSections(items);
   const list = (rows: Bot[]) =>
@@ -63,7 +57,7 @@ export function RosterView({
       <ul className="flex flex-col gap-0.5">
         {rows.map((bot) => (
           <li key={bot.id}>
-            <BotRow bot={bot} onDelete={onDelete} onSaveTemplate={onSaveTemplate} />
+            <BotRow bot={bot} onDelete={onDelete} />
           </li>
         ))}
       </ul>
@@ -97,15 +91,7 @@ export function RosterView({
   );
 }
 
-export function BotRow({
-  bot,
-  onDelete,
-  onSaveTemplate,
-}: {
-  bot: Bot;
-  onDelete(bot: Bot): void;
-  onSaveTemplate?(bot: Bot): void;
-}) {
+export function BotRow({ bot, onDelete }: { bot: Bot; onDelete(bot: Bot): void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { toggle, duplicate } = useBotActions();
   const navigate = useNavigate();
@@ -171,11 +157,6 @@ export function BotRow({
           >
             Duplicate
           </DropdownMenuItem>
-          {onSaveTemplate && (
-            <DropdownMenuItem onSelect={() => onSaveTemplate(bot)}>
-              Save as template
-            </DropdownMenuItem>
-          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onSelect={() => onDelete(bot)}>
             Delete

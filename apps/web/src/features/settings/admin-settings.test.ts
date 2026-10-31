@@ -15,7 +15,7 @@ describe('admin settings form', () => {
     expect(limitLabel('botsPerAccount', false)).toBe('Bots per account');
   });
 
-  it('sends the signup mode, public links, retention and only the limits that changed', () => {
+  it('sends the signup mode, retention and only the limits that changed', () => {
     const form = new FormData();
     form.set('signupMode', 'open');
     for (const [key, value] of Object.entries(DEFAULT_LIMITS)) form.set(key, String(value));
@@ -23,11 +23,8 @@ describe('admin settings form', () => {
     form.set('auditRetentionDays', '90');
     expect(settingsPatch(form, { ...DEFAULT_LIMITS })).toEqual({
       signupMode: 'open',
-      publicTemplatesEnabled: false,
       limits: { botsPerAccount: 10 },
       auditRetentionDays: 90,
     });
-    form.set('publicTemplatesEnabled', 'on');
-    expect(settingsPatch(form, { ...DEFAULT_LIMITS }).publicTemplatesEnabled).toBe(true);
   });
 });

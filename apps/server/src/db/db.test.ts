@@ -9,7 +9,6 @@ import { createTestDb, type TestDb } from './test-db.js';
 const SECTION_4_TABLES = [
   'bots',
   'bot_state',
-  'bot_templates',
   'chats',
   'chat_members',
   'messages',

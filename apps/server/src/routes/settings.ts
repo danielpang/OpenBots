@@ -14,13 +14,12 @@ import {
 
 // Admin controls (U3), persisted on the workspace row. A self-hosted install
 // has one owner (always an admin internally), who changes the limits and
-// custom stdio here; signup mode, public template links and audit retention
-// are managed only and keep their defaults there (see workspace.ts).
+// custom stdio here; signup mode and audit retention are managed only and
+// keep their defaults there (see workspace.ts).
 
 const SettingsSchema = z
   .object({
     signupMode: SignupModeSchema,
-    publicTemplatesEnabled: z.boolean(),
     limits: LimitsSchema,
     auditRetentionDays: z.number().int().openapi({
       description: 'Audit log rows older than this many days are deleted (default 180)',
@@ -35,7 +34,6 @@ const SettingsSchema = z
 const SettingsPatchSchema = z
   .strictObject({
     signupMode: SignupModeSchema.optional(),
-    publicTemplatesEnabled: z.boolean().optional(),
     limits: LimitsSchema.partial().strict().optional(),
     auditRetentionDays: z.number().int().min(1).max(3650).optional(),
     customStdioEnabled: z.boolean().optional(),

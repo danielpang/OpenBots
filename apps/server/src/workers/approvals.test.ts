@@ -24,7 +24,7 @@ import {
   type ExpireJob,
 } from '../services/approvals.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel, type RunWorkerOptions } from './runs.js';
 
 // Approvals end to end (plan 5.6, 18.3, P1, T5): the policy asks, the run
@@ -187,7 +187,7 @@ describe('approvals', () => {
         .from(schema.messages)
         .where(eq(schema.messages.chatId, chatId))
         .orderBy(asc(schema.messages.seq))
-    ).filter((m) => m.authorType === 'bot');
+    ).filter((m) => m.authorType === 'bot' && !isGreeting(m));
 
   const approvalsOf = (runId: string) =>
     t.deps.db.select().from(schema.approvals).where(eq(schema.approvals.runId, runId));
@@ -268,7 +268,14 @@ describe('approvals', () => {
       },
       seenSeq: expect.any(Number),
     });
-    expect(state.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+    // The opening line and the Bot's greeting, the owner's message, the call and its result.
+    expect(state.messages.map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'tool',
+    ]);
     expect(JSON.stringify(state.messages.at(-1))).toContain('waiting_for_owner');
     const requested = proc.events.find(
       (e) => e.type === 'approval.requested' && e.payload.approval.id === approval.id,
@@ -349,6 +356,8 @@ describe('approvals', () => {
       { error: new Error('prompt is too long: 250000 tokens > 200000 maximum') },
       [{ text: 'Build directory removed.' }],
     ]);
+    // Without the Bot's greeting, so the old message is the oldest one.
+    await t.deps.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
     await say(bot, 'an old message the retry can drop');
     await settled(bot.id, 'completed');
     await say(bot, 'clean the build');

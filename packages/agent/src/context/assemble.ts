@@ -117,26 +117,28 @@ export function assembleContext(input: ContextInput): AssembledContext {
       { role: 'system', content: stableBlock(input), providerOptions: CACHE_STABLE },
       { role: 'system', content: volatileBlock(input) },
     ],
-    messages: toModelMessages(
-      input.thread ? threadOpening(input.messages) : input.messages,
-      input.attachments,
-    ),
+    messages: toModelMessages(opening(input.messages, input.thread), input.attachments),
   };
 }
 
 /**
- * A thread on the Bot's own message would lose its root to the leading-user-
- * turn rule, so a system line opens it.
+ * Messages that open with the Bot's own would lose it to the leading-user-
+ * turn rule, so a system line goes first: a thread on the Bot's message, or
+ * a new Bot's transcript, which opens with its greeting asking what to work
+ * on (B2).
  */
-function threadOpening(messages: TranscriptMessage[]): TranscriptMessage[] {
-  const [root] = messages;
-  if (!root?.author.self) return messages;
-  const opening: TranscriptMessage = {
-    seq: root.seq,
+function opening(messages: TranscriptMessage[], thread = false): TranscriptMessage[] {
+  const [first] = messages;
+  if (!first?.author.self) return messages;
+  const text = thread
+    ? 'The thread is on your message below.'
+    : 'The conversation below opens with your message.';
+  const line: TranscriptMessage = {
+    seq: first.seq,
     author: { kind: 'system' },
-    parts: [{ type: 'text', text: 'The thread is on your message below.' }],
+    parts: [{ type: 'text', text }],
   };
-  return [opening, ...messages];
+  return [line, ...messages];
 }
 
 /** The instructions as one string, for logs and snapshot tests. */
@@ -153,7 +155,9 @@ function stableBlock({ bot, roster, skills }: ContextInput): string {
     .join('\n');
   const standing = bot.description.trim()
     ? `## Standing rules from your owner\n${bot.description.trim()}`
-    : '## Standing rules from your owner\n(none set)';
+    : // A new Bot has none: it asked what to work on, and learns its job from the answer.
+      '## Standing rules from your owner\n(none set. Your owner tells you your job in this chat; ' +
+      'once you know it, save it with the remember tool.)';
   return [identity, standing, OPERATING_RULES, rosterBlock(roster), skillsBlock(skills)].join(
     '\n\n',
   );

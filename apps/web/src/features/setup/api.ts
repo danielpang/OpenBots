@@ -1,8 +1,7 @@
 import { unwrap, type components } from '@openbot/api-client';
 import { queryOptions } from '@tanstack/react-query';
 import { api } from '../../app/api.js';
-import type { ModelNeed } from '@openbot/shared';
-import type { PickerGroup, Provider } from '../models/api.js';
+import type { Provider } from '../models/api.js';
 
 // The first-run wizard (D1, plan 16.3). `GET /setup` is public: the router
 // asks it before sign-in, and shows the wizard only while no user exists.
@@ -79,13 +78,3 @@ export const SANDBOX_LABELS: Record<SandboxImage['status'], string> = {
   ready: 'Computer image ready',
   error: 'Download failed. It retries when a Bot needs its computer.',
 };
-
-/**
- * What the first Bot's model needs (L4): vision too when there is a computer
- * to see, as `botModelNeeds` says for any new Bot, but only while some model
- * has it, so an install without one can still create its first Bot.
- */
-export function firstBotNeeds(computer: boolean, groups: readonly PickerGroup[]): ModelNeed[] {
-  const vision = groups.some((g) => g.models.some((m) => m.enabled && m.capabilities.vision));
-  return computer && vision ? ['tools', 'vision'] : ['tools'];
-}

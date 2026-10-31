@@ -98,6 +98,14 @@ describe('outbound event subscriptions', () => {
 
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 5_000, interval: 10 });
 
+  /** What the receiver got about one message; a new Bot's greeting goes out too. */
+  const about = (messageId: string) =>
+    received.filter(
+      (r) =>
+        (JSON.parse(r.body) as { data: { message?: { id: string } } }).data.message?.id ===
+        messageId,
+    );
+
   const deliveriesOf = (subscriptionId: string) =>
     t.deps.db
       .select()
@@ -112,8 +120,8 @@ describe('outbound event subscriptions', () => {
       authorType: 'system',
       parts: [{ type: 'text', text: 'hello out there' }],
     });
-    await until(() => expect(received).toHaveLength(1));
-    const [request] = received;
+    await until(() => expect(about(message.id)).toHaveLength(1));
+    const [request] = about(message.id);
     const body = JSON.parse(request!.body) as Record<string, unknown>;
     expect(body).toMatchObject({ type: 'message.created', data: { message: { id: message.id } } });
     expect(request!.headers['x-openbot-event']).toBe('message.created');
@@ -124,14 +132,20 @@ describe('outbound event subscriptions', () => {
     expect(header).toBe(
       `t=${ts},v1=${createHmac('sha256', secret).update(`${ts}.${request!.body}`).digest('hex')}`,
     );
+    const delivery = async () =>
+      (await deliveriesOf(subscription.id)).find((d) => d.id === body['id']);
     await until(async () =>
-      expect(await deliveriesOf(subscription.id)).toMatchObject([
-        { event: 'message.created', status: 'delivered', attempts: 1 },
-      ]),
+      expect(await delivery()).toMatchObject({
+        event: 'message.created',
+        status: 'delivered',
+        attempts: 1,
+      }),
     );
     // The log through the API, newest first.
     const log = await call('GET', `/event-subscriptions/${subscription.id}/deliveries`);
-    expect(await log.json()).toMatchObject({ items: [{ status: 'delivered', attempts: 1 }] });
+    expect(await log.json()).toMatchObject({
+      items: [{ id: body['id'], status: 'delivered', attempts: 1 }, {}],
+    });
   });
 
   it("sends a webhook's message as metadata and its delivery id, never the payload (H6)", async () => {
@@ -157,8 +171,8 @@ describe('outbound event subscriptions', () => {
       authorId: inbox!.id,
       parts: [{ type: 'text', text: '<webhook_event>{"card":"4242 secret"}</webhook_event>' }],
     });
-    await until(() => expect(received).toHaveLength(1));
-    const { body } = received[0]!;
+    await until(() => expect(about(message.id)).toHaveLength(1));
+    const { body } = about(message.id)[0]!;
     expect(body).not.toContain('4242 secret');
     const sent = JSON.parse(body) as { data: { message: Record<string, unknown> } };
     expect(sent).toMatchObject({

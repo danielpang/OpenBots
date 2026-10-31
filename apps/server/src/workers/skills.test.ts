@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/client.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { registerSkillHooks } from '../services/skills.js';
-import { createTestApp, type TestApp } from '../test-app.js';
+import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel } from './runs.js';
 
 // Skills in runs (S1 to S3, plan 5.3 item 4, 10.1): the enabled Skills index
@@ -238,10 +238,9 @@ describe('Skills in runs', () => {
       .from(schema.skills)
       .where(eq(schema.skills.name, 'Gone soon'));
     expect(row!.createdFromRunId).toBe((await runsOf(bot.id))[0]!.id);
-    const [reply] = await t.deps.db
-      .select()
-      .from(schema.messages)
-      .where(eq(schema.messages.authorId, bot.id));
+    const [reply] = (
+      await t.deps.db.select().from(schema.messages).where(eq(schema.messages.authorId, bot.id))
+    ).filter((m) => !isGreeting(m));
     const index = (reply!.parts as MessagePart[]).findIndex((p) => p.type === 'widget');
     expect((await call('DELETE', `/skills/${row!.id}`)).status).toBe(204);
     const res = await call('POST', `/messages/${reply!.id}/widgets/${index}/action`, {

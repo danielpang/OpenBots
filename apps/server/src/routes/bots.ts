@@ -24,8 +24,6 @@ import {
 } from '../services/bots.js';
 import { computerAvailable, screenOf, stopDeletedBotScreen } from '../services/computer.js';
 import { defaultModelConfig } from '../services/providers.js';
-import { BotConnectorSchema } from './connectors.js';
-import { CreateRoutineSchema } from './routines.js';
 import { botUsage, USAGE_DAYS, type UsageSums } from '../services/usage.js';
 
 // Bots and the roster (B1 to B5, B7, B8; plan 14.1). Owner-scoped: another
@@ -43,7 +41,7 @@ const BotStateSchema = z
     // Optional on the wire so clients built before Phase 4 still type-check; always sent.
     currentTool: z.string().nullable().optional().openapi({
       description:
-        'The tool running while `working`; a computer tool lights the title-bar computer icon (I5)',
+        'The tool running while `working`; a computer tool shows a dot on the Preview button (I5)',
     }),
     updatedAt: z.iso.datetime(),
   })
@@ -94,14 +92,6 @@ const CreateBotSchema = z
   .strictObject({
     name: z.string().trim().min(1).max(80),
     ...profileFields,
-    connectors: z.array(BotConnectorSchema).max(500).optional().openapi({
-      description:
-        'Per-connector settings, as `PUT /bots/{id}/connectors` takes them; connectors left out keep the defaults (T1)',
-    }),
-    routine: CreateRoutineSchema.optional().openapi({
-      description:
-        "The Bot's first Routine, as `POST /bots/{id}/routines` takes it (guided create, B2). The Bot, its connector settings and this Routine are created together or not at all",
-    }),
   })
   .openapi('CreateBot');
 
@@ -242,7 +232,7 @@ export const botRoutes = createRouter()
       tags: ['bots'],
       summary: 'Create a Bot with its transcript',
       description:
-        'With `connectors` and `routine`, the Bot is created with its connector settings and first Routine in one transaction: when any part fails, nothing is created, so retrying cannot make a second Bot (B2).',
+        "A name and an avatar are all a Bot needs; everything else has defaults and is editable later. The transcript opens with the Bot's own message asking what to work on, also published as `message.created`.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -251,13 +241,11 @@ export const botRoutes = createRouter()
       responses: {
         201: botResponse('The new Bot'),
         400: problemResponse(
-          'Invalid request, a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`), a connector named twice (`DUPLICATE_CONNECTOR`), or a Routine that is not valid (`INVALID_SCHEDULE`, `EMPTY_ROUTINE`)',
+          'Invalid request, or a model its provider does not list or has turned off (`UNKNOWN_MODEL`, `MODEL_DISABLED`)',
         ),
-        404: problemResponse(
-          "An avatar file, model provider, connector or Skill that is not the caller's",
-        ),
+        404: problemResponse("An avatar file or model provider that is not the caller's"),
         409: problemResponse(
-          'Bot limit reached (`BOT_LIMIT_REACHED`), handle taken (`HANDLE_TAKEN`) or Routine limit reached (`ROUTINE_LIMIT_REACHED`)',
+          'Bot limit reached (`BOT_LIMIT_REACHED`) or handle taken (`HANDLE_TAKEN`)',
         ),
         ...authProblems,
       },

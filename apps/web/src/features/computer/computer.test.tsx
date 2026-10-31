@@ -24,7 +24,7 @@ import { computerActive } from './status-icon.js';
 import { SignInTakeover } from './takeover.js';
 
 // The computer UI against a fake REST server, socket, noVNC and xterm: the
-// title-bar icon (I5), the Preview panel and Takeover with its two controls
+// dot on Preview (I5), the Preview panel and Takeover with its two controls
 // (K3), and the Computer page's status, Start or Restart, idle setting,
 // terminal and files (K1, K7).
 
@@ -341,7 +341,7 @@ const click = (el: Element | undefined | null) => act(() => (el as HTMLElement).
 const posts = (path: string) =>
   server.requests.filter((r) => r.method !== 'GET' && r.path === path).map((r) => r.body);
 
-describe('the title-bar computer icon (I5)', () => {
+describe('the computer dot on Preview (I5)', () => {
   it('lights only while the Bot is working with a computer tool', () => {
     expect(computerActive(bot({ state: 'working', currentTool: 'bash' }).state)).toBe(true);
     expect(computerActive(bot({ state: 'working', currentTool: 'browser_click' }).state)).toBe(
@@ -366,19 +366,26 @@ describe('the title-bar computer icon (I5)', () => {
     } as WsEventOf<'bot.state'>;
     const [next] = applyBotState([bot()], working);
     render(<BotTitleBar bot={next!} />);
-    const icon = host.querySelector('[data-active]');
-    expect(icon?.getAttribute('aria-label')).toBe('Using its computer');
-    expect(icon?.getAttribute('title')).toBe('Opening example.com');
+    // A dot on the Preview button itself, not an icon beside it.
+    const preview = button('Preview')!;
+    const dot = preview.querySelector('[data-active]');
+    expect(dot?.getAttribute('aria-label')).toBe('Using its computer');
+    expect(dot?.getAttribute('title')).toBe('Opening example.com');
+    expect(preview.getAttribute('title')).toBe('Opening example.com');
+    expect(host.querySelectorAll('[role="img"][aria-label="Using its computer"]')).toHaveLength(1);
 
     act(() => root!.render(<></>));
     render(<BotTitleBar bot={bot()} />);
     expect(host.querySelector('[data-active]')).toBeNull();
-    expect(host.querySelector('[aria-label="Computer idle"]')).not.toBeNull();
+    expect(button('Preview')!.hasAttribute('title')).toBe(false);
+    expect(host.querySelector('[aria-label="Computer idle"]')).toBeNull();
   });
 
   it('is absent, with the Preview toggle, on an install without a computer', () => {
-    render(<BotTitleBar bot={bot()} />, { computer: false });
-    expect(host.querySelector('[aria-label="Computer idle"]')).toBeNull();
+    render(<BotTitleBar bot={bot({ state: 'working', currentTool: 'bash' })} />, {
+      computer: false,
+    });
+    expect(host.querySelector('[data-active]')).toBeNull();
     expect(button('Preview')).toBeUndefined();
   });
 });

@@ -4,8 +4,10 @@ import {
   AVATAR_EYES,
   AVATAR_PALETTES,
   AVATAR_SHAPES,
+  BOT_SHAPES,
   contrastRatio,
   generate,
+  newBotAvatar,
   PACKAGE_NAME,
   PALETTES,
   partsKey,
@@ -112,6 +114,36 @@ describe('shuffle', () => {
     }
     expect(new Set(roster.map((p) => p.seed)).size).toBe(200);
     expect(new Set(roster.map((p) => partsKey(resolveParts(p)))).size).toBe(200);
+  });
+
+  it('keeps a pinned shape and reshuffles the rest', () => {
+    const egg = { kind: 'generated' as const, seed: 'ada', shape: 'blob' };
+    const next = shuffle(egg.seed, [], { shape: 'blob' });
+    expect(next).toMatchObject({ kind: 'generated', shape: 'blob' });
+    expect(next.seed).not.toBe('ada');
+    expect(resolveParts(next).shape).toBe('blob');
+    expect(partsKey(resolveParts(next))).not.toBe(partsKey(resolveParts(egg)));
+  });
+});
+
+describe('newBotAvatar', () => {
+  it('pins one of the three Bot shapes, so Moon, Box and Egg all come up', () => {
+    expect(BOT_SHAPES).toEqual([
+      { shape: 'bean', label: 'Moon' },
+      { shape: 'rounded', label: 'Box' },
+      { shape: 'blob', label: 'Egg' },
+    ]);
+    const shapes = seeds(60).map((seed) => newBotAvatar(seed).shape);
+    expect(new Set(shapes)).toEqual(new Set(['bean', 'rounded', 'blob']));
+    expect(newBotAvatar('ada')).toEqual(newBotAvatar('ada'));
+    // The generator keeps every shape for avatars made before.
+    expect(AVATAR_SHAPES).toEqual(expect.arrayContaining(['circle', 'ghost']));
+  });
+
+  it('avoids look-alikes of the roster', () => {
+    const taken = [newBotAvatar('first')];
+    const next = newBotAvatar('first', taken);
+    expect(partsKey(resolveParts(next))).not.toBe(partsKey(resolveParts(taken[0]!)));
   });
 });
 

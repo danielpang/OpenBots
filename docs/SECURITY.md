@@ -200,14 +200,14 @@ The review found that boundary 2 did not hold. MCP stdio servers run inside the 
 **What exists:** `audit_log` (`apps/server/src/db/schema/artifacts.ts:110-120`), written through `recordAudit` in `apps/server/src/services/audit.ts` and the services' own helpers. It records:
 
 - Sign-in (email, OAuth, and the session a signup opens), sign-out, and failed email sign-in with the address tried (`apps/server/src/auth.ts`). Passwords are never kept.
-- API key create and revoke; template link share and revoke. The key and token values are never kept.
+- API key create and revoke. The key values are never kept.
 - Invite create and redeem; admin settings changes (`settings.update`, with the patch).
 - Provider create, update (field and header names, model edits) and delete.
 - Connector create, update (field and secret names, transport changes) and delete; connector policy update.
 - Webhook create, update (the tool policy override and IP allowlist in full), rotate and delete; event subscription create, update and delete (the URL's origin only).
 - Computer create, start and stop, by the owner, the Bot whose run needed it, or the system for the idle sweep; screen takeover and release.
 - Approval requested, approved, denied and expired; `tool.denied`.
-- Bot create, delete, duplicate and from-template.
+- Bot create, delete and duplicate.
 
 Admins read it at `GET /api/v1/admin/audit` (filters `actorId`, `action` or a group prefix such as `auth.`, `from`, `to`; newest first, `cursor` pages) and on Settings > Audit log. Rows older than the workspace's `auditRetentionDays` (default 180, set on Settings > Admin) are deleted by the workers at start and hourly (`trimAuditLog`).
 
