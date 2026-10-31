@@ -1259,6 +1259,39 @@
         }
       }
     },
+    "/api/v1/invitations/{id}/oauth": {
+      "post": {
+        "tags": ["organizations"],
+        "summary": "Carry an invite through a GitHub or Google sign-up",
+        "description": "Sets a signed, HttpOnly cookie for 10 minutes. The account the provider then creates joins the invitation when its verified address is the invited one. The invite stays out of the OAuth state.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The cookie is set"
+          },
+          "404": {
+            "description": "No such pending invitation",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/invitations/{id}/accept": {
       "post": {
         "tags": ["organizations"],

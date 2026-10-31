@@ -1,9 +1,9 @@
 // Email through Resend (plan 21.5), when RESEND_API_KEY and
-// OPENBOT_EMAIL_FROM are set: invitations and email verification. Without
-// them an invitation is still made and the inviter copies its link. Links
-// in these emails are credentials: a failed send logs who and why, never
-// the link or its token, and only a development server that sends no email
-// may log verification links (OPENBOT_DEV_LOG_EMAIL_LINKS).
+// OPENBOT_EMAIL_FROM are set: invitations and sign-up codes. Without them
+// an invitation is still made and the inviter copies its link. Links and
+// codes in these emails are credentials: a failed send logs why, never the
+// link or code, and only a development server that sends no email may log
+// sign-up codes (OPENBOT_DEV_LOG_EMAIL_LINKS).
 
 export interface EmailOptions {
   /** RESEND_API_KEY. */
@@ -13,8 +13,8 @@ export interface EmailOptions {
   /** The HTTP client; tests stand in a fake. */
   fetch?: typeof fetch;
   /**
-   * OPENBOT_DEV_LOG_EMAIL_LINKS: with no email set up, log verification
-   * links so a developer can open them. Refused with NODE_ENV=production.
+   * OPENBOT_DEV_LOG_EMAIL_LINKS: with no email set up, log sign-up codes so
+   * a developer can enter them. Refused with NODE_ENV=production.
    */
   logLinks?: boolean;
 }
@@ -64,20 +64,21 @@ export function sendInviteEmail(
   return send(options, invite.to, inviteMessage(invite), log);
 }
 
-export function verificationMessage(link: string) {
-  const subject = 'Verify your email for OpenBots';
-  const text = `Open this link to verify your email and sign in:\n\n${link}\n\nThe link works for 24 hours.\n`;
-  const html = `<p>Open this link to verify your email and sign in.</p><p><a href="${escape(link)}">Verify my email</a></p><p>The link works for 24 hours.</p>`;
+/** The sign-up code email: the code, and nothing that signs anyone in. */
+export function verificationMessage(code: string) {
+  const subject = `${code} is your OpenBots code`;
+  const text = `Your OpenBots code is ${code}.\n\nEnter it to finish signing up. It works for 10 minutes.\n`;
+  const html = `<p>Your OpenBots code is</p><p style="font-size:24px;letter-spacing:4px"><strong>${escape(code)}</strong></p><p>Enter it to finish signing up. It works for 10 minutes.</p>`;
   return { subject, text, html };
 }
 
-/** Sends the email verification link; true when Resend took it. Never throws. */
-export function sendVerificationEmail(
+/** Sends a sign-up code; true when Resend took it. Never throws. */
+export function sendVerificationCode(
   options: EmailOptions,
-  { to, link }: { to: string; link: string },
+  { to, code }: { to: string; code: string },
   log: (error: unknown) => void = () => {},
 ): Promise<boolean> {
-  return send(options, to, verificationMessage(link), log);
+  return send(options, to, verificationMessage(code), log);
 }
 
 async function send(

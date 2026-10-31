@@ -860,6 +860,54 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/invitations/{id}/oauth': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Carry an invite through a GitHub or Google sign-up
+     * @description Sets a signed, HttpOnly cookie for 10 minutes. The account the provider then creates joins the invitation when its verified address is the invited one. The invite stays out of the OAuth state.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description The cookie is set */
+        204: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+        /** @description No such pending invitation */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/invitations/{id}/accept': {
     parameters: {
       query?: never;

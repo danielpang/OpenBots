@@ -42,6 +42,12 @@ export interface WebExtensions {
    * (`?invite=<id>`), after they sign in or sign up.
    */
   Onboarding?: ComponentType<{ me: Me; invite?: string }>;
+  /**
+   * Before a GitHub or Google sign-in from an invite link. The managed build
+   * sets a short-lived cookie that carries the invite through the provider,
+   * so the account the provider creates may join it (plan 21.6).
+   */
+  beforeSocialSignIn?(invite: string): Promise<void>;
 }
 
 let extensions: WebExtensions = {};

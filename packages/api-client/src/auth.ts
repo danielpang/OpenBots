@@ -25,9 +25,9 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
 
   return {
     /**
-     * `token` is null when the server wants the email verified first: a
-     * link went to the address, and opening it signs in and goes to
-     * `callbackURL`. `invite` is the invitation the sign-up came from.
+     * `token` is null when the server wants the email confirmed first: a
+     * 6-digit code went to the address, for `verifyEmail`. `invite` is the
+     * invitation the sign-up came from.
      */
     signUpEmail: (input: {
       name: string;
@@ -38,6 +38,15 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
     }) => post<{ token: string | null }>('/sign-up/email', input),
     signInEmail: (input: { email: string; password: string; callbackURL?: string }) =>
       post<unknown>('/sign-in/email', input),
+    /** Confirms the address with the code it was sent, and signs in. */
+    verifyEmail: (input: { email: string; code: string }) =>
+      post<unknown>('/email-otp/verify-email', { email: input.email, otp: input.code }),
+    /** Sends a new code to an address that is not confirmed yet. */
+    sendVerificationCode: (input: { email: string }) =>
+      post<unknown>('/email-otp/send-verification-otp', {
+        email: input.email,
+        type: 'email-verification',
+      }),
     /** Returns the provider's authorization URL to navigate to. */
     signInSocial: async (input: {
       provider: SocialProvider;

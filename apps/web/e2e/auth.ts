@@ -10,7 +10,7 @@ export const PASSWORD = 'correct horse battery';
  * steps are skipped.
  *
  * The managed service (its server from ee/server, as CI runs it) has no
- * wizard: the account verifies its email (see `verificationLink`), then
+ * wizard: the account confirms its email with a code (see `verificationCode`), then
  * creates its organization, named `organization` or after the person, and
  * owns it. `signUpAt` does the same from an invite link instead.
  */
@@ -42,17 +42,21 @@ export async function signUp(
 }
 
 /**
- * Signs up at `path` (/sign-up, or an invite link), verifying the email when
- * the server asks for it, and returns once the page has moved on.
+ * Signs up at `path` (/sign-up, or an invite link), entering the emailed
+ * code when the server asks for one, and returns once the page has moved on.
  */
 export async function signUpAt(page: Page, path: string, name: string, email: string) {
   const seen = logLines().length;
   await page.goto(path);
   await fillAccount(page, name, email);
-  await submitSignUp(page);
-  const checkEmail = page.getByText('Check your email');
+  await submit(page, 'Sign up', '/api/auth/sign-up/email');
+  const checkEmail = page.getByRole('heading', { name: 'Check your email' });
   await expect(checkEmail.or(page.getByRole('button', { name: /New|Join|Create/ }))).toBeVisible();
-  if (await checkEmail.isVisible()) await page.goto(await verificationLink(seen));
+  if (await checkEmail.isVisible()) {
+    await page.getByLabel('Code').fill(await verificationCode(email, seen));
+    await submit(page, 'Confirm', '/api/auth/email-otp/verify-email');
+    await expect(checkEmail).toBeHidden();
+  }
 }
 
 /** The server's log (E2E_SERVER_LOG), one JSON line each, or none. */
@@ -67,48 +71,46 @@ function logLines(): string[] {
 }
 
 /**
- * The newest email verification link in the server's log after line `after`.
- * CI runs the managed server without email and with
- * OPENBOT_DEV_LOG_EMAIL_LINKS=1, which logs the link instead of sending it.
+ * The newest email verification code for `email` in the server's log after
+ * line `after`. CI runs the managed server without email and with
+ * OPENBOT_DEV_LOG_EMAIL_LINKS=1, which logs the code instead of sending it.
  */
-export async function verificationLink(after: number): Promise<string> {
+export async function verificationCode(email: string, after: number): Promise<string> {
   for (let attempt = 0; attempt < 50; attempt++) {
-    const url = logLines()
+    const code = logLines()
       .slice(after)
       .map((line) => {
         try {
-          return JSON.parse(line) as { msg?: string; url?: string };
+          return JSON.parse(line) as { msg?: string; email?: string; code?: string };
         } catch {
           return {};
         }
       })
-      .filter((entry) => entry.msg === 'email verification link' && entry.url)
-      .at(-1)?.url;
-    if (url) return url;
+      .filter((entry) => entry.msg === 'email verification code' && entry.email === email)
+      .at(-1)?.code;
+    if (code) return code;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error('no email verification link in E2E_SERVER_LOG');
+  throw new Error(`no email verification code for ${email} in E2E_SERVER_LOG`);
 }
 
-/** Attempts at Sign up while the limit refuses it; each waits out the server's X-Retry-After. */
-const SIGN_UP_ATTEMPTS = 4;
+/** Attempts while the limit refuses them; each waits out the server's X-Retry-After. */
+const ATTEMPTS = 4;
 
 /**
- * Clicks Sign up. Every spec signs up from the same address, and sign-up is
- * rate limited per address (better-auth's 3 per 10 s, kept on in CI), so
- * specs in one run can find the limit spent. Then the server answers 429
+ * Clicks `button`, which posts to `path`. Every spec signs up from the same
+ * IP address, and sign-up and codes are rate limited per IP (kept on in CI),
+ * so specs in one run can find the limit spent. Then the server answers 429
  * with X-Retry-After in seconds; this waits that long and clicks again.
  */
-async function submitSignUp(page: Page) {
+async function submit(page: Page, button: string, path: string) {
   for (let attempt = 1; ; attempt++) {
     const [res] = await Promise.all([
-      page.waitForResponse(
-        (r) => r.url().endsWith('/api/auth/sign-up/email') && r.request().method() === 'POST',
-      ),
-      page.getByRole('button', { name: 'Sign up' }).click(),
+      page.waitForResponse((r) => r.url().endsWith(path) && r.request().method() === 'POST'),
+      page.getByRole('button', { name: button, exact: true }).click(),
     ]);
     if (res.status() !== 429) return;
-    expect(attempt, 'sign-up stayed rate limited').toBeLessThan(SIGN_UP_ATTEMPTS);
+    expect(attempt, `${button} stayed rate limited`).toBeLessThan(ATTEMPTS);
     const seconds = Number(res.headers()['x-retry-after']) || 10;
     await page.waitForTimeout(seconds * 1000 + 250);
   }

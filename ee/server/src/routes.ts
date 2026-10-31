@@ -16,7 +16,12 @@ import { listAudit, type AuditListing } from '@openbot/server/services/audit';
 import { getOrganization } from '@openbot/server/workspace';
 import type { Context } from 'hono';
 import type { AppEnv } from '@openbot/server/context';
+import { setCookie } from 'hono/cookie';
+import { and, eq, gt } from 'drizzle-orm';
+import { schema } from '@openbot/server/db/client';
+import { notFound } from '@openbot/server/errors';
 import type { EmailOptions } from './email.js';
+import { INVITE_COOKIE, INVITE_COOKIE_SECONDS, signInviteCookie } from './plugin.js';
 import {
   acceptInvitation,
   activateOrganization,
@@ -41,7 +46,8 @@ import {
 // - /organizations: the caller's organizations, create one, switch to one.
 // - /organization: the active one, its members, invitations and audit log,
 //   for its owners and admins; leaving it, for anyone in it.
-// - /invitations/{id}: an invitation as its recipient sees it, and accepting it.
+// - /invitations/{id}: an invitation as its recipient sees it, and accepting it;
+//   /invitations/{id}/oauth, before a GitHub or Google sign-up from its link.
 //
 // Creating, switching and accepting need a session (they change it); the
 // rest also take an API key, which works in the organization it was made in.
@@ -528,6 +534,45 @@ export function organizationRoutes(email: EmailOptions) {
           },
           200,
         );
+      },
+    )
+    .openapi(
+      createRoute({
+        method: 'post',
+        path: '/invitations/{id}/oauth',
+        tags: ['organizations'],
+        summary: 'Carry an invite through a GitHub or Google sign-up',
+        description:
+          'Sets a signed, HttpOnly cookie for 10 minutes. The account the provider then creates joins the invitation when its verified address is the invited one. The invite stays out of the OAuth state.',
+        middleware: [requireManaged] as const,
+        request: { params: id },
+        responses: {
+          204: { description: 'The cookie is set' },
+          404: problemResponse('No such pending invitation'),
+        },
+      }),
+      async (c) => {
+        const { db, config } = c.var.deps;
+        const invite = c.req.valid('param').id;
+        const [row] = await db
+          .select({ id: schema.invites.id })
+          .from(schema.invites)
+          .where(
+            and(
+              eq(schema.invites.id, invite),
+              eq(schema.invites.status, 'pending'),
+              gt(schema.invites.expiresAt, new Date()),
+            ),
+          );
+        if (!row) throw notFound('No such invitation');
+        setCookie(c, INVITE_COOKIE, signInviteCookie(config, invite), {
+          httpOnly: true,
+          sameSite: 'Lax',
+          secure: config.publicUrl.startsWith('https://'),
+          path: '/',
+          maxAge: INVITE_COOKIE_SECONDS,
+        });
+        return c.body(null, 204);
       },
     )
     .openapi(

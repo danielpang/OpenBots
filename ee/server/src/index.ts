@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { ServerExtensions } from '@openbot/server';
 import type { EmailOptions } from './email.js';
-import { managedPolicyPlugin, organizationPlugin } from './plugin.js';
+import { managedPolicyPlugin, organizationPlugin, verificationCodePlugin } from './plugin.js';
 import { organizationRoutes } from './routes.js';
 
 // The managed service's server (plan 21.5): the core server with the
@@ -10,7 +10,7 @@ import { organizationRoutes } from './routes.js';
 // with it.
 
 export { organizationRoutes } from './routes.js';
-export { managedPolicyPlugin, organizationPlugin } from './plugin.js';
+export { managedPolicyPlugin, organizationPlugin, verificationCodePlugin } from './plugin.js';
 export type { EmailOptions } from './email.js';
 
 /** `ee/web/dist`, from both `src/` and `dist/`. */
@@ -45,7 +45,12 @@ export function managedExtensions({
   return {
     organizations: true,
     requireVerifiedEmail: true,
-    authPlugins: (context) => [organizationPlugin(), managedPolicyPlugin(context, email)],
+    // The code plugin first: its email verification sender is the one used.
+    authPlugins: (context) => [
+      organizationPlugin(),
+      verificationCodePlugin(context, email),
+      managedPolicyPlugin(context),
+    ],
     routes: (app) => {
       app.route('/api/v1', organizationRoutes(email));
     },

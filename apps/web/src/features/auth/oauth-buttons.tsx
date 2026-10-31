@@ -2,6 +2,7 @@ import type { SocialProvider } from '@openbot/api-client';
 import { Button } from '@openbot/ui';
 import { useQuery } from '@tanstack/react-query';
 import { auth, capabilitiesQuery } from '../../app/api.js';
+import { webExtensions } from '../../app/extensions.js';
 import { afterAuthUrl } from './after-auth.js';
 
 const LABELS: Record<SocialProvider, string> = { github: 'GitHub', google: 'Google' };
@@ -21,6 +22,7 @@ export function OAuthButtons({
 
   async function start(provider: SocialProvider) {
     try {
+      if (invite) await webExtensions().beforeSocialSignIn?.(invite);
       const errorCallbackURL = window.location.pathname + window.location.search;
       window.location.href = await auth.signInSocial({
         provider,

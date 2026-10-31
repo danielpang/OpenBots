@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { auth, meQuery } from '../app/api.js';
 import { loadAuthMode, loadDeployment } from '../app/deployment.js';
 import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
+import { CheckEmail } from '../features/auth/check-email.js';
 import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
@@ -15,7 +16,9 @@ import { setupQuery, setupRequired } from '../features/setup/api.js';
 // so this page sends visitors to sign in, which says why. Someone who
 // arrives with an invite goes on to /onboarding with it once they have an
 // account, where the managed build accepts it (plan 21.5); without one, a
-// new account goes there to create its organization.
+// new account goes there to create its organization. The managed service
+// confirms the email first with a code (plan 21.6), and the invite waits
+// through that step.
 
 export const Route = createFileRoute('/sign-up')({
   validateSearch: (search): { invite?: string; error?: string } => ({
@@ -56,25 +59,19 @@ function SignUp() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [oauthError, setOAuthError] = useState<unknown>(callbackError);
+  async function enter() {
+    queryClient.removeQueries({ queryKey: ['me'] });
+    await navigate(afterAuth(invite));
+  }
   const signUp = useMutation({
     mutationFn: auth.signUpEmail,
-    onSuccess: async ({ token }) => {
-      // No session yet: the server sent a link to verify the email first.
-      if (token === null) return;
-      queryClient.removeQueries({ queryKey: ['me'] });
-      await navigate(afterAuth(invite));
-    },
+    // No session yet: the server emailed a code to confirm the address first.
+    onSuccess: async ({ token }) => (token === null ? undefined : enter()),
   });
   const error = signUp.error ?? oauthError;
 
-  if (signUp.data?.token === null) {
-    return (
-      <AuthCard title="Check your email">
-        <p role="status" className="text-center text-sm text-muted-foreground">
-          We sent you a link. Open it to finish signing up.
-        </p>
-      </AuthCard>
-    );
+  if (signUp.data?.token === null && signUp.variables) {
+    return <CheckEmail email={signUp.variables.email} onConfirmed={enter} />;
   }
 
   return (

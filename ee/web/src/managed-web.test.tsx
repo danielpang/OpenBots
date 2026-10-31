@@ -3,7 +3,7 @@ import { meQuery } from '@openbot/web/api';
 import type { ActiveMe } from '@openbot/web/extensions';
 import type { ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { invitationQuery, organizationsQuery, type Organization } from './api.js';
 import { managedWeb } from './extensions.js';
 import { assignableRoles, MemberRow } from './members.js';
@@ -135,6 +135,25 @@ describe('the managed web app', () => {
     expect(text(row('admin'))).not.toContain('Suspend');
     expect(row('owner')).not.toMatch(/<select[^>]*disabled/);
     expect(text(row('owner'))).toContain('Suspend');
+  });
+
+  it('carries an invite through a GitHub or Google sign-in', async () => {
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    try {
+      await managedWeb.beforeSocialSignIn!('00000000-0000-4000-8000-0000000000c1');
+      const request = fetch.mock.calls[0]![0] as Request;
+      expect(request.method).toBe('POST');
+      expect(new URL(request.url).pathname).toBe(
+        '/api/v1/invitations/00000000-0000-4000-8000-0000000000c1/oauth',
+      );
+      // An invitation that is no longer pending carries nothing, and the sign-in goes on.
+      fetch.mockResolvedValue(Response.json({ code: 'NOT_FOUND' }, { status: 404 }));
+      await expect(managedWeb.beforeSocialSignIn!('x')).resolves.toBeUndefined();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('uses no dashes in its copy', () => {

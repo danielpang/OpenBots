@@ -42,7 +42,7 @@ OPENBOT_DEPLOYMENT=managed OPENBOT_SIGNUP_MODE=open OPENBOT_DEV_LOG_EMAIL_LINKS=
 
 Without `RESEND_API_KEY` and `OPENBOT_EMAIL_FROM` no email is sent: invite
 links are there to copy, and with `OPENBOT_DEV_LOG_EMAIL_LINKS=1` (never in
-production) the email verification link is in the server's log. For the web
+production) the 6-digit email verification code is in the server's log. For the web
 app with hot reload, `pnpm --filter @openbot/ee-web dev` proxies to the
 server on :3000.
 

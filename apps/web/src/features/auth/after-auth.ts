@@ -8,7 +8,7 @@ export function afterAuth(invite: string | undefined) {
   return invite ? ({ to: '/onboarding', search: { invite } } as const) : ({ to: '/' } as const);
 }
 
-/** The same as a URL, for a link the server sends (email verification). */
+/** The same as a URL, for the server to go to after a GitHub or Google sign-in. */
 export function afterAuthUrl(invite: string | undefined): string {
   return invite ? `/onboarding?invite=${encodeURIComponent(invite)}` : '/';
 }

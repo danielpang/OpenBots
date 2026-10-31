@@ -32,6 +32,19 @@ export const invitationsQuery = queryOptions({
   queryFn: () => unwrap(orgApi.GET('/api/v1/organization/invitations')),
 });
 
+/**
+ * Before a GitHub or Google sign-in from an invite link: the server sets a
+ * signed cookie for 10 minutes, so the account the provider creates may join
+ * the invitation. An invitation that is no longer pending carries nothing;
+ * onboarding then says why.
+ */
+export async function carryInvite(invite: string, fetch = globalThis.fetch) {
+  await orgApi.POST('/api/v1/invitations/{id}/oauth', {
+    params: { path: { id: invite } },
+    fetch,
+  });
+}
+
 export const invitationQuery = (id: string) =>
   queryOptions({
     queryKey: ['invitation', id],

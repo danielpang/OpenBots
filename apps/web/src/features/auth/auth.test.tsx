@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { capabilitiesQuery } from '../../app/api.js';
+import { CheckEmail } from './check-email.js';
 import { authErrorMessage } from './messages.js';
 import { OAuthButtons } from './oauth-buttons.js';
 
@@ -25,6 +26,27 @@ describe('OAuth buttons', () => {
 
   it('renders nothing when no provider is configured', () => {
     expect(renderButtons({ github: false, google: false })).toBe('');
+  });
+});
+
+describe('the code step', () => {
+  it('asks for the 6-digit code it sent, and offers a new one', () => {
+    const html = renderToString(
+      <QueryClientProvider client={new QueryClient()}>
+        <CheckEmail email="ada@example.com" onConfirmed={() => {}} />
+      </QueryClientProvider>,
+    ).replace(/<!-- -->/g, '');
+    expect(html).toContain('Check your email');
+    expect(html).toContain('We sent a 6-digit code to ada@example.com.');
+    expect(html).toMatch(/autoComplete="one-time-code"|autocomplete="one-time-code"/);
+    expect(html).toContain('Send a new code');
+    expect(html).not.toMatch(/[–—]/);
+  });
+
+  it('explains a wrong, expired or spent code', () => {
+    expect(authErrorMessage(new ApiError(400, { code: 'INVALID_OTP' }))).toMatch(/wrong/);
+    expect(authErrorMessage(new ApiError(400, { code: 'OTP_EXPIRED' }))).toMatch(/expired/);
+    expect(authErrorMessage(new ApiError(403, { code: 'TOO_MANY_ATTEMPTS' }))).toMatch(/new code/);
   });
 });
 

@@ -146,7 +146,7 @@ describe('routes', () => {
     };
     const { pathname, html } = await renderPath('/');
     expect(pathname).toBe('/sign-in');
-    expect(html).toContain('Verify your email first');
+    expect(html).toContain('Confirm your email first');
   });
 
   it('gives a self-hosted owner Limits, and no organization tabs', async () => {

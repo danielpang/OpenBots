@@ -10,7 +10,10 @@ const MESSAGES: Record<string, string> = {
   ACCOUNT_DISABLED: 'This account is disabled. Ask an admin to enable it.',
   SIGNUP_CLOSED: 'This OpenBot already has its owner. Sign in instead.',
   NOT_OWNER: 'This OpenBot has one account, its owner.',
-  EMAIL_NOT_VERIFIED: 'Verify your email first. Sign in to get a new link.',
+  EMAIL_NOT_VERIFIED: 'Confirm your email first. Sign in to get a new code.',
+  INVALID_OTP: 'That code is wrong. Try again.',
+  OTP_EXPIRED: 'That code expired. Send a new one.',
+  TOO_MANY_ATTEMPTS: 'Too many tries. Send a new code.',
 };
 
 export function authErrorMessage(error: unknown): string {

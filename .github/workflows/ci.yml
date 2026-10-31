@@ -102,7 +102,7 @@ jobs:
   # skips: there is no Docker provider. The server is the managed one
   # (ee/server, serving ee/web), since specs sign up several users and a
   # self-hosted install closes sign-up after its owner: each user verifies
-  # their email through the link the server logs (OPENBOT_DEV_LOG_EMAIL_LINKS,
+  # their email with the code the server logs (OPENBOT_DEV_LOG_EMAIL_LINKS,
   # read from E2E_SERVER_LOG) and creates an organization. The fake model and
   # sign-in servers listen on 127.0.0.1, so OPENBOT_LOCAL_ENDPOINTS is on.
   # The self-hosted job runs the core server on its default deployment.
