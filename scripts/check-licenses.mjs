@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // The license pass of the 1.0 gate (plan 18.9, docs/SECURITY.md): every
-// workspace package is BUSL-1.1 like the LICENSE file, every production
-// dependency carries a permissive license we can ship, and the core (apps/,
-// packages/) never imports the proprietary ee/ directory.
+// core workspace package (apps/, packages/) is BUSL-1.1 like the LICENSE
+// file, every ee/ package is private and under ee/LICENSE ("SEE LICENSE IN
+// LICENSE", with a copy of it beside its package.json), every production
+// dependency carries a permissive license we can ship, and the core never
+// imports the proprietary ee/ directory (plan 21.5).
 //
 //   node scripts/check-licenses.mjs
 //
@@ -13,8 +15,8 @@
 // so we may ship them. Anything not listed here fails until
 // someone reviews it.
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const ALLOWED = new Set([
   'Apache-2.0',
@@ -43,6 +45,26 @@ for (const path of manifests) {
   const pkg = JSON.parse(readFileSync(join(root, path), 'utf8'));
   if (pkg.license !== 'BUSL-1.1') problems.push(`${path}: license is ${pkg.license ?? 'missing'}`);
 }
+
+const EE_LICENSE = 'SEE LICENSE IN LICENSE';
+const eeLicense = readFileSync(join(root, 'ee', 'LICENSE'), 'utf8');
+const eeManifests = readdirSync(join(root, 'ee'), { withFileTypes: true })
+  .filter(
+    (entry) => entry.isDirectory() && existsSync(join(root, 'ee', entry.name, 'package.json')),
+  )
+  .map((entry) => join('ee', entry.name, 'package.json'));
+for (const path of eeManifests) {
+  const pkg = JSON.parse(readFileSync(join(root, path), 'utf8'));
+  if (pkg.license !== EE_LICENSE) {
+    problems.push(`${path}: license is ${pkg.license ?? 'missing'}, not "${EE_LICENSE}"`);
+  }
+  if (pkg.private !== true) problems.push(`${path}: must be private`);
+  const copy = join(root, dirname(path), 'LICENSE');
+  if (!existsSync(copy) || readFileSync(copy, 'utf8') !== eeLicense) {
+    problems.push(`${dirname(path)}/LICENSE: must be a copy of ee/LICENSE`);
+  }
+}
+manifests.push(...eeManifests);
 
 const listed = JSON.parse(
   execFileSync('pnpm', ['-r', 'licenses', 'list', '--prod', '--json'], {

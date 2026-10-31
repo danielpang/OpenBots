@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - ee/*
 
 # Versions shared across the workspace. Reference them with "catalog:".
 # typescript-eslint supports TypeScript < 6.1, so TypeScript stays on 6.0.

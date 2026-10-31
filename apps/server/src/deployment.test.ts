@@ -15,8 +15,8 @@ import { ensureWorkspace, updateSettings } from './workspace.js';
 const ORGANIZATION_ROUTES: [string, string][] = [
   ['GET', '/api/v1/organizations'],
   ['POST', '/api/v1/organizations'],
-  ['GET', '/api/v1/organizations/members'],
-  ['GET', '/api/v1/organizations/audit'],
+  ['GET', '/api/v1/organization/members'],
+  ['GET', '/api/v1/organization/audit'],
   ['GET', '/api/v1/admin/members'],
   ['GET', '/api/v1/admin/audit'],
 ];
