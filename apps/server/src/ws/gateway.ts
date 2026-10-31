@@ -12,13 +12,16 @@ import type { AppDeps, CurrentUser } from '../context.js';
 import { DomainError } from '../errors.js';
 import { authenticateHeaders } from '../middleware/auth.js';
 import { ownedBotIds, ownedChatIds } from '../ownership.js';
-import { MEMBER_DISABLED_CHANNEL, type MemberDisabled } from '../services/members.js';
+import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 
 // The realtime gateway on `/ws` (plan 14.2). A socket authenticates on upgrade
 // with the session cookie or an API key, subscribes to chats and Bots it owns,
 // and receives every bus event scoped to one of them. A reconnecting client
-// catches up through `GET /api/v1/chats/:id/resync`. When an admin disables a
-// member, every instance closes that member's sockets (policy violation, 1008).
+// catches up through `GET /api/v1/chats/:id/resync`. A socket works in the
+// organization it authenticated in (plan 21.3): user-scoped events reach it
+// only when they carry that organization, and when a member's access to the
+// organization ends every instance closes their sockets there (policy
+// violation, 1008).
 
 export const WS_PATH = '/ws';
 
@@ -161,7 +164,9 @@ export async function attachGateway(
       const wanted =
         (event.chat_id !== undefined && client.chats.has(event.chat_id)) ||
         (event.bot_id !== undefined && client.bots.has(event.bot_id)) ||
-        (event.user_id !== undefined && client.user.id === event.user_id);
+        (event.user_id !== undefined &&
+          client.user.id === event.user_id &&
+          event.workspace_id === client.user.workspaceId);
       if (!wanted || client.socket.readyState !== WebSocket.OPEN) continue;
       if (client.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
         client.socket.terminate();
@@ -188,11 +193,13 @@ export async function attachGateway(
     EVENTS_CHANNEL,
     forward,
   );
-  const unsubscribeDisabled: Unsubscribe = await deps.infra.bus.subscribe<MemberDisabled>(
-    MEMBER_DISABLED_CHANNEL,
-    ({ userId }) => {
+  const unsubscribeDisabled: Unsubscribe = await deps.infra.bus.subscribe<MembershipEnded>(
+    MEMBERSHIP_ENDED_CHANNEL,
+    ({ userId, workspaceId }) => {
       for (const client of clients) {
-        if (client.user.id === userId) client.socket.close(1008, 'account disabled');
+        if (client.user.id === userId && client.user.workspaceId === workspaceId) {
+          client.socket.close(1008, 'membership ended');
+        }
       }
     },
   );

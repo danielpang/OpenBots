@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CAPABILITIES } from '@openbot/shared';
+import { and, eq } from 'drizzle-orm';
 import { createApp, type App } from './app.js';
 import { createAuth } from './auth.js';
 import { loadConfig, type Config } from './config.js';
@@ -9,9 +10,10 @@ import type { AppDeps } from './context.js';
 import { createTestDb, type TestDb } from './db/test-db.js';
 import { createInfra } from './infra/index.js';
 import { schema } from './db/client.js';
+import type { ServerExtensions } from './extensions.js';
 import { createLogger } from './logger.js';
 import { generateMasterKey } from './secrets.js';
-import { ensureWorkspace } from './workspace.js';
+import { ensureWorkspace, organizationSlug, type Role } from './workspace.js';
 
 // An app over a fresh test database (see db/test-db.ts), plus helpers that
 // drive it the way a browser or script would.
@@ -22,8 +24,13 @@ import { ensureWorkspace } from './workspace.js';
 // temporary directory, removed on close, unless the test names one.
 //
 // Apps are self-hosted, like the server's default: one account, and a second
-// signup is refused. Tests with several users, or of members, invites and the
-// audit log, pass `OPENBOT_DEPLOYMENT: 'managed'`.
+// signup is refused. Tests with several users pass `OPENBOT_DEPLOYMENT:
+// 'managed'`. The core alone makes no organizations (plan 21.5), so without
+// an organizations extension `signUp` puts each new user in the default
+// organization, the first as its owner, and makes it their session's active
+// one, as the managed build would after an invite; `createOrganization`,
+// `addMember` and `switchOrganization` set up the rest. The managed build's
+// own tests pass its extensions instead.
 
 export interface TestApp {
   app: App;
@@ -44,6 +51,16 @@ export interface TestApp {
   providerId(): Promise<string>;
   /** Lists enabled models with tool calling on a provider, so Bots may pick them (L5). */
   addModels(providerId: string, modelIds: string[]): Promise<void>;
+  /** The default organization: the implicit one, which `signUp` joins without extensions. */
+  defaultOrganization(): Promise<string>;
+  /** A new organization with no members; returns its id. */
+  createOrganization(name: string): Promise<string>;
+  /** Makes the user a member of the organization. */
+  addMember(userId: string, workspaceId: string, role?: Role): Promise<void>;
+  /** Makes the organization the active one of the session behind `cookie` (plan 21.2). */
+  switchOrganization(cookie: string, workspaceId: string | null): Promise<void>;
+  /** The id of the user with this email. */
+  userId(email: string): Promise<string>;
 }
 
 export const ORIGIN = 'http://localhost:3000';
@@ -58,11 +75,13 @@ export const isGreeting = (m: { seq: number; authorType: string; runId?: string 
 export interface TestAppOptions {
   /** better-auth's rate limit; off by default, as tests sign up many people from no address. */
   rateLimit?: boolean;
+  /** The managed build's extensions (ee/server tests). */
+  extensions?: ServerExtensions;
 }
 
 export async function createTestApp(
   env: Record<string, string> = {},
-  { rateLimit = false }: TestAppOptions = {},
+  { rateLimit = false, extensions }: TestAppOptions = {},
 ): Promise<TestApp> {
   const testDb = await createTestDb();
   const ownFilesDir = env.OPENBOT_FILES_DIR
@@ -79,11 +98,29 @@ export async function createTestApp(
   const logger = createLogger('silent');
   const db = testDb.db;
   const infra = createInfra(config);
-  const auth = createAuth({ config, db, logger, limiter: infra.limiter, rateLimit });
-  const deps: AppDeps = { config, db, logger, infra, auth };
+  const auth = createAuth({
+    config,
+    db,
+    logger,
+    limiter: infra.limiter,
+    rateLimit,
+    plugins: extensions?.authPlugins?.({ config, db, logger, infra }) ?? [],
+  });
+  const deps: AppDeps = { config, db, logger, infra, auth, ...(extensions ? { extensions } : {}) };
   const app = createApp(deps, { webDist: '' });
   let provider: Promise<string> | undefined;
   let closed: Promise<void> | undefined;
+  const defaultOrganization = async () => (await ensureWorkspace(db)).id;
+  const addMember = async (userId: string, workspaceId: string, role: Role = 'member') => {
+    await db.insert(schema.workspaceMembers).values({ workspaceId, userId, role });
+  };
+  const switchOrganization = async (cookie: string, workspaceId: string | null) => {
+    const token = decodeURIComponent(cookie.split('=').slice(1).join('=')).split('.')[0]!;
+    await db
+      .update(schema.sessions)
+      .set({ activeOrganizationId: workspaceId })
+      .where(eq(schema.sessions.token, token));
+  };
   const addModels = async (providerId: string, modelIds: string[]) => {
     const workspace = await ensureWorkspace(db);
     await db
@@ -132,6 +169,24 @@ export async function createTestApp(
       return provider;
     },
     addModels,
+    defaultOrganization,
+    async createOrganization(name) {
+      const [row] = await db
+        .insert(schema.workspaces)
+        .values({ name, slug: organizationSlug(name) })
+        .returning({ id: schema.workspaces.id });
+      return row!.id;
+    },
+    addMember,
+    switchOrganization,
+    async userId(email) {
+      const [row] = await db
+        .select({ id: schema.users.id })
+        .from(schema.users)
+        .where(eq(schema.users.email, email.toLowerCase()));
+      if (!row) throw new Error(`no user ${email}`);
+      return row.id;
+    },
     async signUp(email, extra = {}) {
       const res = await app.request('/api/auth/sign-up/email', {
         method: 'POST',
@@ -143,7 +198,25 @@ export async function createTestApp(
           ...extra,
         }),
       });
-      return { res, cookie: sessionCookie(res) };
+      const cookie = sessionCookie(res);
+      if (config.deployment === 'managed' && !extensions?.organizations && res.ok) {
+        // As if invited to the default organization: the first user owns it.
+        const { user } = (await res.clone().json()) as { user: { id: string } };
+        const workspaceId = await defaultOrganization();
+        const [owner] = await db
+          .select({ id: schema.workspaceMembers.id })
+          .from(schema.workspaceMembers)
+          .where(
+            and(
+              eq(schema.workspaceMembers.workspaceId, workspaceId),
+              eq(schema.workspaceMembers.role, 'owner'),
+            ),
+          )
+          .limit(1);
+        await addMember(user.id, workspaceId, owner ? 'member' : 'owner');
+        if (cookie) await switchOrganization(cookie, workspaceId);
+      }
+      return { res, cookie };
     },
   };
 }

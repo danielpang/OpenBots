@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { isAdmin } from '../../../app/extensions.js';
 import { EventSubscriptions } from '../../../features/webhooks/event-subscriptions.js';
 
 export const Route = createFileRoute('/_app/settings/events')({
@@ -7,5 +8,5 @@ export const Route = createFileRoute('/_app/settings/events')({
 
 function Events() {
   const { me } = Route.useRouteContext();
-  return <EventSubscriptions admin={me.role === 'admin'} />;
+  return <EventSubscriptions admin={isAdmin(me.role)} />;
 }

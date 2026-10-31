@@ -2,6 +2,7 @@ import { ApiError } from '@openbot/api-client';
 import { createFileRoute, redirect } from '@tanstack/react-router';
 import { meQuery } from '../app/api.js';
 import { loadAuthMode, loadDeployment } from '../app/deployment.js';
+import { isActive } from '../app/extensions.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 import { Shell } from '../app/shell.js';
 
@@ -10,6 +11,9 @@ import { Shell } from '../app/shell.js';
 // whether anything about admins, members or the audit log shows, and its auth
 // mode: with `local` the Mac app signs the owner in, so there is no account
 // and the first-run wizard (providers, then a first Bot) shows until it is done.
+// On the managed service someone with no active organization, or suspended
+// in theirs, goes to /onboarding, which the managed build fills (plan 21.5);
+// every page under here has one.
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
@@ -20,6 +24,7 @@ export const Route = createFileRoute('/_app')({
         queryClient.ensureQueryData(meQuery),
         loadDeployment(queryClient),
       ]);
+      if (!isActive(me)) throw redirect({ to: '/onboarding' });
       if (authMode === 'local') {
         // Cached once: the wizard's last step clears it.
         const setup = await setupRequired(() => queryClient.ensureQueryData(setupQuery));

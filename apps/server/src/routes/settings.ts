@@ -1,25 +1,24 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { requireAdmin } from '../middleware/auth.js';
 import { adminProblems, authenticated, createRouter, problemResponse } from '../openapi.js';
-import { LimitsSchema, SignupModeSchema } from '../schemas.js';
+import { LimitsSchema } from '../schemas.js';
 import { DomainError } from '../errors.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { stopCustomStdio } from '../services/connectors.js';
 import {
   effectiveSettings,
-  ensureWorkspace,
+  getOrganization,
   MANAGED_ONLY_SETTINGS,
   updateSettings,
 } from '../workspace.js';
 
-// Admin controls (U3), persisted on the workspace row. A self-hosted install
-// has one owner (always an admin internally), who changes the limits and
-// custom stdio here; signup mode and audit retention are managed only and
-// keep their defaults there (see workspace.ts).
+// Organization settings (U3, plan 21.3), persisted on the organization's row
+// and read and changed by its owners and admins. A self-hosted install has
+// one owner, who changes the limits and custom stdio here; audit retention is
+// managed only and keeps its default there (see workspace.ts).
 
 const SettingsSchema = z
   .object({
-    signupMode: SignupModeSchema,
     limits: LimitsSchema,
     auditRetentionDays: z.number().int().openapi({
       description: 'Audit log rows older than this many days are deleted (default 180)',
@@ -33,7 +32,6 @@ const SettingsSchema = z
 
 const SettingsPatchSchema = z
   .strictObject({
-    signupMode: SignupModeSchema.optional(),
     limits: LimitsSchema.partial().strict().optional(),
     auditRetentionDays: z.number().int().min(1).max(3650).optional(),
     customStdioEnabled: z.boolean().optional(),
@@ -41,7 +39,7 @@ const SettingsPatchSchema = z
   .openapi('SettingsPatch');
 
 const settingsResponse = {
-  description: 'Workspace settings in effect',
+  description: "The organization's settings in effect",
   content: { 'application/json': { schema: SettingsSchema } },
 };
 
@@ -51,14 +49,17 @@ export const settingsRoutes = createRouter()
       method: 'get',
       path: '/settings',
       tags: ['settings'],
-      summary: 'Workspace settings',
+      summary: "The active organization's settings",
       middleware: [requireAdmin] as const,
       security: authenticated,
       responses: { 200: settingsResponse, ...adminProblems },
     }),
     async (c) => {
       const { db, config } = c.var.deps;
-      return c.json(effectiveSettings(config, await ensureWorkspace(db)), 200);
+      return c.json(
+        effectiveSettings(config, await getOrganization(db, c.var.user.workspaceId)),
+        200,
+      );
     },
   )
   .openapi(
@@ -66,7 +67,7 @@ export const settingsRoutes = createRouter()
       method: 'patch',
       path: '/settings',
       tags: ['settings'],
-      summary: 'Change workspace settings',
+      summary: "Change the active organization's settings",
       middleware: [requireAdmin] as const,
       security: authenticated,
       request: {
@@ -75,7 +76,7 @@ export const settingsRoutes = createRouter()
       responses: {
         200: settingsResponse,
         400: problemResponse(
-          'Invalid settings, or a managed-only setting on a self-hosted install',
+          'Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service',
         ),
         ...adminProblems,
       },
@@ -93,7 +94,19 @@ export const settingsRoutes = createRouter()
           );
         }
       }
-      const workspace = await updateSettings(db, await ensureWorkspace(db), patch);
+      // A command would run on the server every organization shares (S-1, plan 21.6).
+      if (!config.customStdio && patch.customStdioEnabled) {
+        throw new DomainError(
+          400,
+          'SELF_HOSTED_ONLY',
+          'Command (stdio) servers are not available on the hosted service',
+        );
+      }
+      const workspace = await updateSettings(
+        db,
+        await getOrganization(db, c.var.user.workspaceId),
+        patch,
+      );
       await recordAudit(db, {
         workspaceId: workspace.id,
         actor: userActor(c.var.user),

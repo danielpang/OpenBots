@@ -7,7 +7,9 @@ import { recordAudit, userActor } from '../services/audit.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
 
 // API keys (U4): list, create (the key is returned once), revoke. Keys are
-// hashed at rest by better-auth's api-key plugin.
+// hashed at rest by better-auth's api-key plugin. A key belongs to the
+// organization it was made in and opens only that one (plan 21.2), so each
+// organization lists and revokes its own.
 
 const ApiKeySchema = z
   .object({
@@ -55,7 +57,12 @@ export const apiKeyRoutes = createRouter()
       const rows = await db
         .select()
         .from(schema.apikeys)
-        .where(eq(schema.apikeys.referenceId, c.var.user.id))
+        .where(
+          and(
+            eq(schema.apikeys.referenceId, c.var.user.id),
+            eq(schema.apikeys.workspaceId, c.var.user.workspaceId),
+          ),
+        )
         .orderBy(desc(schema.apikeys.createdAt));
       const items = rows.map((k) => ({
         id: k.id,
@@ -98,6 +105,10 @@ export const apiKeyRoutes = createRouter()
           expiresIn: expiresInDays ? expiresInDays * 86_400 : null,
         },
       });
+      await db
+        .update(schema.apikeys)
+        .set({ workspaceId: c.var.user.workspaceId })
+        .where(eq(schema.apikeys.id, created.id));
       await recordAudit(db, {
         workspaceId: c.var.user.workspaceId,
         actor: userActor(c.var.user),
@@ -140,7 +151,13 @@ export const apiKeyRoutes = createRouter()
       const { id } = c.req.valid('param');
       const deleted = await db
         .delete(schema.apikeys)
-        .where(and(eq(schema.apikeys.id, id), eq(schema.apikeys.referenceId, c.var.user.id)))
+        .where(
+          and(
+            eq(schema.apikeys.id, id),
+            eq(schema.apikeys.referenceId, c.var.user.id),
+            eq(schema.apikeys.workspaceId, c.var.user.workspaceId),
+          ),
+        )
         .returning({ id: schema.apikeys.id, name: schema.apikeys.name });
       if (!deleted.length) throw notFound('No such API key');
       await recordAudit(db, {

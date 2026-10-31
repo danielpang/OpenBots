@@ -206,11 +206,17 @@ function provider(deps: AppDeps) {
 
 const keyring = (deps: AppDeps) => keyringFromConfig(deps.config);
 
-export async function getComputer(deps: Pick<AppDeps, 'db'>, ownerId: string) {
+/** The owner's computer in an organization: one per (organization, owner) (plan 21.3). */
+export async function getComputer(deps: Pick<AppDeps, 'db'>, owner: Owner) {
   const [row] = await deps.db
     .select()
     .from(schema.computers)
-    .where(eq(schema.computers.ownerId, ownerId));
+    .where(
+      and(
+        eq(schema.computers.ownerId, owner.id),
+        eq(schema.computers.workspaceId, owner.workspaceId),
+      ),
+    );
   return row ?? null;
 }
 
@@ -245,7 +251,11 @@ function publishStatus(
 ) {
   return publishEvent(
     deps.infra.bus,
-    wsEvent('computer.status', { computerId: row.id, status, error }, { user_id: row.ownerId }),
+    wsEvent(
+      'computer.status',
+      { computerId: row.id, status, error },
+      { user_id: row.ownerId, workspace_id: row.workspaceId },
+    ),
   );
 }
 
@@ -271,14 +281,14 @@ export async function ensureComputer(
   by: AuditActor = { type: 'user', id: owner.id },
 ): Promise<ComputerRow> {
   const machines = provider(deps);
-  let row = await getComputer(deps, owner.id);
+  let row = await getComputer(deps, owner);
   if (!row) {
     await deps.db.transaction(async (tx) => {
       // Two accounts asking at once: one takes the remote machine.
       if (machines.name === 'remote') {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext('openbot:remote-computer'))`);
       }
-      await assertRemoteFor(deps, owner.id, tx);
+      await assertRemoteFor(deps, owner, tx);
       await tx
         .insert(schema.computers)
         .values({
@@ -290,9 +300,9 @@ export async function ensureComputer(
         })
         .onConflictDoNothing();
     });
-    row = (await getComputer(deps, owner.id))!;
+    row = (await getComputer(deps, owner))!;
   } else {
-    await assertRemoteFor(deps, owner.id);
+    await assertRemoteFor(deps, owner);
   }
   if (row.agentUrl && row.agentToken) return row;
   return createMachine(deps, row, by);
@@ -303,15 +313,19 @@ export async function ensureComputer(
  * and the operator has not shared it (plan 9.2, K1). Rows from before this
  * rule keep the oldest account as the machine's.
  */
-async function assertRemoteFor(deps: AppDeps, ownerId: string, db: Db = deps.db) {
+async function assertRemoteFor(deps: AppDeps, owner: Owner, db: Db = deps.db) {
   if (provider(deps).name !== 'remote' || deps.config.computerAgent?.shared) return;
+  // An account in two organizations has two computers (plan 21.3): the
+  // machine belongs to one of them.
   const [first] = await db
-    .select({ ownerId: schema.computers.ownerId })
+    .select({ ownerId: schema.computers.ownerId, workspaceId: schema.computers.workspaceId })
     .from(schema.computers)
     .where(eq(schema.computers.provider, 'remote'))
     .orderBy(asc(schema.computers.createdAt), asc(schema.computers.id))
     .limit(1);
-  if (first && first.ownerId !== ownerId) throw computerUnavailable(REMOTE_TAKEN);
+  if (first && (first.ownerId !== owner.id || first.workspaceId !== owner.workspaceId)) {
+    throw computerUnavailable(REMOTE_TAKEN);
+  }
 }
 
 /**
@@ -379,10 +393,11 @@ export function startComputer(
   owner: Owner,
   by: AuditActor = { type: 'user', id: owner.id },
 ): Promise<Started> {
-  const pending = starting.get(owner.id);
+  const key = `${owner.workspaceId}:${owner.id}`;
+  const pending = starting.get(key);
   if (pending) return pending;
-  const started = start(deps, owner, by).finally(() => starting.delete(owner.id));
-  starting.set(owner.id, started);
+  const started = start(deps, owner, by).finally(() => starting.delete(key));
+  starting.set(key, started);
   return started;
 }
 
@@ -440,9 +455,9 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
  */
 export async function runningComputer(deps: AppDeps, owner: Owner): Promise<ComputerRow> {
   provider(deps);
-  const row = await getComputer(deps, owner.id);
+  const row = await getComputer(deps, owner);
   if (row?.status !== 'running') throw computerOff();
-  await assertRemoteFor(deps, owner.id);
+  await assertRemoteFor(deps, owner);
   return touch(deps, row);
 }
 
@@ -863,7 +878,7 @@ export async function setScreenControl(
   });
   await publishControl(deps, updated ?? screen, take ? user.id : null);
   // What the owner did on the screen, a sign-in say, reaches the other Bots (K1).
-  if (!take && screen.status === 'running') await syncCookies(deps, user.id, screen);
+  if (!take && screen.status === 'running') await syncCookies(deps, user, screen);
   return updated!;
 }
 
@@ -875,11 +890,11 @@ export async function setScreenControl(
  */
 export async function syncCookies(
   deps: AppDeps,
-  ownerId: string,
+  owner: Owner,
   screen?: Pick<ScreenRow, 'displayNumber'>,
 ): Promise<boolean> {
   if (!computerAvailable(deps)) return false;
-  const computer = await getComputer(deps, ownerId);
+  const computer = await getComputer(deps, owner);
   if (computer?.status !== 'running') return false;
   try {
     await agentFor(deps, computer).syncCookies(

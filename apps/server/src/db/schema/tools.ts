@@ -35,7 +35,7 @@ export const connectors = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [unique().on(t.ownerId, t.slug)],
+  (t) => [unique('connectors_slug_per_owner').on(t.workspaceId, t.ownerId, t.slug)],
 );
 
 /** Cached tool list. */

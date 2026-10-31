@@ -20,7 +20,7 @@ import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertBotOwner } from '../ownership.js';
 import type { Config } from '../config.js';
-import { effectiveSettings, ensureWorkspace, raiseLimitHint } from '../workspace.js';
+import { organizationSettings, raiseLimitHint } from '../workspace.js';
 import { chatHandles, transcriptMessage } from './chats.js';
 import { onWidgetAction } from './hooks.js';
 import { widgetClosed } from './runs.js';
@@ -119,8 +119,12 @@ function written(name: string, content: string) {
   return { name, content, summary: skillSummary(content) };
 }
 
+/** The owner's library in one organization (plan 21.3). */
+const libraryOf = (owner: Owner) =>
+  and(eq(schema.skills.ownerId, owner.id), eq(schema.skills.workspaceId, owner.workspaceId));
+
 /** `base`, or `base-2`, `base-3`, ... whichever is free in the owner's library. */
-async function freeSlug(tx: Db, ownerId: string, base: string, except?: string): Promise<string> {
+async function freeSlug(tx: Db, owner: Owner, base: string, except?: string): Promise<string> {
   for (let n = 1; ; n++) {
     const candidate = n === 1 ? base : `${base}-${n}`;
     const [taken] = await tx
@@ -128,7 +132,7 @@ async function freeSlug(tx: Db, ownerId: string, base: string, except?: string):
       .from(schema.skills)
       .where(
         and(
-          eq(schema.skills.ownerId, ownerId),
+          libraryOf(owner),
           eq(schema.skills.slug, candidate),
           ...(except ? [ne(schema.skills.id, except)] : []),
         ),
@@ -208,7 +212,7 @@ export async function createSkill(
   const row = await deps.db.transaction(async (tx) => {
     const { held, limit } = await lockLibrary(deps, tx, owner);
     if (held >= limit) throw skillLimitReached(limit, deps.config);
-    const slug = await freeSlug(tx, owner.id, skillSlug(name));
+    const slug = await freeSlug(tx, owner, skillSlug(name));
     const [row] = await tx
       .insert(schema.skills)
       .values({
@@ -230,12 +234,11 @@ export async function createSkill(
  * cannot both take the last slot, and counts it against the limit.
  */
 async function lockLibrary(deps: SkillsDeps, tx: Db, owner: Owner) {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`skills:${owner.id}`}))`);
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(tx));
-  const [held] = await tx
-    .select({ n: count() })
-    .from(schema.skills)
-    .where(eq(schema.skills.ownerId, owner.id));
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${`skills:${owner.workspaceId}:${owner.id}`}))`,
+  );
+  const { limits } = await organizationSettings({ ...deps, db: tx }, owner.workspaceId);
+  const [held] = await tx.select({ n: count() }).from(schema.skills).where(libraryOf(owner));
   return { held: held?.n ?? 0, limit: limits.skillsPerAccount };
 }
 
@@ -258,11 +261,11 @@ export async function libraryRoom(
   deps: SkillsDeps,
   owner: Owner,
 ): Promise<{ names: string[]; room: number; limit: number }> {
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(deps.db));
+  const { limits } = await organizationSettings(deps, owner.workspaceId);
   const rows = await deps.db
     .select({ name: schema.skills.name })
     .from(schema.skills)
-    .where(eq(schema.skills.ownerId, owner.id));
+    .where(libraryOf(owner));
   const limit = limits.skillsPerAccount;
   return { names: rows.map((r) => r.name), room: Math.max(0, limit - rows.length), limit };
 }
@@ -291,7 +294,7 @@ export async function createImportedSkills(
     const existing = await tx
       .select({ name: schema.skills.name })
       .from(schema.skills)
-      .where(eq(schema.skills.ownerId, owner.id));
+      .where(libraryOf(owner));
     const taken = new Set(existing.map((r) => r.name.toLowerCase()));
     const out: SkillRow[] = [];
     for (const item of items) {
@@ -302,7 +305,7 @@ export async function createImportedSkills(
         .values({
           workspaceId: owner.workspaceId,
           ownerId: owner.id,
-          slug: await freeSlug(tx, owner.id, skillSlug(name)),
+          slug: await freeSlug(tx, owner, skillSlug(name)),
           ...written(name, item.content),
           source: 'imported',
           origin: item.origin,
@@ -335,7 +338,12 @@ async function writeSkill(tx: Db, current: SkillRow, patch: SkillPatch) {
   const slug =
     name === current.name
       ? current.slug
-      : await freeSlug(tx, current.ownerId, skillSlug(name), current.id);
+      : await freeSlug(
+          tx,
+          { id: current.ownerId, workspaceId: current.workspaceId },
+          skillSlug(name),
+          current.id,
+        );
   await tx
     .update(schema.skills)
     .set({
@@ -380,7 +388,7 @@ export async function setBotSkills(
       const owned = await tx
         .select({ id: schema.skills.id })
         .from(schema.skills)
-        .where(and(inArray(schema.skills.id, ids), eq(schema.skills.ownerId, owner.id)));
+        .where(and(inArray(schema.skills.id, ids), libraryOf(owner)));
       if (owned.length !== ids.length) throw notFound('Skill not found');
     }
     await tx
@@ -448,14 +456,14 @@ export async function referencedSkills(
  */
 export async function referableSkill(
   db: Db,
-  ownerId: string,
+  owner: Owner,
   skillId: string,
   botIds: string[],
 ): Promise<{ id: string; name: string }> {
   const [skill] = await db
     .select({ id: schema.skills.id, name: schema.skills.name })
     .from(schema.skills)
-    .where(and(eq(schema.skills.id, skillId), eq(schema.skills.ownerId, ownerId)));
+    .where(and(eq(schema.skills.id, skillId), libraryOf(owner)));
   if (!skill) throw notFound('Skill not found');
   const [enabled] = botIds.length
     ? await db
@@ -599,14 +607,14 @@ async function transcriptLines(db: Db, ctx: SkillRunContext): Promise<string[]> 
 export function registerSkillHooks(): () => void {
   return onWidgetAction('skill_draft', async (_deps, tx, { message, props, state }) => {
     const [chat] = await tx
-      .select({ ownerId: schema.chats.ownerId })
+      .select({ id: schema.chats.ownerId, workspaceId: schema.chats.workspaceId })
       .from(schema.chats)
       .where(eq(schema.chats.id, message.chatId));
     const { skill_id: skillId } = props as SkillDraftProps;
     const [current] = await tx
       .select()
       .from(schema.skills)
-      .where(and(eq(schema.skills.id, skillId), eq(schema.skills.ownerId, chat!.ownerId)))
+      .where(and(eq(schema.skills.id, skillId), libraryOf(chat!)))
       .for('update');
     if (!current) throw widgetClosed('This Skill was deleted');
     const draft = state as SkillDraftState;

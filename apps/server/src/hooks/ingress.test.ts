@@ -239,12 +239,12 @@ describe('webhook ingress', () => {
     const { endpoint, token } = await newEndpoint(bot.id);
     expect(endpoint).toMatchObject({
       slug: 'inbox',
-      url: `http://localhost:3000/hooks/${bot.handle}`,
+      url: `http://localhost:3000/hooks/${bot.id}`,
     });
     expect(token).toMatch(/^whk_/);
 
     const body = JSON.stringify({ alert: 'disk full', host: 'db-1' });
-    const res = await hook(`/hooks/${bot.handle}`, { body, headers: bearer(token) });
+    const res = await hook(`/hooks/${bot.id}`, { body, headers: bearer(token) });
     expect(res.status).toBe(202);
     const { delivery_id, run_id } = (await res.json()) as { delivery_id: string; run_id: string };
 
@@ -295,12 +295,12 @@ describe('webhook ingress', () => {
       const res = await hook(url, { body: body.replace('1', String(n)), headers });
       expect(res.status).toBe(202);
     };
-    await ok(`/hooks/${bot.handle}`, { 'x-openbot-token': inbox.token }, 1);
-    await ok(`/hooks/${bot.handle}/${inbox.token}`, {}, 2);
-    await ok(`/hooks/${bot.handle}/alerts/${alerts.token}`, {}, 3);
-    await ok(`/hooks/${bot.handle}/alerts`, bearer(alerts.token), 4);
+    await ok(`/hooks/${bot.id}`, { 'x-openbot-token': inbox.token }, 1);
+    await ok(`/hooks/${bot.id}/${inbox.token}`, {}, 2);
+    await ok(`/hooks/${bot.id}/alerts/${alerts.token}`, {}, 3);
+    await ok(`/hooks/${bot.id}/alerts`, bearer(alerts.token), 4);
     // One endpoint's token does not open another.
-    const crossed = await hook(`/hooks/${bot.handle}/alerts`, {
+    const crossed = await hook(`/hooks/${bot.id}/alerts`, {
       body,
       headers: bearer(inbox.token),
     });
@@ -314,16 +314,18 @@ describe('webhook ingress', () => {
       slug: 'guarded',
       allowedIps: ['203.0.113.0/24'],
     });
-    const url = `/hooks/${bot.handle}/guarded`;
+    const url = `/hooks/${bot.id}/guarded`;
     const status = async (res: Response | Promise<Response>) => (await res).status;
     const allowed = { headers: bearer(token), peer: '203.0.113.5' };
 
-    // Size limit (1 MB, PRD section 6), before the endpoint is looked up.
+    // Size limit (1 MB, PRD section 6), the endpoint's organization's.
     const huge = Buffer.alloc(1024 * 1024 + 1, 'a');
     expect(await status(hook(url, { ...allowed, body: huge }))).toBe(413);
     // Unknown Bot or slug, and a disabled endpoint.
     expect(await status(hook('/hooks/nobody', { body: '{}' }))).toBe(404);
-    expect(await status(hook(`/hooks/${bot.handle}/nope`, { body: '{}' }))).toBe(404);
+    expect(await status(hook(`/hooks/${bot.id}/nope`, { body: '{}' }))).toBe(404);
+    // On the managed service a handle names no Bot: it is unique only per (organization, owner).
+    expect(await status(hook(url.replace(bot.id, bot.handle), allowed))).toBe(404);
     // IP allowlist, on the connection's address when no proxy is trusted:
     // a forged X-Forwarded-For is ignored (S-5).
     expect(
@@ -369,7 +371,7 @@ describe('webhook ingress', () => {
   it('keeps a refused delivery short and only the newest, and never replays it (H5)', async () => {
     const { bot } = await newBot('Strict');
     const { endpoint, token } = await newEndpoint(bot.id, { slug: 'strict' });
-    const url = `/hooks/${bot.handle}/strict`;
+    const url = `/hooks/${bot.id}/strict`;
     const kept = REFUSED.KEPT;
     REFUSED.KEPT = 3;
     try {
@@ -421,7 +423,7 @@ describe('webhook ingress', () => {
       slug: 'proxied',
       allowedIps: ['203.0.113.0/24'],
     });
-    const url = `/hooks/${bot.handle}/proxied`;
+    const url = `/hooks/${bot.id}/proxied`;
     const send = async (forwardedFor: string, peer: string) => {
       const res = await hook(url, {
         body: JSON.stringify({ forwardedFor, peer }),
@@ -450,7 +452,7 @@ describe('webhook ingress', () => {
   it('rate-limits verified deliveries per endpoint, failures per endpoint and address, with Retry-After', async () => {
     const { bot } = await newBot('Limited');
     const { endpoint, token } = await newEndpoint(bot.id, { slug: 'limited', rateLimitPerMin: 2 });
-    const url = `/hooks/${bot.handle}/limited`;
+    const url = `/hooks/${bot.id}/limited`;
     const send = (
       body: string,
       headers: Record<string, string> = bearer(token),
@@ -490,7 +492,7 @@ describe('webhook ingress', () => {
   it("takes the webhook rates from the limits, the admin's over the environment's", async () => {
     const { bot } = await newBot('Tuned');
     const { token } = await newEndpoint(bot.id, { slug: 'tuned' });
-    const url = `/hooks/${bot.handle}/tuned`;
+    const url = `/hooks/${bot.id}/tuned`;
     const { config } = t.deps;
     const limits = config.limits;
     config.limits = { ...limits, webhookEndpointRatePerMin: 1, webhookIpRatePerMin: 3 };
@@ -525,7 +527,7 @@ describe('webhook ingress', () => {
       signature: { preset: 'github' },
     });
     expect(signingSecret).toMatch(/^[0-9a-f]{64}$/);
-    const url = `/hooks/${bot.handle}/gh`;
+    const url = `/hooks/${bot.id}/gh`;
     const body = JSON.stringify({ action: 'opened', zen: 'x' });
     const headers = { 'x-github-event': 'issues' };
     expect((await hook(url, { body, headers })).status).toBe(401);
@@ -567,7 +569,7 @@ describe('webhook ingress', () => {
     const body = JSON.stringify({ type: 'url_verification', challenge: 'c-123', token: 'x' });
     const ts = String(Math.floor(Date.now() / 1000));
     const sig = `v0=${createHmac('sha256', slackSecret).update(`v0:${ts}:${body}`).digest('hex')}`;
-    const res = await hook(`/hooks/${bot.handle}/slack`, {
+    const res = await hook(`/hooks/${bot.id}/slack`, {
       body,
       headers: { 'x-slack-request-timestamp': ts, 'x-slack-signature': sig },
     });
@@ -575,14 +577,14 @@ describe('webhook ingress', () => {
     expect(await res.json()).toEqual({ challenge: 'c-123' });
 
     const inbox = await newEndpoint(bot.id);
-    const echo = await hook(`/hooks/${bot.handle}`, {
+    const echo = await hook(`/hooks/${bot.id}`, {
       body: '{"challenge":"abc"}',
       headers: bearer(inbox.token),
     });
     expect(await echo.json()).toEqual({ challenge: 'abc' });
-    const get = await hook(`/hooks/${bot.handle}/${inbox.token}?challenge=xyz`, { method: 'GET' });
+    const get = await hook(`/hooks/${bot.id}/${inbox.token}?challenge=xyz`, { method: 'GET' });
     expect(await get.text()).toBe('xyz');
-    const ping = await hook(`/hooks/${bot.handle}`, {
+    const ping = await hook(`/hooks/${bot.id}`, {
       body: '{"zen":"Keep it logically awesome."}',
       headers: { ...bearer(inbox.token), 'x-github-event': 'ping' },
     });
@@ -596,7 +598,7 @@ describe('webhook ingress', () => {
   it('answers a repeat within 10 minutes once, by Idempotency-Key or body', async () => {
     const { bot } = await newBot('Idem');
     const { endpoint, token } = await newEndpoint(bot.id);
-    const url = `/hooks/${bot.handle}`;
+    const url = `/hooks/${bot.id}`;
     const first = await hook(url, {
       body: '{"order":1}',
       headers: { ...bearer(token), 'idempotency-key': 'order-1' },
@@ -627,7 +629,7 @@ describe('webhook ingress', () => {
   it('exit criterion: a script hits the inbox and gets a sync reply', async () => {
     const { bot, model } = await newBot('Oracle', [[{ text: 'The build is green.' }]]);
     const { token } = await newEndpoint(bot.id, { responseMode: 'sync', syncTimeoutS: 10 });
-    const res = await hook(`/hooks/${bot.handle}`, {
+    const res = await hook(`/hooks/${bot.id}`, {
       body: JSON.stringify({ question: 'Is the build green?' }),
       headers: bearer(token),
     });
@@ -644,7 +646,7 @@ describe('webhook ingress', () => {
     const { bot } = await newBot('Slowpoke', [[{ text: 'Done eventually.' }]], undefined, 500);
     const { token } = await newEndpoint(bot.id, { responseMode: 'sync', syncTimeoutS: 1 });
     const started = Date.now();
-    const res = await hook(`/hooks/${bot.handle}`, { body: '{"q":1}', headers: bearer(token) });
+    const res = await hook(`/hooks/${bot.id}`, { body: '{"q":1}', headers: bearer(token) });
     expect(res.status).toBe(202);
     expect(Date.now() - started).toBeLessThan(2_500);
     const body = (await res.json()) as Record<string, unknown>;
@@ -694,7 +696,7 @@ describe('webhook ingress', () => {
     const { token } = await newEndpoint(bot.id, {
       toolPolicyOverride: { tools: { bash: 'deny' } },
     });
-    await hook(`/hooks/${bot.handle}`, { body: '{"cmd":"clean"}', headers: bearer(token) });
+    await hook(`/hooks/${bot.id}`, { body: '{"cmd":"clean"}', headers: bearer(token) });
     await until(async () => expect((await runsOf(bot.id))[0]?.status).toBe('completed'));
     expect(executed).not.toContain('rm -rf build');
     expect(promptText(model.calls[1]!)).toContain('Denied by Bot policy');
@@ -704,7 +706,7 @@ describe('webhook ingress', () => {
       tools: { bash: 'auto' },
     });
     const sync = await newEndpoint(asks.bot.id, { responseMode: 'sync', syncTimeoutS: 10 });
-    const res = await hook(`/hooks/${asks.bot.handle}`, {
+    const res = await hook(`/hooks/${asks.bot.id}`, {
       body: '{"cmd":"make"}',
       headers: bearer(sync.token),
     });
@@ -723,7 +725,7 @@ describe('webhook ingress', () => {
     });
     const routine = (await routineRes.json()) as { id: string; slug: string };
     const { token } = await newEndpoint(bot.id, { routineId: routine.id });
-    const res = await hook(`/hooks/${bot.handle}/${routine.slug}`, {
+    const res = await hook(`/hooks/${bot.id}/${routine.slug}`, {
       body: '{"target":"prod"}',
       headers: bearer(token),
     });
@@ -760,7 +762,7 @@ describe('webhook ingress', () => {
     const endpoint = (await listed()).find((e) => e.routineId === created.id)!;
     expect(endpoint).toMatchObject({ slug: created.slug, hasToken: false });
     expect(created.trigger.endpoint_id).toBe(endpoint.id);
-    const url = `/hooks/${bot.handle}/${created.slug}`;
+    const url = `/hooks/${bot.id}/${created.slug}`;
     // Like the inbox, it refuses deliveries until the owner generates its token.
     expect((await hook(url, { body: '{"n":1}', headers: bearer('whk_guess') })).status).toBe(401);
     const { token } = (await (await call('POST', `/endpoints/${endpoint.id}/rotate`)).json()) as {
@@ -816,7 +818,7 @@ describe('webhook ingress', () => {
     const routine = (await created.json()) as { id: string; slug: string };
     const { endpoint, token } = await newEndpoint(bot.id, { routineId: routine.id });
     await call('PUT', `/bots/${bot.id}/skills`, { skillIds: [] });
-    const sent = await hook(`/hooks/${bot.handle}/${routine.slug}`, {
+    const sent = await hook(`/hooks/${bot.id}/${routine.slug}`, {
       body: '{"alert":1}',
       headers: bearer(token),
     });
@@ -848,7 +850,7 @@ describe('webhook ingress', () => {
     const { endpoint, token } = await newEndpoint(bot.id, { routineId: routine.id });
     let n = 0;
     const send = () =>
-      hook(`/hooks/${bot.handle}/${routine.slug}`, {
+      hook(`/hooks/${bot.id}/${routine.slug}`, {
         body: JSON.stringify({ n: ++n }),
         headers: bearer(token),
       });
@@ -942,7 +944,7 @@ describe('webhook ingress', () => {
 
     // The trigger names B, so a delivery to A (turned on again) is refused.
     await edit(`/endpoints/${a.endpoint.id}`, { enabled: true });
-    const other = await hook(`/hooks/${bot.handle}/${routine.slug}`, {
+    const other = await hook(`/hooks/${bot.id}/${routine.slug}`, {
       body: '{"x":1}',
       headers: bearer(a.token),
     });
@@ -953,8 +955,7 @@ describe('webhook ingress', () => {
       error: 'The Routine waits on another endpoint',
     });
     expect(
-      (await hook(`/hooks/${bot.handle}/second`, { body: '{"x":2}', headers: bearer(b.token) }))
-        .status,
+      (await hook(`/hooks/${bot.id}/second`, { body: '{"x":2}', headers: bearer(b.token) })).status,
     ).toBe(202);
 
     // Switching back with a named endpoint turns on only that one.
@@ -1020,7 +1021,7 @@ describe('webhook ingress', () => {
     expect(listed.items.map((e) => [e.slug, e.routineId])).toEqual([['inbox', null]]);
     expect(
       (
-        await hook(`/hooks/${copy.handle}/${routine.slug}`, {
+        await hook(`/hooks/${copy.id}/${routine.slug}`, {
           body: '{"n":1}',
           headers: bearer(token),
         })
@@ -1028,7 +1029,7 @@ describe('webhook ingress', () => {
     ).toBe(404);
     expect(
       (
-        await hook(`/hooks/${bot.handle}/${routine.slug}`, {
+        await hook(`/hooks/${bot.id}/${routine.slug}`, {
           body: '{"n":2}',
           headers: bearer(token),
         })
@@ -1045,7 +1046,7 @@ describe('webhook ingress', () => {
     expect(own.endpoint.id).not.toBe(endpoint.id);
     expect(
       (
-        await hook(`/hooks/${copy.handle}/${routine.slug}`, {
+        await hook(`/hooks/${copy.id}/${routine.slug}`, {
           body: '{"n":3}',
           headers: bearer(own.token),
         })
@@ -1086,7 +1087,7 @@ describe('webhook ingress', () => {
 
     const send = (event: string, payload: unknown) => {
       const body = JSON.stringify(payload);
-      return hook(`/hooks/${bot.handle}/${routine.slug}`, {
+      return hook(`/hooks/${bot.id}/${routine.slug}`, {
         body,
         headers: {
           'x-github-event': event,
@@ -1166,7 +1167,7 @@ describe('webhook ingress', () => {
         .set({ trigger: { ...(stored!.trigger as object), match } })
         .where(eq(schema.routines.id, routine.id));
     const send = (n: number) =>
-      hook(`/hooks/${bot.handle}/${routine.slug}`, {
+      hook(`/hooks/${bot.id}/${routine.slug}`, {
         body: JSON.stringify({ kind: 'deploy', n }),
         headers: bearer(token),
       });
@@ -1197,7 +1198,7 @@ describe('webhook ingress', () => {
     const { endpoint, token } = await newEndpoint(bot.id, {
       match: { source: 'webhook', conditions: [{ path: 'kind', op: 'equals', value: 'deploy' }] },
     });
-    const first = await hook(`/hooks/${bot.handle}`, {
+    const first = await hook(`/hooks/${bot.id}`, {
       body: '{"kind":"deploy","sha":"abc"}',
       headers: bearer(token),
     });
@@ -1245,10 +1246,10 @@ describe('webhook ingress', () => {
     const { bot } = await newBot('Fresh');
     const inbox = await inboxOf(bot.id);
     expect(inbox).toMatchObject({
-      url: `http://localhost:3000/hooks/${bot.handle}`,
+      url: `http://localhost:3000/hooks/${bot.id}`,
       hasToken: false,
     });
-    const before = await hook(`/hooks/${bot.handle}`, {
+    const before = await hook(`/hooks/${bot.id}`, {
       body: '{"a":1}',
       headers: bearer('whk_guess'),
     });
@@ -1261,7 +1262,7 @@ describe('webhook ingress', () => {
     const { signingSecret } = (await signed.json()) as { signingSecret: string };
     expect(
       (
-        await hook(`/hooks/${bot.handle}`, {
+        await hook(`/hooks/${bot.id}`, {
           body: '{"a":2}',
           headers: { 'x-hub-signature-256': hubSignature(signingSecret, '{"a":2}') },
         })
@@ -1273,7 +1274,7 @@ describe('webhook ingress', () => {
     expect(endpoint).toMatchObject({ id: inbox.id, hasToken: true });
     expect(
       (
-        await hook(`/hooks/${bot.handle}`, {
+        await hook(`/hooks/${bot.id}`, {
           body: '{"a":3}',
           headers: {
             ...bearer(token),
@@ -1320,10 +1321,10 @@ describe('webhook ingress', () => {
     const { token: fresh } = (await rotated.json()) as { token: string };
     expect(fresh).not.toBe(token);
     expect(
-      (await hook(`/hooks/${bot.handle}`, { body: '{"r":1}', headers: bearer(token) })).status,
+      (await hook(`/hooks/${bot.id}`, { body: '{"r":1}', headers: bearer(token) })).status,
     ).toBe(401);
     expect(
-      (await hook(`/hooks/${bot.handle}`, { body: '{"r":2}', headers: bearer(fresh) })).status,
+      (await hook(`/hooks/${bot.id}`, { body: '{"r":2}', headers: bearer(fresh) })).status,
     ).toBe(202);
 
     const patched = await call('PATCH', `/endpoints/${endpoint.id}`, {
@@ -1354,13 +1355,13 @@ describe('webhook ingress', () => {
 
     expect((await call('PATCH', `/endpoints/${endpoint.id}`, { enabled: false })).status).toBe(200);
     expect(
-      (await hook(`/hooks/${bot.handle}`, { body: '{"r":3}', headers: bearer(fresh) })).status,
+      (await hook(`/hooks/${bot.id}`, { body: '{"r":3}', headers: bearer(fresh) })).status,
     ).toBe(404);
 
     const extra = await newEndpoint(bot.id, { slug: 'extra' });
     expect((await call('DELETE', `/endpoints/${extra.endpoint.id}`)).status).toBe(204);
     expect(
-      (await hook(`/hooks/${bot.handle}/extra`, { body: '{"r":4}', headers: bearer(extra.token) }))
+      (await hook(`/hooks/${bot.id}/extra`, { body: '{"r":4}', headers: bearer(extra.token) }))
         .status,
     ).toBe(404);
     const actions = async (id: string) =>

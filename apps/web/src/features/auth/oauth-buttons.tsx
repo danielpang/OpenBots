@@ -7,10 +7,11 @@ const LABELS: Record<SocialProvider, string> = { github: 'GitHub', google: 'Goog
 
 /** One button per sign-in provider the server has configured; nothing otherwise. */
 export function OAuthButtons({
-  inviteToken,
+  invite,
   onError,
 }: {
-  inviteToken?: string;
+  /** An invite to accept once signed in (plan 21.5). */
+  invite?: string;
   onError(error: unknown): void;
 }) {
   const { data } = useQuery(capabilitiesQuery);
@@ -18,15 +19,11 @@ export function OAuthButtons({
   if (!providers.length) return null;
 
   async function start(provider: SocialProvider) {
-    // An OAuth signup carries its invite in this cookie (server invites.ts).
-    if (inviteToken) {
-      document.cookie = `openbot_invite=${encodeURIComponent(inviteToken)}; path=/; max-age=600; samesite=lax`;
-    }
     try {
       const errorCallbackURL = window.location.pathname + window.location.search;
       window.location.href = await auth.signInSocial({
         provider,
-        callbackURL: '/',
+        callbackURL: invite ? `/onboarding?invite=${encodeURIComponent(invite)}` : '/',
         errorCallbackURL,
       });
     } catch (error) {

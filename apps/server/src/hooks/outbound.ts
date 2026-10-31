@@ -21,6 +21,7 @@ import { toRun } from '../routes/runs.js';
 import { toMessage, type Message } from '../schemas.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
 import { recordAudit, userActor } from '../services/audit.js';
+import { isOrgAdmin } from '../workspace.js';
 
 // Outbound event subscriptions (plan 11, H6). A worker listens to the event
 // bus and turns the events an owner subscribed to into `event_deliveries`
@@ -104,11 +105,25 @@ async function checkUrl(deps: Pick<AppDeps, 'net' | 'config'>, url: string, loca
 }
 
 /** Only an admin marks a receiver as on their own network (S-8). */
-function checkLocal(owner: Owner, local: boolean | undefined) {
-  if (local === true && owner.role !== 'admin') {
-    throw forbidden('Only an admin can mark a subscription as local');
+function checkLocal(
+  deps: { config: Pick<AppDeps['config'], 'localEndpoints'> },
+  owner: Owner,
+  local: boolean | undefined,
+) {
+  if (local !== true) return;
+  // The hosted service's private network is every organization's (S-8, plan 21.6).
+  if (!deps.config.localEndpoints) {
+    throw forbidden('Subscriptions cannot reach private addresses on the hosted service');
   }
+  if (!isOrgAdmin(owner.role)) throw forbidden('Only an admin can mark a subscription as local');
 }
+
+/** The owner's subscriptions in one organization (plan 21.3). */
+const subscriptionsOf = (owner: Pick<Owner, 'id' | 'workspaceId'>) =>
+  and(
+    eq(schema.eventSubscriptions.ownerId, owner.id),
+    eq(schema.eventSubscriptions.workspaceId, owner.workspaceId),
+  );
 
 export const generateSubscriptionSecret = () => `obs_${randomBytes(32).toString('base64url')}`;
 
@@ -132,7 +147,7 @@ export async function listSubscriptions(db: Db, owner: Owner): Promise<Subscript
   return db
     .select()
     .from(schema.eventSubscriptions)
-    .where(eq(schema.eventSubscriptions.ownerId, owner.id))
+    .where(subscriptionsOf(owner))
     .orderBy(schema.eventSubscriptions.createdAt);
 }
 
@@ -140,9 +155,7 @@ export async function getSubscription(db: Db, owner: Owner, id: string): Promise
   const [row] = await db
     .select()
     .from(schema.eventSubscriptions)
-    .where(
-      and(eq(schema.eventSubscriptions.id, id), eq(schema.eventSubscriptions.ownerId, owner.id)),
-    );
+    .where(and(eq(schema.eventSubscriptions.id, id), subscriptionsOf(owner)));
   if (!row) throw notFound('Subscription not found');
   return row;
 }
@@ -153,7 +166,7 @@ export async function createSubscription(
   owner: Owner,
   input: SubscriptionInput,
 ): Promise<{ subscription: SubscriptionRow; secret: string }> {
-  checkLocal(owner, input.local);
+  checkLocal(deps, owner, input.local);
   const local = input.local ?? false;
   await checkUrl(deps, input.url, local);
   const secret = generateSubscriptionSecret();
@@ -185,7 +198,7 @@ export async function updateSubscription(
   patch: Partial<SubscriptionInput> & { rotateSecret?: boolean },
 ): Promise<{ subscription: SubscriptionRow; secret?: string }> {
   const row = await getSubscription(deps.db, owner, id);
-  checkLocal(owner, patch.local);
+  checkLocal(deps, owner, patch.local);
   // The mark was given to the receiver as it was: a new URL is held to public addresses again.
   const changedUrl = patch.url !== undefined && patch.url !== row.url;
   const local = patch.local ?? (changedUrl ? false : row.local);
@@ -343,23 +356,28 @@ async function outboundFor(db: Db, event: WsEvent): Promise<Outbound[]> {
   }
 }
 
-/** The owner an event belongs to, through its Bot or chat. */
-async function ownerOf(db: Db, event: WsEvent): Promise<string | null> {
+/** The owner an event belongs to, and in which organization, through its Bot or chat. */
+async function ownerOf(
+  db: Db,
+  event: WsEvent,
+): Promise<{ id: string; workspaceId: string } | null> {
   if (event.bot_id) {
     const [bot] = await db
-      .select({ ownerId: schema.bots.ownerId })
+      .select({ id: schema.bots.ownerId, workspaceId: schema.bots.workspaceId })
       .from(schema.bots)
       .where(eq(schema.bots.id, event.bot_id));
-    if (bot) return bot.ownerId;
+    if (bot) return bot;
   }
   if (event.chat_id) {
     const [chat] = await db
-      .select({ ownerId: schema.chats.ownerId })
+      .select({ id: schema.chats.ownerId, workspaceId: schema.chats.workspaceId })
       .from(schema.chats)
       .where(eq(schema.chats.id, event.chat_id));
-    if (chat) return chat.ownerId;
+    if (chat) return chat;
   }
-  return event.user_id ?? null;
+  return event.user_id && event.workspace_id
+    ? { id: event.user_id, workspaceId: event.workspace_id }
+    : null;
 }
 
 /**
@@ -369,8 +387,8 @@ async function ownerOf(db: Db, event: WsEvent): Promise<string | null> {
 export async function fanOut(deps: OutboundDeps, event: WsEvent): Promise<EventDeliveryRow[]> {
   const outbound = await outboundFor(deps.db, event);
   if (!outbound.length) return [];
-  const ownerId = await ownerOf(deps.db, event);
-  if (!ownerId) return [];
+  const owner = await ownerOf(deps.db, event);
+  if (!owner) return [];
   const created: EventDeliveryRow[] = [];
   for (const item of outbound) {
     const subscriptions = await deps.db
@@ -378,7 +396,7 @@ export async function fanOut(deps: OutboundDeps, event: WsEvent): Promise<EventD
       .from(schema.eventSubscriptions)
       .where(
         and(
-          eq(schema.eventSubscriptions.ownerId, ownerId),
+          subscriptionsOf(owner),
           eq(schema.eventSubscriptions.enabled, true),
           arrayContains(schema.eventSubscriptions.events, [item.type]),
         ),

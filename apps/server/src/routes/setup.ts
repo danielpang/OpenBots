@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { clientIp } from '../client-ip.js';
-import { requireAdmin } from '../middleware/auth.js';
+import { requireAdmin, requireSelfHosted } from '../middleware/auth.js';
 import { adminProblems, authenticated, createRouter, problemResponse } from '../openapi.js';
 import {
   createAdmin,
@@ -70,6 +70,8 @@ export const setupRoutes = createRouter()
       path: '/setup/admin',
       tags: ['setup'],
       summary: 'Create the first account (the owner) and sign them in',
+      description: 'Self-hosted only: the managed service answers 404.',
+      middleware: [requireSelfHosted] as const,
       request: {
         body: { required: true, content: { 'application/json': { schema: CreateAdminSchema } } },
       },
@@ -82,6 +84,7 @@ export const setupRoutes = createRouter()
         403: problemResponse(
           'The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY)',
         ),
+        404: problemResponse('The managed service, where people sign up instead'),
         409: problemResponse('Setup is complete: a user already exists'),
       },
     }),
@@ -104,7 +107,7 @@ export const setupRoutes = createRouter()
       path: '/setup/sandbox-image',
       tags: ['setup'],
       summary: 'The sandbox image pull started by the wizard',
-      middleware: [requireAdmin] as const,
+      middleware: [requireSelfHosted, requireAdmin] as const,
       security: authenticated,
       responses: {
         200: {
@@ -112,6 +115,7 @@ export const setupRoutes = createRouter()
           content: { 'application/json': { schema: SandboxImageSchema } },
         },
         ...adminProblems,
+        404: problemResponse('The managed service'),
       },
     }),
     (c) => c.json(sandboxImageState(c.var.deps), 200),
@@ -122,7 +126,7 @@ export const setupRoutes = createRouter()
       path: '/setup/sandbox-image',
       tags: ['setup'],
       summary: 'Start pulling the sandbox image in the background (Docker only)',
-      middleware: [requireAdmin] as const,
+      middleware: [requireSelfHosted, requireAdmin] as const,
       security: authenticated,
       responses: {
         202: {
@@ -130,6 +134,7 @@ export const setupRoutes = createRouter()
           content: { 'application/json': { schema: SandboxImageSchema } },
         },
         ...adminProblems,
+        404: problemResponse('The managed service'),
       },
     }),
     (c) => c.json(startSandboxPull(c.var.deps), 202),

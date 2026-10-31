@@ -5,41 +5,40 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { APIError, createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
 import { symmetricEncrypt } from 'better-auth/crypto';
-import { asc, eq, isNotNull, or } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
 import { problem } from './errors.js';
 import type { RateLimiter } from './infra/rate-limit.js';
-import { findRedeemableInvite, inviteTokenFrom, redeemInvite } from './invites.js';
 import type { Logger } from './logger.js';
 import { parseMasterKey } from './secrets.js';
 import { recordAudit } from './services/audit.js';
-import { effectiveSettings, ensureWorkspace, lockWorkspace, type Role } from './workspace.js';
+import { ensureWorkspace, lockWorkspace } from './workspace.js';
 
 // better-auth (plan section 3): email and password, optional GitHub and Google
 // sign-in, cookie sessions, and API keys (U4). Mounted at `/api/auth/*`.
 //
-// Signup policy (U1) lives in the user-create hooks so it covers every way an
-// account is made, OAuth included. The first user of an instance becomes its
-// admin in every mode. A self-hosted install (OPENBOT_DEPLOYMENT) is one
-// person's: that first account is its owner and every later signup is
-// refused, invite or not, whatever the stored signup mode. On the managed
-// service, `open` lets anyone in as a member, while `first_user_admin` and
-// `invite` both require an unused invite.
+// Organizations (plan section 21): a self-hosted install (OPENBOT_DEPLOYMENT)
+// is one person's, in one implicit organization. Its first account is the
+// owner and every later signup is refused, whatever the request. That policy
+// lives in the user-create hooks so it covers every way an account is made,
+// OAuth included. On the managed service the core makes no membership at
+// signup: the managed build (ee/server) adds better-auth's organization
+// plugin and its hooks through `plugins`, which decide who may sign up, make
+// organizations, redeem invitations and pick a session's active organization.
 //
 // Rate limits (plan 17 control 6, S-6) are on in every environment, in the
 // infra's limiter (Redis when REDIS_URL is set), keyed on the client address
 // `createApp` resolves per TRUSTED_PROXIES and passes in CLIENT_IP_HEADER.
 // A request without one is refused rather than counted in a shared bucket.
 //
-// An admin can disable a member (services/members.ts): their sessions are
-// deleted there, and the session hook below refuses new ones.
-//
 // Audit (S-11): every new session is an `auth.sign_in` (email, OAuth, and
-// the sign-in that follows a signup), signing out is `auth.sign_out`, and a
-// refused email sign-in is `auth.sign_in_failed` with the address tried.
+// the sign-in that follows a signup) in the organization it is active in,
+// signing out is `auth.sign_out`, and a refused email sign-in is
+// `auth.sign_in_failed` with the address tried, in each organization the
+// account belongs to.
 //
 // The Mac app's local mode (OPENBOT_LOCAL_TOKEN, routes/local.ts) has no
 // sign-in at all: `createLocalSession`, a server-only endpoint (no HTTP path),
@@ -83,10 +82,12 @@ const localOnly = () =>
 export interface Auth {
   handler(request: Request): Promise<Response>;
   api: {
-    getSession(input: { headers: Headers }): Promise<{ user: { id: string } } | null>;
+    getSession(input: {
+      headers: Headers;
+    }): Promise<{ user: { id: string }; session: { id: string } } | null>;
     verifyApiKey(input: {
       body: { key: string };
-    }): Promise<{ valid: boolean; key: { referenceId: string } | null }>;
+    }): Promise<{ valid: boolean; key: { id: string; referenceId: string } | null }>;
     createApiKey(input: {
       body: { name: string; userId: string; expiresIn: number | null };
     }): Promise<{
@@ -109,12 +110,11 @@ export interface Auth {
   };
 }
 
-function inviteInvalid() {
-  return new APIError('FORBIDDEN', {
-    code: 'INVITE_INVALID',
-    message: 'This invite is unknown, used, expired, or for another email address',
+const signupClosed = () =>
+  new APIError('FORBIDDEN', {
+    code: 'SIGNUP_CLOSED',
+    message: 'This OpenBot already has its owner. Sign in instead.',
   });
-}
 
 export function createAuth({
   config,
@@ -122,6 +122,7 @@ export function createAuth({
   logger,
   limiter,
   rateLimit = true,
+  plugins = [],
 }: {
   config: Config;
   db: Db;
@@ -129,11 +130,13 @@ export function createAuth({
   limiter: RateLimiter;
   /** Tests that sign many people up from no address turn this off. */
   rateLimit?: boolean;
+  /** better-auth plugins from the managed build (`ServerExtensions.authPlugins`). */
+  plugins?: BetterAuthPlugin[];
 }): Auth {
   const origin = new URL(config.publicUrl).origin;
   const { github, google } = config.oauth;
-  // Signups whose `before` hook found they need an invite, by request.
-  const inviteRequired = new WeakSet<object>();
+  // Read at each call: tests turn an install self-hosted while it runs.
+  const selfHosted = () => config.deployment === 'self_hosted';
 
   const instance = betterAuth({
     appName: 'OpenBot',
@@ -175,103 +178,67 @@ export function createAuth({
         rateLimit: { enabled: false },
       }),
       localSessionPlugin(db),
+      ...plugins,
     ],
     databaseHooks: {
       user: {
         create: {
-          // The invite is checked here and spent in `after`, once the user row
-          // exists, so a signup that fails in between does not burn it (U1).
-          before: async (user, ctx) => {
+          // On a self-hosted install the first account is the owner and the
+          // only one (U1). The managed build's plugin hooks run before these.
+          before: async (_user, ctx) => {
             if (config.localToken && ctx?.path !== LOCAL_SESSION_PATH) throw localOnly();
-            const workspace = await ensureWorkspace(db);
+            if (!selfHosted()) return;
+            await ensureWorkspace(db);
             const [anyUser] = await db.select({ id: schema.users.id }).from(schema.users).limit(1);
-            if (!anyUser) return;
-            if (config.deployment === 'self_hosted') {
-              throw new APIError('FORBIDDEN', {
-                code: 'SIGNUP_CLOSED',
-                message: 'This OpenBot already has its owner. Sign in instead.',
-              });
-            }
-            if (effectiveSettings(config, workspace).signupMode === 'open') return;
-            const token = inviteTokenFrom(ctx);
-            if (!token) {
-              throw new APIError('FORBIDDEN', {
-                code: 'INVITE_REQUIRED',
-                message: 'Signing up on this OpenBot needs an invite',
-              });
-            }
-            if (!(await findRedeemableInvite(db, token, user.email))) throw inviteInvalid();
-            if (ctx) inviteRequired.add(ctx);
+            if (anyUser) throw signupClosed();
           },
-          after: async (user, ctx) => {
-            const token = inviteTokenFrom(ctx);
-            const required = ctx != null && inviteRequired.delete(ctx);
+          after: async (user) => {
+            if (!selfHosted()) return;
             const joined = await db.transaction(async (tx) => {
               await lockWorkspace(tx);
-              const invite = token ? await redeemInvite(tx, token, user.email, user.id) : undefined;
-              if (required && !invite) return false;
               const workspace = await ensureWorkspace(tx);
-              const [admin] = await tx
+              const [owner] = await tx
                 .select({ id: schema.workspaceMembers.id })
                 .from(schema.workspaceMembers)
-                .where(eq(schema.workspaceMembers.role, 'admin'))
+                .where(
+                  and(
+                    eq(schema.workspaceMembers.workspaceId, workspace.id),
+                    eq(schema.workspaceMembers.role, 'owner'),
+                  ),
+                )
                 .limit(1);
               // Two first signups can both pass `before`; under the lock only
-              // the first becomes the owner of a self-hosted install.
-              if (admin && config.deployment === 'self_hosted') return 'closed';
-              let role: Role = admin ? 'member' : 'admin';
-              if (invite?.role === 'admin') role = 'admin';
+              // the first becomes the owner.
+              if (owner) return false;
               await tx
                 .insert(schema.workspaceMembers)
-                .values({ workspaceId: workspace.id, userId: user.id, role });
-              if (invite) {
-                await recordAudit(tx, {
-                  workspaceId: workspace.id,
-                  actor: { type: 'user', id: user.id },
-                  action: 'invite.redeem',
-                  targetType: 'invite',
-                  targetId: invite.id,
-                  metadata: { role },
-                });
-              }
+                .values({ workspaceId: workspace.id, userId: user.id, role: 'owner' });
               return true;
             });
-            if (joined === 'closed') {
-              await db.delete(schema.users).where(eq(schema.users.id, user.id));
-              throw new APIError('FORBIDDEN', {
-                code: 'SIGNUP_CLOSED',
-                message: 'This OpenBot already has its owner. Sign in instead.',
-              });
-            }
             if (!joined) {
-              // Another signup spent the invite after `before` checked it: this
-              // one never joins, so its user row (and its session) goes.
               await db.delete(schema.users).where(eq(schema.users.id, user.id));
-              throw inviteInvalid();
+              throw signupClosed();
             }
           },
         },
       },
       session: {
         create: {
-          // A member an admin disabled cannot sign in again (U3), and on a
-          // self-hosted install nobody but the owner can.
+          // On a self-hosted install nobody but the owner signs in.
           before: async (session, ctx) => {
             if (config.localToken && ctx?.path !== LOCAL_SESSION_PATH) throw localOnly();
+            if (!selfHosted()) return;
+            const workspace = await ensureWorkspace(db);
             const [member] = await db
-              .select({
-                disabledAt: schema.workspaceMembers.disabledAt,
-                role: schema.workspaceMembers.role,
-              })
+              .select({ role: schema.workspaceMembers.role })
               .from(schema.workspaceMembers)
-              .where(eq(schema.workspaceMembers.userId, session.userId));
-            if (member?.disabledAt) {
-              throw new APIError('FORBIDDEN', {
-                code: 'ACCOUNT_DISABLED',
-                message: 'This account is disabled. Ask an admin to enable it.',
-              });
-            }
-            if (member && config.deployment === 'self_hosted' && member.role !== 'admin') {
+              .where(
+                and(
+                  eq(schema.workspaceMembers.userId, session.userId),
+                  eq(schema.workspaceMembers.workspaceId, workspace.id),
+                ),
+              );
+            if (member && member.role !== 'owner') {
               throw new APIError('FORBIDDEN', {
                 code: 'NOT_OWNER',
                 message: 'This OpenBot has one account, its owner.',
@@ -279,13 +246,14 @@ export function createAuth({
             }
           },
           after: async (session, ctx) => {
+            const active = activeOrganizationOf(session);
             if (ctx?.path === LOCAL_SESSION_PATH) {
-              await auditAuth(db, 'auth.local_session', session.userId, {
+              await auditAuth(db, config, 'auth.local_session', session.userId, active, {
                 ip: session.ipAddress ?? null,
               });
               return;
             }
-            await auditAuth(db, 'auth.sign_in', session.userId, {
+            await auditAuth(db, config, 'auth.sign_in', session.userId, active, {
               via: ctx?.path ?? null,
               ip: session.ipAddress ?? null,
             });
@@ -295,7 +263,14 @@ export function createAuth({
           after: async (session, ctx) => {
             // Expiry and revocation delete sessions too; only signing out counts.
             if (ctx?.path !== '/sign-out') return;
-            await auditAuth(db, 'auth.sign_out', session.userId, {});
+            await auditAuth(
+              db,
+              config,
+              'auth.sign_out',
+              session.userId,
+              activeOrganizationOf(session),
+              {},
+            );
           },
         },
       },
@@ -330,7 +305,13 @@ export function createAuth({
       const response = await instance.handler(request);
       if (response.status === 401 || response.status === 403) {
         const email = typeof body?.email === 'string' ? body.email.toLowerCase() : null;
-        await auditFailedSignIn(db, email, request.headers.get(CLIENT_IP_HEADER), response.status);
+        await auditFailedSignIn(
+          db,
+          config,
+          email,
+          request.headers.get(CLIENT_IP_HEADER),
+          response.status,
+        );
       }
       return response;
     },
@@ -339,12 +320,18 @@ export function createAuth({
 
 const SIGN_IN_EMAIL = '/api/auth/sign-in/email';
 
-/** The owner: the first admin of the workspace (self-hosted has only them). */
+/** The owner of the implicit organization (a self-hosted install has only them). */
 async function findOwner(db: Db): Promise<string | undefined> {
+  const workspace = await ensureWorkspace(db);
   const [owner] = await db
     .select({ id: schema.workspaceMembers.userId })
     .from(schema.workspaceMembers)
-    .where(eq(schema.workspaceMembers.role, 'admin'))
+    .where(
+      and(
+        eq(schema.workspaceMembers.workspaceId, workspace.id),
+        eq(schema.workspaceMembers.role, 'owner'),
+      ),
+    )
     .orderBy(asc(schema.workspaceMembers.createdAt))
     .limit(1);
   return owner?.id;
@@ -368,7 +355,7 @@ function localSessionPlugin(db: Db) {
           let ownerId = await findOwner(db);
           if (!ownerId) {
             try {
-              // The user hooks above make the first user the admin, as for setup.
+              // The user hooks above make the first user the owner, as for setup.
               const user = await adapter.createUser(
                 { email: LOCAL_OWNER_EMAIL, name: ctx.body.name, emailVerified: false },
                 { method: 'openbot-local' },
@@ -391,40 +378,81 @@ function localSessionPlugin(db: Db) {
   } satisfies BetterAuthPlugin;
 }
 
-async function auditAuth(
-  db: Db,
-  action: 'auth.sign_in' | 'auth.sign_out' | 'auth.local_session',
-  userId: string,
-  metadata: Record<string, unknown>,
-) {
-  const workspace = await ensureWorkspace(db);
-  await recordAudit(db, {
-    workspaceId: workspace.id,
-    actor: { type: 'user', id: userId },
-    action,
-    targetType: 'user',
-    targetId: userId,
-    metadata,
-  });
+/** The session's active organization (the organization plugin's field), if any. */
+function activeOrganizationOf(session: object): string | null {
+  const value = (session as { activeOrganizationId?: unknown }).activeOrganizationId;
+  return typeof value === 'string' ? value : null;
 }
 
-/** The account tried, when there is one, is the actor; an unknown address has none. */
-async function auditFailedSignIn(db: Db, email: string | null, ip: string | null, status: number) {
+/**
+ * The organizations an account's audit rows go to: the implicit one on a
+ * self-hosted install, else the session's active organization, else every
+ * organization the account belongs to.
+ */
+async function auditOrganizations(
+  db: Db,
+  config: Config,
+  userId: string | null,
+  activeOrganizationId: string | null,
+): Promise<string[]> {
+  if (config.deployment === 'self_hosted') return [(await ensureWorkspace(db)).id];
+  if (activeOrganizationId) return [activeOrganizationId];
+  if (!userId) return [];
+  const rows = await db
+    .select({ id: schema.workspaceMembers.workspaceId })
+    .from(schema.workspaceMembers)
+    .where(eq(schema.workspaceMembers.userId, userId));
+  return rows.map((r) => r.id);
+}
+
+async function auditAuth(
+  db: Db,
+  config: Config,
+  action: 'auth.sign_in' | 'auth.sign_out' | 'auth.local_session',
+  userId: string,
+  activeOrganizationId: string | null,
+  metadata: Record<string, unknown>,
+) {
+  for (const workspaceId of await auditOrganizations(db, config, userId, activeOrganizationId)) {
+    await recordAudit(db, {
+      workspaceId,
+      actor: { type: 'user', id: userId },
+      action,
+      targetType: 'user',
+      targetId: userId,
+      metadata,
+    });
+  }
+}
+
+/**
+ * The account tried, when there is one, is the actor. On the managed service
+ * the attempt is recorded in every organization the account belongs to; an
+ * unknown address is recorded only on a self-hosted install.
+ */
+async function auditFailedSignIn(
+  db: Db,
+  config: Config,
+  email: string | null,
+  ip: string | null,
+  status: number,
+) {
   const [user] = email
     ? await db
         .select({ id: schema.users.id })
         .from(schema.users)
         .where(eq(schema.users.email, email))
     : [];
-  const workspace = await ensureWorkspace(db);
-  await recordAudit(db, {
-    workspaceId: workspace.id,
-    actor: { type: 'user', id: user?.id ?? null },
-    action: 'auth.sign_in_failed',
-    targetType: 'user',
-    targetId: user?.id ?? null,
-    metadata: { email, ip, status },
-  });
+  for (const workspaceId of await auditOrganizations(db, config, user?.id ?? null, null)) {
+    await recordAudit(db, {
+      workspaceId,
+      actor: { type: 'user', id: user?.id ?? null },
+      action: 'auth.sign_in_failed',
+      targetType: 'user',
+      targetId: user?.id ?? null,
+      metadata: { email, ip, status },
+    });
+  }
 }
 
 /** better-auth's own test for an encrypted token (`isLikelyEncrypted` in its oauth2 utils). */

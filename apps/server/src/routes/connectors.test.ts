@@ -108,6 +108,9 @@ describe('/api/v1/connectors', () => {
       OPENBOT_SIGNUP_MODE: 'open',
       OPENBOT_FILES_DIR: filesDir,
       OPENBOT_MCP_DIR: mcpDir,
+      // Both stay off on the hosted service (plan 21.6); this suite covers them.
+      OPENBOT_CUSTOM_STDIO: 'true',
+      OPENBOT_LOCAL_ENDPOINTS: 'true',
     });
     admin = (await t.signUp('admin@example.com')).cookie!;
     member = (await t.signUp('member@example.com')).cookie!;
@@ -515,23 +518,27 @@ describe('/api/v1/connectors', () => {
       call(cookie, 'PUT', `/connectors/${id}/local`, { local });
 
     it('reaches a server on 127.0.0.1 only once an admin marks the connector local', async () => {
-      const c = await create(member, {
+      const c = await create(ops, {
         name: 'Home server',
         url: server.url,
         auth: 'bearer',
         secrets: { BEARER_TOKEN: SECRETS.bearer },
       });
       expect(c.local).toBe(false);
-      let tested = await test(member, c.id);
+      let tested = await test(ops, c.id);
       expect(tested.connector.status).toBe('error');
       expect(tested.connector.lastError).toContain('private or local network');
 
-      // Not even the owner, unless an admin; and not through create or edit.
-      let res = await setLocal(member, c.id, true);
+      // Not a member, even on their own connector; and an admin marks only
+      // their own, since admins do not act on members' connectors (U2, plan 21.6).
+      const theirs = await create(member, { name: 'Their server', url: server.url });
+      let res = await setLocal(member, theirs.id, true);
       expect(res.status).toBe(403);
-      res = await call(member, 'PATCH', `/connectors/${c.id}`, { local: true });
+      expect((await setLocal(admin, theirs.id, true)).status).toBe(404);
+      // Not through create or edit either.
+      res = await call(ops, 'PATCH', `/connectors/${c.id}`, { local: true });
       expect(res.status).toBe(400);
-      res = await call(member, 'POST', '/connectors', {
+      res = await call(ops, 'POST', '/connectors', {
         name: 'Sneaky',
         url: server.url,
         local: true,
@@ -539,14 +546,14 @@ describe('/api/v1/connectors', () => {
       expect(res.status).toBe(400);
       expect(
         (
-          (await (await call(member, 'GET', '/connectors')).json()) as { items: Connector[] }
+          (await (await call(ops, 'GET', '/connectors')).json()) as { items: Connector[] }
         ).items.find((i) => i.id === c.id)?.local,
       ).toBe(false);
 
-      res = await setLocal(admin, c.id, true);
+      res = await setLocal(ops, c.id, true);
       expect(res.status).toBe(200);
       expect(((await res.json()) as Connector).local).toBe(true);
-      tested = await test(member, c.id);
+      tested = await test(ops, c.id);
       expect(tested.connector.status).toBe('ok');
       expect(tested.tools.map((x) => x.name)).toEqual(['add', 'delete_everything']);
       const [entry] = await t.deps.db
@@ -554,44 +561,44 @@ describe('/api/v1/connectors', () => {
         .from(schema.auditLog)
         .where(eq(schema.auditLog.action, 'connector.local'));
       expect(entry).toMatchObject({
-        actorId: await userId('admin@example.com'),
+        actorId: await userId('ops@example.com'),
         targetId: c.id,
         metadata: { local: true },
       });
 
       // The mark was for that server: a new name keeps it, a new URL clears it.
-      res = await call(member, 'PATCH', `/connectors/${c.id}`, { name: 'My home server' });
+      res = await call(ops, 'PATCH', `/connectors/${c.id}`, { name: 'My home server' });
       expect(((await res.json()) as Connector).local).toBe(true);
-      res = await call(member, 'PATCH', `/connectors/${c.id}`, {
+      res = await call(ops, 'PATCH', `/connectors/${c.id}`, {
         url: server.url.replace('127.0.0.1', 'localhost'),
       });
       expect(((await res.json()) as Connector).local).toBe(false);
-      tested = await test(member, c.id);
+      tested = await test(ops, c.id);
       expect(tested.connector.lastError).toContain('private or local network');
 
       // Only HTTP connectors reach the network.
       const stdio = await stdioConnector(ops, 'local-stdio');
-      res = await setLocal(admin, stdio.id, true);
+      res = await setLocal(ops, stdio.id, true);
       expect(res.status).toBe(400);
       expect(((await res.json()) as { code: string }).code).toBe('NOT_HTTP');
       const missing = '00000000-0000-4000-8000-000000000000';
-      expect((await setLocal(admin, missing, true)).status).toBe(404);
+      expect((await setLocal(ops, missing, true)).status).toBe(404);
     });
 
     it("lets a local connector's OAuth requests reach a private sign-in server", async () => {
-      const c = await create(member, { name: 'Home sign-in', url: server.url, auth: 'oauth' });
-      let res = await call(member, 'GET', `/connectors/${c.id}/oauth/start`);
+      const c = await create(ops, { name: 'Home sign-in', url: server.url, auth: 'oauth' });
+      let res = await call(ops, 'GET', `/connectors/${c.id}/oauth/start`);
       expect(res.status).toBe(400);
       expect(await res.text()).toContain('private or local network');
 
-      expect((await setLocal(admin, c.id, true)).status).toBe(200);
-      res = await call(member, 'GET', `/connectors/${c.id}/oauth/start`);
+      expect((await setLocal(ops, c.id, true)).status).toBe(200);
+      res = await call(ops, 'GET', `/connectors/${c.id}/oauth/start`);
       expect(res.status, await res.clone().text()).toBe(200);
       const { authorizationUrl } = (await res.json()) as { authorizationUrl: string };
       const redirect = await as.consent(authorizationUrl);
-      const done = await call(member, 'GET', `${redirect.pathname}${redirect.search}`);
+      const done = await call(ops, 'GET', `${redirect.pathname}${redirect.search}`);
       expect(new URL(done.headers.get('location')!).searchParams.get('oauth')).toBe('connected');
-      expect((await test(member, c.id)).connector.status).toBe('ok');
+      expect((await test(ops, c.id)).connector.status).toBe('ok');
     });
 
     it('still connects a local connector to the address its lookup answered', async () => {
@@ -605,14 +612,14 @@ describe('/api/v1/connectors', () => {
         },
       };
       try {
-        const c = await create(member, {
+        const c = await create(ops, {
           name: 'Rebinding',
           url: server.url.replace('127.0.0.1', 'rebind.example'),
           auth: 'bearer',
           secrets: { BEARER_TOKEN: SECRETS.bearer },
         });
-        expect((await setLocal(admin, c.id, true)).status).toBe(200);
-        expect((await test(member, c.id)).connector.status).toBe('ok');
+        expect((await setLocal(ops, c.id, true)).status).toBe(200);
+        expect((await test(ops, c.id)).connector.status).toBe('ok');
         expect(answers.length).toBeGreaterThan(0);
         expect(new Set(answers)).toEqual(new Set(['rebind.example']));
       } finally {
@@ -1053,7 +1060,10 @@ describe('/api/v1/connectors', () => {
         params: { root: 'projects/site' },
       });
       const spec = await stdioSpawnFor(t.deps, await rowOf(c.id));
-      const base = userDirectory(t.deps.config, await userId('member@example.com'));
+      const base = userDirectory(t.deps.config, {
+        id: await userId('member@example.com'),
+        workspaceId: await t.defaultOrganization(),
+      });
       expect(spec.command).toBe(join(mcpDir, 'node_modules', '.bin', 'mcp-server-filesystem'));
       expect(spec.args).toHaveLength(1);
       expect(spec.args.at(-1)).toBe(join(realpathSync(base), 'projects', 'site'));
@@ -1612,19 +1622,27 @@ describe('/api/v1/connectors', () => {
   });
 
   it("lets only admins trust a connector's MCP hints (S-16)", async () => {
-    const c = await create(member, {
+    const theirs = await create(member, {
+      name: 'Their notes',
+      slug: 'notes-theirs',
+      url: 'https://mcp.notes.example/mcp',
+    });
+    // Not even the owner, unless an admin; and an admin vouches only for
+    // their own, since admins do not act on members' connectors (U2, plan 21.6).
+    let res = await call(member, 'PUT', `/connectors/${theirs.id}/trusted`, { trusted: true });
+    expect(res.status).toBe(403);
+    res = await call(admin, 'PUT', `/connectors/${theirs.id}/trusted`, { trusted: true });
+    expect(res.status).toBe(404);
+    const c = await create(admin, {
       name: 'Notes',
       slug: 'notes-trust',
       url: 'https://mcp.notes.example/mcp',
     });
     expect(c.trusted).toBe(false);
-    // Not even the owner, unless an admin.
-    let res = await call(member, 'PUT', `/connectors/${c.id}/trusted`, { trusted: true });
-    expect(res.status).toBe(403);
     res = await call(admin, 'PUT', `/connectors/${c.id}/trusted`, { trusted: true });
     expect(res.status).toBe(200);
     expect(((await res.json()) as Connector).trusted).toBe(true);
-    const list = (await (await call(member, 'GET', '/connectors')).json()) as {
+    const list = (await (await call(admin, 'GET', '/connectors')).json()) as {
       items: Connector[];
     };
     expect(list.items.find((i) => i.id === c.id)?.trusted).toBe(true);
@@ -1639,9 +1657,9 @@ describe('/api/v1/connectors', () => {
     });
 
     // Trust was for the server as it was: a new URL clears it, a new name does not.
-    res = await call(member, 'PATCH', `/connectors/${c.id}`, { name: 'My notes' });
+    res = await call(admin, 'PATCH', `/connectors/${c.id}`, { name: 'My notes' });
     expect(((await res.json()) as Connector).trusted).toBe(true);
-    res = await call(member, 'PATCH', `/connectors/${c.id}`, {
+    res = await call(admin, 'PATCH', `/connectors/${c.id}`, {
       url: 'https://mcp.other.example/mcp',
     });
     expect(((await res.json()) as Connector).trusted).toBe(false);

@@ -54,6 +54,7 @@ export async function openBotChat(
       .where(
         and(
           eq(schema.chats.ownerId, owner.id),
+          eq(schema.chats.workspaceId, owner.workspaceId),
           eq(schema.chats.botId, botId),
           eq(schema.chats.type, 'bot_dm'),
         ),
@@ -292,7 +293,7 @@ export async function postUserMessage(
   const parts: MessagePart[] = [];
   if (input.skillId) {
     // Only a Skill one of the chat's Bots has enabled (S2).
-    const skill = await referableSkill(db, owner.id, input.skillId, await chatBotIds(db, chat!));
+    const skill = await referableSkill(db, owner, input.skillId, await chatBotIds(db, chat!));
     parts.push({ type: 'skill_ref', skill_id: skill.id, name: skill.name });
   }
   if (text) parts.push({ type: 'text', text });
@@ -315,7 +316,11 @@ export async function postUserMessage(
           .select({ id: schema.bots.id })
           .from(schema.bots)
           .where(
-            and(eq(schema.bots.ownerId, owner.id), inArray(schema.bots.handle, mentioned.handles)),
+            and(
+              eq(schema.bots.ownerId, owner.id),
+              eq(schema.bots.workspaceId, owner.workspaceId),
+              inArray(schema.bots.handle, mentioned.handles),
+            ),
           )
       ).map((b) => b.id)
     : [];

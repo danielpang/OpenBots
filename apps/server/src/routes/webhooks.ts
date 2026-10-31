@@ -41,7 +41,7 @@ import {
 } from '../hooks/outbound.js';
 import { requireUser } from '../middleware/auth.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
-import { effectiveSettings, ensureWorkspace } from '../workspace.js';
+import { organizationSettings } from '../workspace.js';
 
 // Webhook endpoints, their delivery log and outbound event subscriptions
 // (plan 11, 14.1; H1 to H6). Owner-scoped through the Bot; another user's Bot,
@@ -233,19 +233,29 @@ const EventDeliverySchema = z
 
 const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
 
-export function endpointUrl(config: Pick<Config, 'publicUrl'>, handle: string, slug: string) {
+/**
+ * An endpoint's public URL. It names the Bot by handle on a self-hosted
+ * install and by id on the managed service, where handles are unique only
+ * per (organization, owner) (plan 21.3).
+ */
+export function endpointUrl(
+  config: Pick<Config, 'publicUrl' | 'deployment'>,
+  bot: { id: string; handle: string },
+  slug: string,
+) {
   const base = config.publicUrl.replace(/\/$/, '');
-  return slug === INBOX_SLUG ? `${base}/hooks/${handle}` : `${base}/hooks/${handle}/${slug}`;
+  const name = config.deployment === 'managed' ? bot.id : bot.handle;
+  return slug === INBOX_SLUG ? `${base}/hooks/${name}` : `${base}/hooks/${name}/${slug}`;
 }
 
-/** The admin's sync webhook wait, which caps every endpoint's (H4). */
+/** The organization's sync webhook wait, which caps every endpoint's (H4). */
 async function syncWaitLimit(c: Context<AppEnv>): Promise<number> {
-  const { config, db } = c.var.deps;
-  return effectiveSettings(config, await ensureWorkspace(db)).limits.syncWebhookWaitSeconds;
+  return (await organizationSettings(c.var.deps, c.var.user.workspaceId)).limits
+    .syncWebhookWaitSeconds;
 }
 
 function toEndpoint(
-  config: Pick<Config, 'publicUrl'>,
+  config: Pick<Config, 'publicUrl' | 'deployment'>,
   { endpoint, bot }: EndpointRecord,
   waitLimit: number,
 ): z.infer<typeof EndpointSchema> {
@@ -257,7 +267,7 @@ function toEndpoint(
     botId: endpoint.botId,
     routineId: endpoint.routineId,
     slug: endpoint.slug,
-    url: endpointUrl(config, bot.handle, endpoint.slug),
+    url: endpointUrl(config, bot, endpoint.slug),
     hasToken: hasToken(endpoint),
     signature: signature.success
       ? { ...signature.data, hasSecret: Boolean(endpoint.signatureSecret) }

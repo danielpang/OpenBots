@@ -145,7 +145,7 @@ function wildcardPath(c: Context<AppEnv>) {
 }
 
 const uploadBody: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const limit = await uploadLimit(c.var.deps);
+  const limit = await uploadLimit(c.var.deps, c.var.user.workspaceId);
   return bodyLimit({
     maxSize: limit,
     onError: () => {
@@ -180,7 +180,7 @@ export const computerRoutes = createRouter()
       },
     }),
     async (c) => {
-      const row = await getComputer(c.var.deps, c.var.user.id);
+      const row = await getComputer(c.var.deps, c.var.user);
       return c.json(
         {
           available: computerAvailable(c.var.deps),
@@ -228,7 +228,7 @@ export const computerRoutes = createRouter()
       },
     }),
     async (c) => {
-      const row = await getComputer(c.var.deps, c.var.user.id);
+      const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
       const saved = await updateComputerSettings(c.var.deps, row, c.req.valid('json'));
       return c.json(await computerOut(c, saved), 200);
@@ -265,7 +265,7 @@ export const computerRoutes = createRouter()
       },
     }),
     async (c) => {
-      const row = await getComputer(c.var.deps, c.var.user.id);
+      const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
       return c.json(await computerOut(c, await stopComputer(c.var.deps, row)), 200);
     },
@@ -286,7 +286,7 @@ export const computerRoutes = createRouter()
       },
     }),
     async (c) => {
-      const row = await getComputer(c.var.deps, c.var.user.id);
+      const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
       const { computer } = await restartComputer(c.var.deps, c.var.user, row);
       return c.json(await computerOut(c, computer), 200);

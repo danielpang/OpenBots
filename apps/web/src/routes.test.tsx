@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it, vi } from 'vitest';
+import { configureWeb } from './app/extensions.js';
 import { me, renderPath } from './test-utils.js';
 
 // The API client binds `fetch` when its module loads, so the fake goes in
@@ -33,7 +34,7 @@ const local = {
   },
 };
 const localOwner = () => {
-  const owner = me('admin');
+  const owner = me('owner');
   return { ...owner, user: { ...owner.user, email: 'owner@openbots.local', name: 'Ada' } };
 };
 const text = (html: string) => html.replace(/<[^>]*>/g, ' ');
@@ -83,23 +84,62 @@ describe('routes', () => {
     expect(search).toBe('?connector=c1&oauth=connected');
   });
 
-  it('shows the Admin and Audit log settings tabs to managed admins only', async () => {
-    server.routes = { ...managed, '/api/v1/me': me('admin') };
-    const admin = (await renderPath('/settings/account')).html;
-    expect(admin).toContain('href="/settings/admin"');
-    expect(admin).toContain('href="/settings/audit"');
-    expect(admin).not.toContain('href="/settings/limits"');
-
-    server.routes = { ...managed, '/api/v1/me': me('member') };
-    const member = await renderPath('/settings/account');
-    expect(member.html).toContain('href="/settings/models"');
-    expect(member.html).not.toContain('href="/settings/admin"');
-    expect(member.html).not.toContain('href="/settings/audit"');
+  it('has no organization tabs of its own on the managed service', async () => {
+    server.routes = { ...managed, '/api/v1/me': me('owner') };
+    const owner = (await renderPath('/settings/account')).html;
+    expect(owner).toContain('href="/settings/models"');
+    // Limits live in the managed build's organization settings (plan 21.5).
+    expect(owner).not.toContain('href="/settings/limits"');
+    expect(owner).not.toContain('href="/settings/admin"');
+    expect((await renderPath('/settings/limits')).pathname).toBe('/settings/account');
   });
 
-  it('gives a self-hosted owner Limits instead of the Admin and Audit log tabs', async () => {
+  it("adds the managed build's settings tabs to whoever may see them", async () => {
+    configureWeb({
+      settingsTabs: [
+        {
+          section: 'organization',
+          label: 'Organization',
+          visible: (caller) => caller.role !== 'member',
+          Component: () => <p>Organization page</p>,
+        },
+      ],
+    });
+    try {
+      server.routes = { ...managed, '/api/v1/me': me('admin') };
+      const tab = await renderPath('/settings/organization');
+      expect(tab.pathname).toBe('/settings/organization');
+      expect(tab.html).toContain('Organization page');
+      expect(tab.html).toContain('href="/settings/organization"');
+      server.routes = { ...managed, '/api/v1/me': me('member') };
+      expect((await renderPath('/settings/organization')).pathname).toBe('/settings/account');
+      expect((await renderPath('/settings/nowhere')).pathname).toBe('/settings/account');
+    } finally {
+      configureWeb({});
+    }
+  });
+
+  it('sends someone with no active organization, or suspended in it, to onboarding', async () => {
+    const nobody = { ...me('member'), role: null, workspace: null, limits: null };
+    server.routes = { ...managed, '/api/v1/me': nobody };
+    const onboarding = await renderPath('/');
+    expect(onboarding.pathname).toBe('/onboarding');
+    expect(onboarding.html).toContain('not part of a workspace');
+    const suspended = me('member');
+    server.routes = {
+      ...managed,
+      '/api/v1/me': { ...suspended, workspace: { ...suspended.workspace, suspended: true } },
+    };
+    expect((await renderPath('/connectors')).pathname).toBe('/onboarding');
+    // With an organization, onboarding is only for an invite.
+    server.routes = { ...managed, '/api/v1/me': me('member') };
+    expect((await renderPath('/onboarding')).pathname).toBe('/');
+    expect((await renderPath('/onboarding?invite=abc')).pathname).toBe('/onboarding');
+  });
+
+  it('gives a self-hosted owner Limits, and no organization tabs', async () => {
     for (const routes of [selfHosted, {}]) {
-      server.routes = { ...routes, '/api/v1/me': me('admin') };
+      server.routes = { ...routes, '/api/v1/me': me('owner') };
       const { html } = await renderPath('/settings/account');
       for (const tab of ['account', 'models', 'events', 'limits']) {
         expect(html).toContain(`href="/settings/${tab}"`);
@@ -107,26 +147,18 @@ describe('routes', () => {
       expect(html).not.toContain('href="/settings/admin"');
       expect(html).not.toContain('href="/settings/audit"');
     }
-  });
-
-  it('sends a self-hosted owner who opens Admin or Audit log to Account', async () => {
-    server.routes = { ...selfHosted, '/api/v1/me': me('admin') };
-    expect((await renderPath('/settings/admin')).pathname).toBe('/settings/account');
-    expect((await renderPath('/settings/audit')).pathname).toBe('/settings/account');
     expect((await renderPath('/settings/limits')).pathname).toBe('/settings/limits');
-
-    server.routes = { ...managed, '/api/v1/me': me('admin') };
-    expect((await renderPath('/settings/limits')).pathname).toBe('/settings/admin');
   });
 
   it('says nothing about admins to a self-hosted owner in Settings', async () => {
-    server.routes = { ...selfHosted, '/api/v1/me': me('admin') };
+    server.routes = { ...selfHosted, '/api/v1/me': me('owner') };
     for (const tab of ['account', 'models', 'events', 'limits']) {
       const { html } = await renderPath(`/settings/${tab}`);
       expect(html.replace(/<[^>]*>/g, ' ')).not.toMatch(/admin/i);
       expect(html).not.toMatch(/href="\/settings\/(admin|audit)"/);
     }
-  });
+    // Four pages rendered in turn; slow when the whole repository's tests run at once.
+  }, 20_000);
 
   it('marks the open settings tab the way the sidebar marks its open link', async () => {
     server.routes = { '/api/v1/me': me('member') };
@@ -145,15 +177,6 @@ describe('routes', () => {
     expect((await renderPath('/settings/admin')).pathname).toBe('/settings/account');
     expect((await renderPath('/settings/audit')).pathname).toBe('/settings/account');
     expect((await renderPath('/settings')).pathname).toBe('/settings/account');
-  });
-
-  it('opens the audit log filters for a managed admin', async () => {
-    server.routes = { ...managed, '/api/v1/me': me('admin') };
-    const { pathname, html } = await renderPath('/settings/audit');
-    expect(pathname).toBe('/settings/audit');
-    for (const label of ['Sign-in and sign-out', 'Actor id', 'From', 'To', 'Filter']) {
-      expect(html).toContain(label);
-    }
   });
 
   it('explains an invite rejection passed back from an OAuth signup', async () => {
@@ -240,7 +263,7 @@ describe('routes in the Mac app local mode (auth: local)', () => {
   });
 
   it('keeps General to local mode and Account to the rest', async () => {
-    server.routes = { ...selfHosted, '/api/v1/me': me('admin') };
+    server.routes = { ...selfHosted, '/api/v1/me': me('owner') };
     expect((await renderPath('/settings/general')).pathname).toBe('/settings/account');
     expect((await renderPath('/settings/account')).html).toContain('Sign out');
   });

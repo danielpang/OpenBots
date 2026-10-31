@@ -83,12 +83,29 @@ describe('outbound event subscriptions', () => {
     });
   }
 
-  /** Dana is the admin, so her subscriptions can reach the receiver on 127.0.0.1 (S-8). */
+  /**
+   * A subscription to `to`. The managed service lets no receiver be marked
+   * local (S-8, plan 21.6), so one on 127.0.0.1 is made for a public address
+   * and moved there in the database, as a row from before the rule would be.
+   */
   async function subscribe(events: string[], as = cookie, to = url) {
-    const local = as === cookie;
-    const res = await call('POST', '/event-subscriptions', { url: to, events, local }, as);
+    const res = await call(
+      'POST',
+      '/event-subscriptions',
+      { url: 'https://203.0.113.10/events', events },
+      as,
+    );
     expect(res.status).toBe(201);
-    return (await res.json()) as { subscription: { id: string; local: boolean }; secret: string };
+    const created = (await res.json()) as {
+      subscription: { id: string; local: boolean };
+      secret: string;
+    };
+    const local = to.startsWith('http://127.0.0.1');
+    await t.deps.db
+      .update(schema.eventSubscriptions)
+      .set({ url: to, local })
+      .where(eq(schema.eventSubscriptions.id, created.subscription.id));
+    return { ...created, subscription: { ...created.subscription, local } };
   }
 
   async function newBot(name: string, as = cookie) {
@@ -341,7 +358,7 @@ describe('outbound event subscriptions', () => {
     expect((await call('DELETE', `/event-subscriptions/${subscription.id}`)).status).toBe(204);
   });
 
-  it('refuses a private receiver unless an admin marks it local (S-8)', async () => {
+  it('refuses a private receiver, and any local mark on the managed service (S-8)', async () => {
     const codeOf = async (res: Response) => ((await res.json()) as { code: string }).code;
     const unmarked = await call('POST', '/event-subscriptions', { url, events: ['run.failed'] });
     expect(unmarked.status).toBe(400);
@@ -352,34 +369,18 @@ describe('outbound event subscriptions', () => {
         await call('POST', '/event-subscriptions', { url: metadata, events: ['run.failed'] }),
       ),
     ).toBe('PRIVATE_HOST');
-
-    // Only an admin marks a receiver local.
-    const member = (await t.signUp('trent@example.com')).cookie!;
-    const refused = await call(
-      'POST',
-      '/event-subscriptions',
-      { url, events: ['run.failed'], local: true },
-      member,
-    );
+    // The server's network is every organization's: not even an owner marks a receiver local.
+    const refused = await call('POST', '/event-subscriptions', {
+      url,
+      events: ['run.failed'],
+      local: true,
+    });
     expect(refused.status).toBe(403);
-
     const { subscription } = await subscribe(['run.failed']);
-    expect(subscription.local).toBe(true);
-    // A new URL is held to public addresses again unless the same request marks it.
-    const moved = `${url}?v=2`;
-    const patch = (body: unknown) => call('PATCH', `/event-subscriptions/${subscription.id}`, body);
-    expect(await codeOf(await patch({ url: moved }))).toBe('PRIVATE_HOST');
-    const remarked = await patch({ url: moved, local: true });
-    expect(remarked.status).toBe(200);
-    expect(await codeOf(await patch({ local: false }))).toBe('PRIVATE_HOST');
-    expect((await patch({ local: true })).status).toBe(200);
-    expect(
-      (
-        (await (await patch({ enabled: true })).json()) as {
-          subscription: { local: boolean; url: string };
-        }
-      ).subscription,
-    ).toMatchObject({ local: true, url: moved });
+    const patched = await call('PATCH', `/event-subscriptions/${subscription.id}`, {
+      local: true,
+    });
+    expect(patched.status).toBe(403);
 
     // Delivery: the worker here is exempt, so each send below is made by hand with no exemption.
     const bot = await newBot('Local');
@@ -410,5 +411,44 @@ describe('outbound event subscriptions', () => {
     expect(await resend(true)).toMatchObject({ status: 'delivered', lastError: null });
     // Unmarked (a row saved before the check), the guard blocks it.
     expect((await resend(false))!.lastError).toMatch(/private or local network/);
+  });
+});
+
+describe('local receivers on a self-hosted install (S-8)', () => {
+  let t: TestApp;
+  let cookie: string;
+  const url = 'http://127.0.0.1:9/events';
+
+  beforeAll(async () => {
+    t = await createTestApp();
+    cookie = (await t.signUp('owner@example.com')).cookie!;
+  });
+  afterAll(() => t.close());
+
+  const call = (method: string, path: string, body?: unknown) =>
+    t.app.request(`/api/v1${path}`, {
+      method,
+      headers: { cookie, 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const codeOf = async (res: Response) => ((await res.json()) as { code: string }).code;
+
+  it('lets the owner mark a receiver local, and holds a new URL to public addresses again', async () => {
+    const created = await call('POST', '/event-subscriptions', {
+      url,
+      events: ['run.failed'],
+      local: true,
+    });
+    expect(created.status).toBe(201);
+    const { subscription } = (await created.json()) as {
+      subscription: { id: string; local: boolean };
+    };
+    expect(subscription.local).toBe(true);
+    const moved = `${url}?v=2`;
+    const patch = (body: unknown) => call('PATCH', `/event-subscriptions/${subscription.id}`, body);
+    expect(await codeOf(await patch({ url: moved }))).toBe('PRIVATE_HOST');
+    expect((await patch({ url: moved, local: true })).status).toBe(200);
+    expect(await codeOf(await patch({ local: false }))).toBe('PRIVATE_HOST');
+    expect((await patch({ local: true })).status).toBe(200);
   });
 });

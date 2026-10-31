@@ -149,7 +149,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** The signed-in user, their role, the workspace, and its limits */
+    /** The signed-in user, the active organization, their role there, and its limits */
     get: {
       parameters: {
         query?: never;
@@ -337,7 +337,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Workspace settings */
+    /** The active organization's settings */
     get: {
       parameters: {
         query?: never;
@@ -347,7 +347,7 @@ export interface paths {
       };
       requestBody?: never;
       responses: {
-        /** @description Workspace settings in effect */
+        /** @description The organization's settings in effect */
         200: {
           headers: {
             [name: string]: unknown;
@@ -381,7 +381,7 @@ export interface paths {
     delete?: never;
     options?: never;
     head?: never;
-    /** Change workspace settings */
+    /** Change the active organization's settings */
     patch: {
       parameters: {
         query?: never;
@@ -395,7 +395,7 @@ export interface paths {
         };
       };
       responses: {
-        /** @description Workspace settings in effect */
+        /** @description The organization's settings in effect */
         200: {
           headers: {
             [name: string]: unknown;
@@ -404,7 +404,7 @@ export interface paths {
             'application/json': components['schemas']['Settings'];
           };
         };
-        /** @description Invalid settings, or a managed-only setting on a self-hosted install */
+        /** @description Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service */
         400: {
           headers: {
             [name: string]: unknown;
@@ -433,437 +433,6 @@ export interface paths {
         };
       };
     };
-    trace?: never;
-  };
-  '/api/v1/admin/invites': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * List pending invites
-     * @description Invites nobody has redeemed that have not expired, newest first.
-     */
-    get: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Pending invites */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': {
-              items: components['schemas']['PendingInvite'][];
-            };
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not on a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    put?: never;
-    /** Create a signup invite */
-    post: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody: {
-        content: {
-          'application/json': components['schemas']['CreateInvite'];
-        };
-      };
-      responses: {
-        /** @description The invite */
-        201: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['Invite'];
-          };
-        };
-        /** @description Invalid invite */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not on a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/admin/invites/{id}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post?: never;
-    /**
-     * Revoke an invite
-     * @description Its token no longer signs anyone up. A used invite cannot be revoked.
-     */
-    delete: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          id: string;
-        };
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Revoked */
-        204: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content?: never;
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such pending invite, or a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/admin/members': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** List members */
-    get: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Members, oldest first */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': {
-              items: components['schemas']['Member'][];
-            };
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not on a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/api/v1/admin/members/{id}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /**
-     * Change a member's role or sign-in
-     * @description The workspace always keeps an admin who can sign in (409 LAST_ADMIN), and an admin cannot disable themselves (409 CANNOT_DISABLE_SELF).
-     */
-    patch: {
-      parameters: {
-        query?: never;
-        header?: never;
-        path: {
-          id: string;
-        };
-        cookie?: never;
-      };
-      requestBody: {
-        content: {
-          'application/json': components['schemas']['MemberPatch'];
-        };
-      };
-      responses: {
-        /** @description The member */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['Member'];
-          };
-        };
-        /** @description Invalid change */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description No such member, or a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description The change would leave no admin, or disables the caller */
-        409: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    trace?: never;
-  };
-  '/api/v1/admin/audit': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /** Read the audit log */
-    get: {
-      parameters: {
-        query?: {
-          actorId?: string;
-          /** @description An action (`auth.sign_in`), or a group ending in `.` (`auth.`) */
-          action?: string;
-          /** @description At or after */
-          from?: string;
-          /** @description At or before */
-          to?: string;
-          cursor?: string;
-          limit?: number;
-        };
-        header?: never;
-        path?: never;
-        cookie?: never;
-      };
-      requestBody?: never;
-      responses: {
-        /** @description Entries, newest first */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['AuditPage'];
-          };
-        };
-        /** @description Invalid filters */
-        400: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not signed in */
-        401: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not an admin */
-        403: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-        /** @description Not on a self-hosted install */
-        404: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/problem+json': components['schemas']['Problem'];
-          };
-        };
-      };
-    };
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
     trace?: never;
   };
   '/api/v1/chats/{id}/resync': {
@@ -7588,7 +7157,10 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Create the first account (the owner) and sign them in */
+    /**
+     * Create the first account (the owner) and sign them in
+     * @description Self-hosted only: the managed service answers 404.
+     */
     post: {
       parameters: {
         query?: never;
@@ -7622,6 +7194,15 @@ export interface paths {
         };
         /** @description The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY) */
         403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The managed service, where people sign up instead */
+        404: {
           headers: {
             [name: string]: unknown;
           };
@@ -7690,6 +7271,15 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
+        /** @description The managed service */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
       };
     };
     put?: never;
@@ -7723,6 +7313,15 @@ export interface paths {
         };
         /** @description Not an admin */
         403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The managed service */
+        404: {
           headers: {
             [name: string]: unknown;
           };
@@ -7855,28 +7454,33 @@ export interface components {
         /** Format: date-time */
         createdAt: string;
       };
-      role: components['schemas']['Role'];
+      /**
+       * @description Their role in the active organization; null without one
+       * @enum {string|null}
+       */
+      role: 'owner' | 'admin' | 'member' | null;
+      /** @description The active organization; null when they have none */
       workspace: {
         /** Format: uuid */
         id: string;
         name: string;
-      };
-      limits: components['schemas']['Limits'];
-    };
-    /** @enum {string} */
-    Role: 'admin' | 'member';
-    Limits: {
-      botsPerAccount: number;
-      botsPerGroup: number;
-      routinesPerBot: number;
-      skillsPerAccount: number;
-      runRecordsPerRoutine: number;
-      webhookPayloadBytes: number;
-      syncWebhookWaitSeconds: number;
-      webhookIpRatePerMin: number;
-      webhookFailedAuthPerMin: number;
-      webhookEndpointRatePerMin: number;
-      uploadBytes: number;
+        /** @description They are suspended here: every other route refuses them in it */
+        suspended: boolean;
+      } | null;
+      /** @description The active organization's limits; null without one */
+      limits: {
+        botsPerAccount: number;
+        botsPerGroup: number;
+        routinesPerBot: number;
+        skillsPerAccount: number;
+        runRecordsPerRoutine: number;
+        webhookPayloadBytes: number;
+        syncWebhookWaitSeconds: number;
+        webhookIpRatePerMin: number;
+        webhookFailedAuthPerMin: number;
+        webhookEndpointRatePerMin: number;
+        uploadBytes: number;
+      } | null;
     };
     ApiKey: {
       /** Format: uuid */
@@ -7900,17 +7504,26 @@ export interface components {
       expiresInDays?: number;
     };
     Settings: {
-      signupMode: components['schemas']['SignupMode'];
       limits: components['schemas']['Limits'];
       /** @description Audit log rows older than this many days are deleted (default 180) */
       auditRetentionDays: number;
       /** @description Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may) */
       customStdioEnabled: boolean;
     };
-    /** @enum {string} */
-    SignupMode: 'first_user_admin' | 'invite' | 'open';
+    Limits: {
+      botsPerAccount: number;
+      botsPerGroup: number;
+      routinesPerBot: number;
+      skillsPerAccount: number;
+      runRecordsPerRoutine: number;
+      webhookPayloadBytes: number;
+      syncWebhookWaitSeconds: number;
+      webhookIpRatePerMin: number;
+      webhookFailedAuthPerMin: number;
+      webhookEndpointRatePerMin: number;
+      uploadBytes: number;
+    };
     SettingsPatch: {
-      signupMode?: components['schemas']['SignupMode'];
       limits?: {
         botsPerAccount?: number;
         botsPerGroup?: number;
@@ -7926,93 +7539,6 @@ export interface components {
       };
       auditRetentionDays?: number;
       customStdioEnabled?: boolean;
-    };
-    Invite: {
-      /** Format: uuid */
-      id: string;
-      /** @description Send as `inviteToken` in the signup body; shown only once */
-      token: string;
-      email: string | null;
-      role: components['schemas']['Role'];
-      /** Format: date-time */
-      expiresAt: string;
-    };
-    CreateInvite: {
-      /**
-       * Format: email
-       * @description Only this address can redeem it
-       */
-      email?: string;
-      role?: components['schemas']['Role'];
-      /** @default 7 */
-      expiresInDays: number;
-    };
-    PendingInvite: {
-      /** Format: uuid */
-      id: string;
-      /** @description Only this address can redeem it */
-      email: string | null;
-      role: components['schemas']['Role'];
-      /** Format: date-time */
-      createdAt: string;
-      /** Format: date-time */
-      expiresAt: string;
-      /** @description The email of the admin who made it */
-      createdBy: string | null;
-    };
-    Member: {
-      /**
-       * Format: uuid
-       * @description The user id
-       */
-      id: string;
-      name: string;
-      email: string;
-      role: components['schemas']['Role'];
-      /**
-       * Format: date-time
-       * @description When they joined the workspace
-       */
-      createdAt: string;
-      /**
-       * Format: date-time
-       * @description When an admin disabled their sign-in; null while they can sign in
-       */
-      disabledAt: string | null;
-      botCount: number;
-    };
-    MemberPatch: {
-      role?: components['schemas']['Role'];
-      /** @description true ends their sessions, stops their API keys and refuses sign-in; their Bots and data stay. false lets them sign in again. */
-      disabled?: boolean;
-    };
-    AuditPage: {
-      items: components['schemas']['AuditEntry'][];
-      /**
-       * Format: uuid
-       * @description Pass as `cursor` for the next page; null on the last
-       */
-      nextCursor: string | null;
-    };
-    AuditEntry: {
-      /** Format: uuid */
-      id: string;
-      /** @enum {string} */
-      actorType: 'user' | 'bot' | 'system';
-      /** Format: uuid */
-      actorId: string | null;
-      /** @description The user's email or the Bot's name, while they exist */
-      actorLabel: string | null;
-      /** @example auth.sign_in */
-      action: string;
-      targetType: string | null;
-      /** Format: uuid */
-      targetId: string | null;
-      metadata: {
-        [key: string]: unknown;
-      };
-      /** Format: date-time */
-      createdAt: string;
     };
     Resync: {
       messages: components['schemas']['Message'][];
@@ -8162,6 +7688,10 @@ export interface components {
        * @enum {string}
        */
       deployment: 'self_hosted' | 'managed';
+      /** @description Admins may turn on custom command (stdio) connectors (OPENBOT_CUSTOM_STDIO; off by default on the managed service) */
+      customStdio?: boolean;
+      /** @description Admins may mark endpoints as on their own network (OPENBOT_LOCAL_ENDPOINTS; off by default on the managed service) */
+      localEndpoints?: boolean;
       /**
        * @description `local`: the Mac app on This Mac signs its owner in itself (OPENBOT_LOCAL_TOKEN), so there is no sign-in, sign-up or sign-out. `password`: the usual sign-in.
        * @enum {string}
@@ -8981,10 +8511,10 @@ export interface components {
       lastTestedAt: string | null;
       testResult: components['schemas']['ProviderTestResult'];
       /**
-       * @description `instance` providers serve every member
+       * @description `organization` providers serve every member's Bots; `account` providers are the caller's own
        * @enum {string}
        */
-      scope: 'instance' | 'account';
+      scope: 'organization' | 'account';
       /** @description Override for background tasks; null means the cheapest enabled model with tools */
       smallModelId: string | null;
       /** @description Bots using this provider; delete needs 0 (L5) */
@@ -9055,6 +8585,11 @@ export interface components {
       /** @enum {string} */
       discovery?: 'manual' | 'list_models';
       models?: components['schemas']['ModelInput'][];
+      /**
+       * @description Managed service: `organization` (owners and admins; the default for them) or `account` (the caller's own; the default for members). A self-hosted install has only `organization`.
+       * @enum {string}
+       */
+      scope?: 'organization' | 'account';
     };
     ModelInput: {
       modelId: string;

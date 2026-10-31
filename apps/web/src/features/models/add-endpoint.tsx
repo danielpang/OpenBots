@@ -67,9 +67,15 @@ export function isLoopbackUrl(url: string | null | undefined): boolean {
 export function AddEndpoint({
   presets,
   onAdded,
+  scope,
+  allowLocal = true,
 }: {
   presets: ProviderPreset[];
   onAdded: (provider: Provider, discoverError?: Error) => void;
+  /** On the managed service: the organization's provider, or the caller's own (L6). */
+  scope?: CreateProvider['scope'];
+  /** Whether "Runs on my network" is offered; never where the install keeps it off (S-8). */
+  allowLocal?: boolean;
 }) {
   const queryClient = useQueryClient();
   const choices = presets.filter((p) => p.kind === 'custom' && !GENERIC_PRESETS.includes(p.id));
@@ -105,7 +111,7 @@ export function AddEndpoint({
     const next = choices.find((p) => p.id === id);
     setName(next?.name ?? '');
     setBaseUrl(next?.baseUrl ?? '');
-    setLocal(isLoopbackUrl(next?.baseUrl));
+    setLocal(allowLocal && isLoopbackUrl(next?.baseUrl));
     if (next && next.protocol !== 'native') setProtocol(next.protocol);
   }
 
@@ -123,6 +129,7 @@ export function AddEndpoint({
         models: String(data.get('models') ?? ''),
         local,
       });
+      if (scope) body.scope = scope;
       setFormError(null);
       add.mutate({ body, discover: submitter?.getAttribute('value') === 'discover' });
     } catch (error) {
@@ -164,21 +171,23 @@ export function AddEndpoint({
           required
         />
       </label>
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          name="local"
-          checked={local}
-          onChange={(e) => setLocal(e.currentTarget.checked)}
-          className="mt-0.5"
-        />
-        <span className="flex flex-col gap-0.5">
-          <span className="font-medium">Runs on my network</span>
-          <span className="text-muted-foreground">
-            For a server on this machine or your LAN, such as Ollama.
+      {allowLocal && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="local"
+            checked={local}
+            onChange={(e) => setLocal(e.currentTarget.checked)}
+            className="mt-0.5"
+          />
+          <span className="flex flex-col gap-0.5">
+            <span className="font-medium">Runs on my network</span>
+            <span className="text-muted-foreground">
+              For a server on this machine or your LAN, such as Ollama.
+            </span>
           </span>
-        </span>
-      </label>
+        </label>
+      )}
       <label className={field}>
         Protocol
         <select

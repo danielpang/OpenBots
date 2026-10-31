@@ -53,7 +53,7 @@ import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertBotOwner } from '../ownership.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
-import { storedSettings } from '../workspace.js';
+import { isOrgAdmin, storedSettings, type Role } from '../workspace.js';
 
 // Connectors (plan 4.4, 8; T1 to T3, P3). Connectors belong to a user and
 // every one of their Bots may use them, narrowed per Bot by `bot_connectors`
@@ -159,6 +159,12 @@ export const customStdioAdminOnly = () =>
     403,
     'CUSTOM_STDIO_ADMIN_ONLY',
     `Only an admin can add a command (stdio) server. ${STDIO_INSTEAD}`,
+  );
+export const customStdioUnavailable = () =>
+  new DomainError(
+    403,
+    'CUSTOM_STDIO_UNAVAILABLE',
+    `Command (stdio) servers are not available on the hosted service. ${STDIO_INSTEAD}`,
   );
 export const customStdioDisabled = () =>
   new DomainError(
@@ -485,12 +491,19 @@ export function isCustomStdio(row: Pick<ConnectorRow, 'kind' | 'catalogId'>): bo
   return row.kind === 'mcp_stdio' && !(row.catalogId && catalogEntry(row.catalogId)?.stdio);
 }
 
-/** Why the user may not run custom stdio servers, or null: they must be an admin, with the setting on. */
+/**
+ * Why the user may not run custom stdio servers, or null: they must be an
+ * admin, with the setting on. Never where the install keeps them off
+ * (OPENBOT_CUSTOM_STDIO, off by default on the managed service, where the
+ * command would run on a server every organization shares; plan 21.6).
+ */
 export async function customStdioRefusal(
-  db: Db,
+  deps: { db: Db; config: Pick<AppDeps['config'], 'customStdio'> },
   workspaceId: string,
   userId: string,
 ): Promise<DomainError | null> {
+  if (!deps.config.customStdio) return customStdioUnavailable();
+  const { db } = deps;
   const [member] = await db
     .select({ role: schema.workspaceMembers.role })
     .from(schema.workspaceMembers)
@@ -500,7 +513,7 @@ export async function customStdioRefusal(
         eq(schema.workspaceMembers.userId, userId),
       ),
     );
-  if (member?.role !== 'admin') return customStdioAdminOnly();
+  if (!isOrgAdmin(member?.role as Role | undefined)) return customStdioAdminOnly();
   const [workspace] = await db
     .select()
     .from(schema.workspaces)
@@ -511,9 +524,17 @@ export async function customStdioRefusal(
 
 // --- Confined catalog settings (S-3) --------------------------------------------
 
-/** The owner's own directory, where catalog `user_dir` params (the filesystem root) point. */
-export function userDirectory(config: Pick<AppDeps['config'], 'filesDir'>, ownerId: string) {
-  return path.join(path.resolve(config.filesDir), 'connectors', ownerId);
+/**
+ * The owner's own directory, where catalog `user_dir` params (the filesystem
+ * root) point. One per (organization, owner) on the managed service (plan
+ * 21.3); a self-hosted install has one organization and keeps its old name.
+ */
+export function userDirectory(
+  config: Pick<AppDeps['config'], 'filesDir' | 'deployment'>,
+  owner: { id: string; workspaceId: string },
+) {
+  const name = config.deployment === 'managed' ? `${owner.workspaceId}_${owner.id}` : owner.id;
+  return path.join(path.resolve(config.filesDir), 'connectors', name);
 }
 
 const pathRefused = (label: string) =>
@@ -534,11 +555,11 @@ function relativeUserPath(value: string, label: string): string {
 /** Creates the folder under the owner's directory and returns its absolute path, refusing symlinks out. */
 function confinedFolder(
   deps: Pick<AppDeps, 'config'>,
-  ownerId: string,
+  owner: { id: string; workspaceId: string },
   value: string,
   label: string,
 ) {
-  const base = userDirectory(deps.config, ownerId);
+  const base = userDirectory(deps.config, owner);
   const relative = relativeUserPath(value, label);
   const target = path.resolve(base, relative);
   mkdirSync(target, { recursive: true, mode: 0o700 });
@@ -726,7 +747,7 @@ export async function listConnectors(
       deps.db,
       rows.map((r) => r.id),
     ),
-    customStdioRefusal(deps.db, viewer.workspaceId, viewer.id),
+    customStdioRefusal(deps, viewer.workspaceId, viewer.id),
   ]);
   return rows.map((r) => toRecord(deps, r, rules, counts.get(r.id) ?? 0, refusal !== null));
 }
@@ -740,7 +761,7 @@ export async function getConnector(
   const [rules, counts, refusal] = await Promise.all([
     blockRules(deps.db, viewer.workspaceId),
     toolCounts(deps.db, [id]),
-    customStdioRefusal(deps.db, viewer.workspaceId, viewer.id),
+    customStdioRefusal(deps, viewer.workspaceId, viewer.id),
   ]);
   return toRecord(deps, row, rules, counts.get(id) ?? 0, refusal !== null);
 }
@@ -767,7 +788,12 @@ async function freeSlug(db: Db, viewer: Viewer, base: string): Promise<string> {
   const rows = await db
     .select({ slug: schema.connectors.slug })
     .from(schema.connectors)
-    .where(eq(schema.connectors.ownerId, viewer.id));
+    .where(
+      and(
+        eq(schema.connectors.ownerId, viewer.id),
+        eq(schema.connectors.workspaceId, viewer.workspaceId),
+      ),
+    );
   const taken = new Set(rows.map((r) => r.slug));
   if (!taken.has(base)) return base;
   for (let n = 2; ; n++) {
@@ -819,7 +845,7 @@ export async function createConnector(
   checkRequired(entry, params, secrets);
   const catalogId = entry?.id ?? matchCatalog(transport);
   if (isCustomStdio({ kind: kindOf(transport), catalogId })) {
-    const refusal = await customStdioRefusal(deps.db, viewer.workspaceId, viewer.id);
+    const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
   }
   const rules = await blockRules(deps.db, viewer.workspaceId);
@@ -925,7 +951,7 @@ export async function updateConnector(
   checkRequired(entry, params, secrets);
   const catalogId = entry?.id ?? matchCatalog(transport);
   if (isCustomStdio({ kind: row.kind, catalogId })) {
-    const refusal = await customStdioRefusal(deps.db, viewer.workspaceId, viewer.id);
+    const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
   }
   const rules = await blockRules(deps.db, viewer.workspaceId);
@@ -975,7 +1001,16 @@ export async function deleteConnector(
   });
 }
 
-/** Marks a connector's MCP hints trusted or not (S-16). Admins only, for any connector of the workspace. */
+/**
+ * The connectors an admin's trust and local marks reach: any in a self-hosted
+ * install (its one owner's), only their own on the managed service, where
+ * admins do not act on members' per-user data (U2, plan 21.6).
+ */
+function adminReach(deps: Pick<AppDeps, 'config'>, admin: Viewer) {
+  return deps.config.deployment === 'managed' ? eq(schema.connectors.ownerId, admin.id) : undefined;
+}
+
+/** Marks a connector's MCP hints trusted or not (S-16). Admins only (see `adminReach`). */
 export async function setConnectorTrusted(
   deps: ConnectorsDeps,
   admin: Viewer,
@@ -987,7 +1022,11 @@ export async function setConnectorTrusted(
       .update(schema.connectors)
       .set({ trusted })
       .where(
-        and(eq(schema.connectors.id, id), eq(schema.connectors.workspaceId, admin.workspaceId)),
+        and(
+          eq(schema.connectors.id, id),
+          eq(schema.connectors.workspaceId, admin.workspaceId),
+          adminReach(deps, admin),
+        ),
       )
       .returning();
     if (updated[0]) await audit(tx, admin, 'connector.trust', id, { trusted });
@@ -997,7 +1036,7 @@ export async function setConnectorTrusted(
   const [rules, counts, refusal] = await Promise.all([
     blockRules(deps.db, admin.workspaceId),
     toolCounts(deps.db, [id]),
-    customStdioRefusal(deps.db, admin.workspaceId, row.ownerId),
+    customStdioRefusal(deps, admin.workspaceId, row.ownerId),
   ]);
   return toRecord(deps, row, rules, counts.get(id) ?? 0, refusal !== null);
 }
@@ -1013,12 +1052,25 @@ export async function setConnectorLocal(
   id: string,
   local: boolean,
 ): Promise<ConnectorRecord> {
+  // On the managed service the server's private network is every
+  // organization's: no connector may reach it (S-8, plan 21.6).
+  if (local && !deps.config.localEndpoints) {
+    throw new DomainError(
+      403,
+      'LOCAL_UNAVAILABLE',
+      'Connectors cannot reach private addresses on the hosted service.',
+    );
+  }
   const [row] = await deps.db.transaction(async (tx) => {
     const [found] = await tx
       .select({ kind: schema.connectors.kind })
       .from(schema.connectors)
       .where(
-        and(eq(schema.connectors.id, id), eq(schema.connectors.workspaceId, admin.workspaceId)),
+        and(
+          eq(schema.connectors.id, id),
+          eq(schema.connectors.workspaceId, admin.workspaceId),
+          adminReach(deps, admin),
+        ),
       )
       .for('update');
     if (!found) return [];
@@ -1037,7 +1089,7 @@ export async function setConnectorLocal(
   const [rules, counts, refusal] = await Promise.all([
     blockRules(deps.db, admin.workspaceId),
     toolCounts(deps.db, [id]),
-    customStdioRefusal(deps.db, admin.workspaceId, row.ownerId),
+    customStdioRefusal(deps, admin.workspaceId, row.ownerId),
   ]);
   return toRecord(deps, row, rules, counts.get(id) ?? 0, refusal !== null);
 }
@@ -1201,7 +1253,7 @@ async function sessionFor(deps: ConnectorsDeps, id: string): Promise<ConnectorSe
   const rules = await blockRules(deps.db, row.workspaceId);
   if (isBlocked(row, rules)) throw connectorBlocked();
   if (isCustomStdio(row)) {
-    const refusal = await customStdioRefusal(deps.db, row.workspaceId, row.ownerId);
+    const refusal = await customStdioRefusal(deps, row.workspaceId, row.ownerId);
     if (refusal) throw refusal;
   }
   const stored = readConfig(row);
@@ -1278,7 +1330,12 @@ export async function stdioSpawnFor(
   try {
     for (const p of entry?.params ?? []) {
       if (p.user_dir)
-        params[p.name] = confinedFolder(deps, row.ownerId, params[p.name] ?? '', p.label);
+        params[p.name] = confinedFolder(
+          deps,
+          { id: row.ownerId, workspaceId: row.workspaceId },
+          params[p.name] ?? '',
+          p.label,
+        );
     }
     for (const s of entry?.secrets ?? []) {
       const value = secrets.values[s.name];
@@ -1460,7 +1517,7 @@ export async function testConnector(
   const rules = await blockRules(deps.db, viewer.workspaceId);
   if (isBlocked(row, rules)) throw connectorBlocked();
   if (isCustomStdio(row)) {
-    const refusal = await customStdioRefusal(deps.db, viewer.workspaceId, viewer.id);
+    const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
   }
   try {
@@ -1687,13 +1744,17 @@ export async function completeConnectorOAuth(
 /** Tells every page of the owner that a connector changed (plan 14.2). */
 async function publishConnectorUpdated(
   deps: ConnectorsDeps,
-  row: Pick<ConnectorRow, 'id' | 'ownerId'>,
+  row: Pick<ConnectorRow, 'id' | 'ownerId' | 'workspaceId'>,
   payload: { oauth?: 'connected' | 'error'; error?: string | null },
 ): Promise<void> {
   if (!deps.infra) return;
   await publishEvent(
     deps.infra.bus,
-    wsEvent('connector.updated', { connectorId: row.id, ...payload }, { user_id: row.ownerId }),
+    wsEvent(
+      'connector.updated',
+      { connectorId: row.id, ...payload },
+      { user_id: row.ownerId, workspace_id: row.workspaceId },
+    ),
   ).catch((err: unknown) => deps.logger.warn({ err }, 'could not publish connector.updated'));
 }
 
@@ -1803,7 +1864,13 @@ export async function writeBotConnectors(
     const owned = await tx
       .select({ id: schema.connectors.id })
       .from(schema.connectors)
-      .where(and(inArray(schema.connectors.id, ids), eq(schema.connectors.ownerId, viewer.id)));
+      .where(
+        and(
+          inArray(schema.connectors.id, ids),
+          eq(schema.connectors.ownerId, viewer.id),
+          eq(schema.connectors.workspaceId, viewer.workspaceId),
+        ),
+      );
     if (owned.length !== ids.length) throw notFound('Connector not found');
   }
   await tx.delete(schema.botConnectors).where(eq(schema.botConnectors.botId, botId));
@@ -1839,10 +1906,10 @@ export interface BotTool {
  * 2.3 names them `${connectorSlug}__${tool}`.
  */
 export async function listToolsForBot(
-  deps: Pick<AppDeps, 'db'>,
+  deps: Pick<AppDeps, 'db' | 'config'>,
   botId: string,
 ): Promise<BotTool[]> {
-  const usable = await usableMcpConnectors(deps.db, botId);
+  const usable = await usableMcpConnectors(deps, botId);
   if (!usable.length) return [];
   const [tools, permissions] = await Promise.all([
     deps.db
@@ -1895,7 +1962,7 @@ export async function discoverUntested(
   botId: string,
   waitMs = DISCOVERY_WAIT_MS,
 ): Promise<void> {
-  const untested = (await usableMcpConnectors(deps.db, botId)).filter(
+  const untested = (await usableMcpConnectors(deps, botId)).filter(
     (c) => c.status === ('untested' satisfies ConnectorStatus),
   );
   if (!untested.length) return;
@@ -1918,7 +1985,11 @@ export async function discoverUntested(
 }
 
 /** The owner's MCP connectors a Bot may use: not blocked, and no custom stdio the owner may not run. */
-async function usableMcpConnectors(db: Db, botId: string): Promise<ConnectorRow[]> {
+async function usableMcpConnectors(
+  deps: Pick<AppDeps, 'db' | 'config'>,
+  botId: string,
+): Promise<ConnectorRow[]> {
+  const { db } = deps;
   const [bot] = await db
     .select({ ownerId: schema.bots.ownerId, workspaceId: schema.bots.workspaceId })
     .from(schema.bots)
@@ -1937,7 +2008,7 @@ async function usableMcpConnectors(db: Db, botId: string): Promise<ConnectorRow[
     .orderBy(asc(schema.connectors.createdAt));
   const [rules, refusal] = await Promise.all([
     blockRules(db, bot.workspaceId),
-    customStdioRefusal(db, bot.workspaceId, bot.ownerId),
+    customStdioRefusal(deps, bot.workspaceId, bot.ownerId),
   ]);
   return connectors.filter((c) => !isBlocked(c, rules) && !(refusal && isCustomStdio(c)));
 }

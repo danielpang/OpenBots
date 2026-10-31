@@ -1,37 +1,60 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
-import type { AppDeps, AppEnv, CurrentUser } from '../context.js';
-import { schema } from '../db/client.js';
+import type { Account, AppDeps, AppEnv, CurrentUser } from '../context.js';
+import { schema, type Db } from '../db/client.js';
 import { DomainError, forbidden, notFound, unauthorized } from '../errors.js';
+import { ensureWorkspace, isOrgAdmin, type Role } from '../workspace.js';
 
 // Every route that needs a caller uses one of these. A request authenticates
 // with the better-auth session cookie or with an API key (U4), sent as
 // `Authorization: Bearer <key>` or `x-api-key: <key>`; both reach the same
-// routes with the same permissions. A member an admin disabled gets 403
-// ACCOUNT_DISABLED either way, so their API keys stop working too. On a
-// self-hosted install only the owner (the admin) gets in: accounts left from
-// a managed install are refused, since nobody there can disable them.
+// routes with the same permissions.
+//
+// The active organization (plan 21.2) is resolved on every request: the
+// implicit one on a self-hosted install, else the session's active
+// organization, or the organization an API key was made in. `requireUser`
+// needs the caller to be a member of it and not suspended there, so a
+// suspended member's sessions and API keys stop working in that organization
+// only, and a session whose organization they left gets 403 NO_ORGANIZATION.
+// On a self-hosted install only the owner gets in: accounts left from a
+// managed install are refused, since nobody there can manage them.
+
+export const requireAccount = createMiddleware<AppEnv>(async (c, next) => {
+  c.set('account', await authenticateAccount(c.var.deps, c.req.raw.headers));
+  await next();
+});
 
 export const requireUser = createMiddleware<AppEnv>(async (c, next) => {
   c.set('user', await authenticate(c));
   await next();
 });
 
+/** Owners and admins of the active organization. */
 export const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
   const user = await authenticate(c);
-  if (user.role !== 'admin') throw forbidden('Only an admin can do this');
+  if (!isOrgAdmin(user.role)) throw forbidden('Only an admin can do this');
   c.set('user', user);
   await next();
 });
 
 /**
- * Members, invites and the audit log belong to the managed service. A
- * self-hosted install has one owner and none of them: these routes answer
- * 404 there, before any sign-in check. Put it first, then `requireAdmin`.
+ * Organization administration and the audit log belong to the managed
+ * service. A self-hosted install has one owner and none of them: these
+ * routes answer 404 there, before any sign-in check. Put it first.
  */
 export const requireManaged = createMiddleware<AppEnv>(async (c, next) => {
   if (c.var.deps.config.deployment !== 'managed') throw notFound();
+  await next();
+});
+
+/**
+ * The first-run wizard's account step and sandbox image pull: a self-hosted
+ * install's, answering 404 on the managed service, where people sign up and
+ * the operator prepares the image (plan 21.5). Put it first.
+ */
+export const requireSelfHosted = createMiddleware<AppEnv>(async (c, next) => {
+  if (c.var.deps.config.deployment !== 'self_hosted') throw notFound();
   await next();
 });
 
@@ -45,40 +68,69 @@ function authenticate(c: Context<AppEnv>): Promise<CurrentUser> {
   return authenticateHeaders(c.var.deps, c.req.raw.headers);
 }
 
+type AuthDeps = Pick<AppDeps, 'auth' | 'db' | 'config'>;
+
 /**
- * The caller behind a set of request headers: the session cookie or an API
- * key. Throws 401 or 403. Used by the middleware above and the WS upgrade.
+ * The caller behind a set of request headers, as a member of the active
+ * organization. Throws 401 or 403. Used by the middleware above and the WS
+ * upgrade.
  */
-export async function authenticateHeaders(
-  { auth, db, config }: Pick<AppDeps, 'auth' | 'db' | 'config'>,
-  headers: Headers,
-): Promise<CurrentUser> {
+export async function authenticateHeaders(deps: AuthDeps, headers: Headers): Promise<CurrentUser> {
+  return currentUserOf(deps, await authenticateAccount(deps, headers));
+}
+
+/** The member a signed-in account is in its active organization; throws 403 otherwise. */
+export function currentUserOf(deps: Pick<AppDeps, 'config'>, account: Account): CurrentUser {
+  const { membership, ...user } = account;
+  if (!membership) {
+    if (deps.config.deployment === 'self_hosted') {
+      throw forbidden('This account is not a member of the workspace');
+    }
+    throw noOrganization();
+  }
+  if (membership.suspended) throw memberSuspended();
+  if (deps.config.deployment === 'self_hosted' && membership.role !== 'owner') throw notOwner();
+  return { ...user, role: membership.role, workspaceId: membership.workspaceId };
+}
+
+/** The signed-in account behind the headers, and its active membership if any. Throws 401. */
+export async function authenticateAccount(deps: AuthDeps, headers: Headers): Promise<Account> {
+  const { auth, db, config } = deps;
   const key = apiKeyFrom(headers);
 
   let userId: string | undefined;
-  let via: CurrentUser['via'];
+  let via: Account['via'];
+  let sessionId: string | null = null;
+  let organizationId: string | null = null;
   if (key) {
     const result = await auth.api.verifyApiKey({ body: { key } });
     if (!result.valid || !result.key) throw unauthorized('Invalid API key');
     userId = result.key.referenceId;
     via = 'api_key';
+    const [row] = await db
+      .select({ workspaceId: schema.apikeys.workspaceId })
+      .from(schema.apikeys)
+      .where(eq(schema.apikeys.id, result.key.id));
+    organizationId = row?.workspaceId ?? null;
   } else {
     const session = await auth.api.getSession({ headers });
     userId = session?.user.id;
     via = 'session';
+    if (session) {
+      sessionId = session.session.id;
+      const [row] = await db
+        .select({ active: schema.sessions.activeOrganizationId })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, session.session.id));
+      organizationId = row?.active ?? null;
+    }
   }
   if (!userId) throw unauthorized();
 
-  const [row] = await db
-    .select({ user: schema.users, member: schema.workspaceMembers })
-    .from(schema.users)
-    .innerJoin(schema.workspaceMembers, eq(schema.workspaceMembers.userId, schema.users.id))
-    .where(eq(schema.users.id, userId))
-    .limit(1);
-  if (!row) throw forbidden('This account is not a member of the workspace');
-  const { user, member } = row;
-  if (member.disabledAt) throw accountDisabled();
-  if (config.deployment === 'self_hosted' && member.role !== 'admin') throw notOwner();
+  const [user] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
+  if (!user) throw unauthorized();
+  if (config.deployment === 'self_hosted') organizationId = (await implicitId(db)) ?? null;
+  const membership = organizationId ? await membershipOf(db, user.id, organizationId) : null;
   return {
     id: user.id,
     email: user.email,
@@ -86,14 +138,54 @@ export async function authenticateHeaders(
     image: user.image,
     emailVerified: user.emailVerified,
     createdAt: user.createdAt,
-    role: member.role,
-    workspaceId: member.workspaceId,
     via,
+    sessionId,
+    membership,
   };
+}
+
+/** A user's membership in an organization, or null when they are not in it. */
+export async function membershipOf(
+  db: Db,
+  userId: string,
+  workspaceId: string,
+): Promise<Account['membership']> {
+  const [member] = await db
+    .select({
+      role: schema.workspaceMembers.role,
+      suspendedAt: schema.workspaceMembers.suspendedAt,
+    })
+    .from(schema.workspaceMembers)
+    .where(
+      and(
+        eq(schema.workspaceMembers.userId, userId),
+        eq(schema.workspaceMembers.workspaceId, workspaceId),
+      ),
+    );
+  if (!member) return null;
+  return { workspaceId, role: member.role as Role, suspended: member.suspendedAt !== null };
+}
+
+// The implicit organization never changes once made, so it is looked up once per database.
+const implicitIds = new WeakMap<Db, string>();
+
+async function implicitId(db: Db): Promise<string> {
+  const cached = implicitIds.get(db);
+  if (cached) return cached;
+  const { id } = await ensureWorkspace(db);
+  implicitIds.set(db, id);
+  return id;
 }
 
 export const notOwner = () =>
   new DomainError(403, 'NOT_OWNER', 'This OpenBot has one account, its owner.');
 
-export const accountDisabled = () =>
-  new DomainError(403, 'ACCOUNT_DISABLED', 'This account is disabled. Ask an admin to enable it.');
+export const noOrganization = () =>
+  new DomainError(403, 'NO_ORGANIZATION', 'Create or pick an organization first.');
+
+export const memberSuspended = () =>
+  new DomainError(
+    403,
+    'MEMBER_SUSPENDED',
+    'You are suspended in this organization. Ask an admin to restore your access.',
+  );

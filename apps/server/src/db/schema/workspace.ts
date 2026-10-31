@@ -1,20 +1,31 @@
-import { jsonb, pgEnum, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { check, index, jsonb, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
 import { users } from './auth.js';
 import { createdAt, id, timestamptz } from './columns.js';
 
-// One workspace in v1 (plan section 4); every other table carries `workspace_id`.
+// Organizations (plan section 21). A `workspaces` row is an organization:
+// better-auth's organization plugin (ee/server) maps its `organization`,
+// `member` and `invitation` models onto `workspaces`, `workspace_members` and
+// `invites`. Every tenant table carries `workspace_id`. A self-hosted install
+// has one, the implicit organization.
 
-export const workspaceRole = pgEnum('workspace_role', ['admin', 'member']);
+/** Roles in an organization (better-auth's access control in ee/server). */
+export const ORGANIZATION_ROLES = ['owner', 'admin', 'member'] as const;
 
 export const workspaces = pgTable('workspaces', {
   id: id(),
   name: text('name').notNull(),
-  /** Admin controls (U3): signup mode, limit overrides. */
+  /** better-auth's organization slug: unique, made from the name. */
+  slug: text('slug').notNull().unique(),
+  logo: text('logo'),
+  /** better-auth's organization metadata, a JSON string. */
+  metadata: text('metadata'),
+  /** Organization settings: limits, custom stdio, small models. */
   settings: jsonb('settings').notNull().default({}),
   createdAt: createdAt(),
 });
 
-/** Who belongs to a workspace and who is its admin (U1). */
+/** Who belongs to an organization, and their role there (better-auth `member`). */
 export const workspaceMembers = pgTable(
   'workspace_members',
   {
@@ -25,16 +36,20 @@ export const workspaceMembers = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    role: workspaceRole('role').notNull().default('member'),
+    role: text('role').notNull().default('member'),
     /**
-     * Set when an admin disables the member's sign-in (U3): sessions are
-     * ended, API keys stop working and new sign-ins are refused, while their
-     * Bots and data stay. Null while the member can sign in.
+     * Set while an owner or admin has suspended the member in this
+     * organization: their requests, API keys and sockets in it are refused,
+     * while their Bots and data stay. Their other organizations are untouched.
      */
-    disabledAt: timestamptz('disabled_at'),
+    suspendedAt: timestamptz('suspended_at'),
     createdAt: createdAt(),
   },
-  (t) => [unique().on(t.workspaceId, t.userId)],
+  (t) => [
+    unique().on(t.workspaceId, t.userId),
+    index().on(t.userId),
+    check('workspace_members_role', sql`${t.role} in ('owner', 'admin', 'member')`),
+  ],
 );
 
 /** `workspace_id` column for section 4 tables. */
@@ -44,21 +59,30 @@ export const workspaceId = () =>
     .references(() => workspaces.id, { onDelete: 'cascade' });
 
 /**
- * Signup invites (U1). The token is shown once to the admin who creates it;
- * only its SHA-256 is stored. Redeemed at signup, after which `used_at` is set.
+ * Invitations to an organization (better-auth `invitation`). Each is for one
+ * email address; its id is the secret in the invite link. Accepted once.
  */
-export const invites = pgTable('invites', {
-  id: id(),
-  workspaceId: uuid('workspace_id')
-    .notNull()
-    .references(() => workspaces.id, { onDelete: 'cascade' }),
-  tokenHash: text('token_hash').notNull().unique(),
-  /** When set, only this address can redeem the invite. */
-  email: text('email'),
-  role: workspaceRole('role').notNull().default('member'),
-  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
-  expiresAt: timestamptz('expires_at').notNull(),
-  usedAt: timestamptz('used_at'),
-  usedBy: uuid('used_by').references(() => users.id, { onDelete: 'set null' }),
-  createdAt: createdAt(),
-});
+export const invites = pgTable(
+  'invites',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    email: text('email').notNull(),
+    role: text('role').notNull().default('member'),
+    /** `pending`, `accepted`, `rejected` or `canceled`. */
+    status: text('status').notNull().default('pending'),
+    inviterId: uuid('inviter_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    expiresAt: timestamptz('expires_at').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index().on(t.workspaceId),
+    index().on(t.email),
+    check('invites_role', sql`${t.role} in ('owner', 'admin', 'member')`),
+    check('invites_status', sql`${t.status} in ('pending', 'accepted', 'rejected', 'canceled')`),
+  ],
+);

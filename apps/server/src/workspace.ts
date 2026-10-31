@@ -1,33 +1,40 @@
+import { randomBytes } from 'node:crypto';
 import { DEFAULT_LIMITS, type Limits } from '@openbot/shared';
 import { asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
+import { notFound } from './errors.js';
 
-// The single v1 workspace (plan section 4) and its admin settings (U3), kept
-// in `workspaces.settings`. Anything unset there falls back to the
-// environment (`OPENBOT_SIGNUP_MODE`, `OPENBOT_LIMITS_*`).
+// Organizations (plan section 21). A `workspaces` row is an organization and
+// its settings (limits, custom stdio, small models; U3) live in
+// `workspaces.settings`. Anything unset there falls back to the environment
+// (`OPENBOT_LIMITS_*`).
 //
-// A self-hosted install (OPENBOT_DEPLOYMENT) has one owner and no admin
-// screens, so the settings that only matter with members keep their defaults
-// whatever is stored: sign-up closes after the first account (auth.ts refuses
-// it) and the audit log keeps 180 days.
-// The limits and custom stdio connectors stay the owner's to change.
+// A self-hosted install (OPENBOT_DEPLOYMENT) is one implicit organization,
+// made on first use, with one owner and no admin screens, so the settings
+// that only matter with members keep their defaults whatever is stored: the
+// audit log keeps 180 days. The limits and custom stdio connectors stay the
+// owner's to change. On the managed service each organization has its own
+// settings, which its owners and admins change.
 
 export type Workspace = typeof schema.workspaces.$inferSelect;
-export type Role = (typeof schema.workspaceRole.enumValues)[number];
+export type Organization = Workspace;
+export type Role = (typeof schema.ORGANIZATION_ROLES)[number];
 export type SignupMode = Config['signupMode'];
+
+/** Owners and admins manage an organization (plan 21.6). */
+export const isOrgAdmin = (role: Role | null | undefined) => role === 'owner' || role === 'admin';
 
 /** Audit rows are kept this long unless the admin changes it (S-11). */
 export const DEFAULT_AUDIT_RETENTION_DAYS = 180;
 
 /** The settings a self-hosted install does not offer; they keep their defaults there. */
-export const MANAGED_ONLY_SETTINGS = ['signupMode', 'auditRetentionDays'] as const;
+export const MANAGED_ONLY_SETTINGS = ['auditRetentionDays'] as const;
 
 const limitKeys = Object.keys(DEFAULT_LIMITS) as [keyof Limits, ...(keyof Limits)[]];
 
 export const storedSettingsSchema = z.object({
-  signupMode: z.enum(['first_user_admin', 'invite', 'open']).optional(),
   // A limit stored by an older version that is no longer a setting (computers
   // per account, computer tasks per Bot) is dropped, not a reason to ignore
   // every other setting.
@@ -52,20 +59,39 @@ export const storedSettingsSchema = z.object({
 export type StoredSettings = z.infer<typeof storedSettingsSchema>;
 
 export interface Settings {
-  signupMode: SignupMode;
   limits: Limits;
   auditRetentionDays: number;
   customStdioEnabled: boolean;
 }
 
-/** Serializes workspace creation and first-admin assignment. */
+/** Serializes making the implicit organization and its first owner. */
 const WORKSPACE_LOCK = 0x6f70656e; // "open"
 
 export function lockWorkspace(db: Db) {
   return db.execute(sql`select pg_advisory_xact_lock(${WORKSPACE_LOCK})`);
 }
 
-/** The workspace, created on first use. */
+/** Serializes membership changes in one organization (the last-owner rule, plan 21.6). */
+export function lockOrganization(db: Db, workspaceId: string) {
+  return db.execute(sql`select pg_advisory_xact_lock(hashtext(${`org:${workspaceId}`}))`);
+}
+
+/** A slug for an organization named `name`: its letters and digits, and a random suffix. */
+export function organizationSlug(name: string): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'org';
+  return `${base}-${randomBytes(4).toString('hex')}`;
+}
+
+/**
+ * The implicit organization of a self-hosted install, made on first use
+ * (plan 21.2). The managed service never uses it for a request: there the
+ * organization comes from the session or the API key.
+ */
 export async function ensureWorkspace(db: Db): Promise<Workspace> {
   const existing = await firstWorkspace(db);
   if (existing) return existing;
@@ -73,10 +99,16 @@ export async function ensureWorkspace(db: Db): Promise<Workspace> {
     await lockWorkspace(tx);
     const again = await firstWorkspace(tx);
     if (again) return again;
-    const [created] = await tx.insert(schema.workspaces).values({ name: 'OpenBot' }).returning();
+    const [created] = await tx
+      .insert(schema.workspaces)
+      .values({ name: 'OpenBot', slug: organizationSlug('OpenBot') })
+      .returning();
     return created!;
   });
 }
+
+/** The implicit organization's name for what it is (plan 21.2); see `ensureWorkspace`. */
+export const implicitOrganization = ensureWorkspace;
 
 async function firstWorkspace(db: Db): Promise<Workspace | undefined> {
   const [row] = await db
@@ -85,6 +117,24 @@ async function firstWorkspace(db: Db): Promise<Workspace | undefined> {
     .orderBy(asc(schema.workspaces.createdAt))
     .limit(1);
   return row;
+}
+
+/** An organization by id; 404 when it is gone. */
+export async function getOrganization(db: Db, workspaceId: string): Promise<Workspace> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId));
+  if (!row) throw notFound('Organization not found');
+  return row;
+}
+
+/** The settings in effect for an organization (see `effectiveSettings`). */
+export async function organizationSettings(
+  deps: { db: Db; config: Config },
+  workspaceId: string,
+): Promise<Settings> {
+  return effectiveSettings(deps.config, await getOrganization(deps.db, workspaceId));
 }
 
 export function storedSettings(workspace: Workspace): StoredSettings {
@@ -97,15 +147,12 @@ export function effectiveSettings(config: Config, workspace: Workspace): Setting
   const stored = storedSettings(workspace);
   if (config.deployment === 'self_hosted') {
     return {
-      // First user, then no invites: closed once the owner exists.
-      signupMode: 'first_user_admin',
       limits: { ...config.limits, ...stored.limits },
       auditRetentionDays: DEFAULT_AUDIT_RETENTION_DAYS,
       customStdioEnabled: stored.customStdioEnabled ?? false,
     };
   }
   return {
-    signupMode: stored.signupMode ?? config.signupMode,
     limits: { ...config.limits, ...stored.limits },
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     customStdioEnabled: stored.customStdioEnabled ?? false,

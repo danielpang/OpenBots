@@ -6,7 +6,7 @@ import { WebSocket } from 'ws';
 import { schema } from '../db/client.js';
 import { publishEvent } from '../infra/index.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
-import { MEMBER_DISABLED_CHANNEL, type MemberDisabled } from '../services/members.js';
+import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 import { ensureWorkspace } from '../workspace.js';
 import { attachGateway, type Gateway } from './gateway.js';
 
@@ -139,25 +139,87 @@ describe('WS gateway', () => {
     client.close();
   });
 
-  it("closes a disabled member's sockets on every instance, and only theirs", async () => {
+  it("closes a member's sockets in the organization that suspended them, and only those", async () => {
+    const home = await t.defaultOrganization();
+    const bobId = await t.userId('bob@example.com');
+    const second = await t.createOrganization('Second');
+    await t.addMember(bobId, second, 'owner');
     const bobs = [
       await connect(url, { cookie: bob, origin: ORIGIN }),
       await connect(url, { cookie: bob, origin: ORIGIN }),
     ];
+    // Bob signed in again and working in his other organization.
+    const signedIn = await t.app.request('/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ email: 'bob@example.com', password: 'correct horse battery' }),
+    });
+    const elsewhere = signedIn.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0]!)
+      .find((c) => c.includes('session_token='))!;
+    await t.switchOrganization(elsewhere, second);
+    const bobElsewhere = await connect(url, { cookie: elsewhere, origin: ORIGIN });
     const other = await connect(url, { cookie: alice, origin: ORIGIN });
     const closed = bobs.map(
       (c) => new Promise<number>((resolve) => c.raw.once('close', (code) => resolve(code))),
     );
-    const [bobUser] = (await t.deps.db.select().from(schema.users)).filter(
-      (u) => u.email === 'bob@example.com',
-    );
-    await t.deps.infra.bus.publish<MemberDisabled>(MEMBER_DISABLED_CHANNEL, {
-      userId: bobUser!.id,
+    await t.deps.infra.bus.publish<MembershipEnded>(MEMBERSHIP_ENDED_CHANNEL, {
+      userId: bobId,
+      workspaceId: home,
     });
     expect(await Promise.all(closed)).toEqual([1008, 1008]);
-    other.send({ type: 'ping' });
-    expect(await other.next()).toMatchObject({ type: 'pong' });
-    other.close();
+    for (const client of [other, bobElsewhere]) {
+      client.send({ type: 'ping' });
+      expect(await client.next()).toMatchObject({ type: 'pong' });
+      client.close();
+    }
+  });
+
+  it("delivers a user's account events only to their sockets in that organization (plan 21.3)", async () => {
+    const home = await t.defaultOrganization();
+    const aliceId = await t.userId('alice@example.com');
+    const second = await t.createOrganization('Alice Two');
+    await t.addMember(aliceId, second, 'owner');
+    const signedIn = await t.app.request('/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ email: 'alice@example.com', password: 'correct horse battery' }),
+    });
+    const elsewhere = signedIn.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0]!)
+      .find((c) => c.includes('session_token='))!;
+    await t.switchOrganization(elsewhere, second);
+    const inHome = await connect(url, { cookie: alice, origin: ORIGIN });
+    const inSecond = await connect(url, { cookie: elsewhere, origin: ORIGIN });
+    const status = (workspaceId: string, computerId: string) =>
+      wsEvent(
+        'computer.status',
+        { computerId, status: 'running', error: null },
+        { user_id: aliceId, workspace_id: workspaceId },
+      );
+    const forHome = status(home, '00000000-0000-4000-8000-000000000001');
+    const forSecond = status(second, '00000000-0000-4000-8000-000000000002');
+    await publishEvent(t.deps.infra.bus, forHome);
+    await publishEvent(t.deps.infra.bus, forSecond);
+    expect(await inHome.next()).toEqual(forHome);
+    expect(await inSecond.next()).toEqual(forSecond);
+    // An event that names no organization reaches nobody.
+    await publishEvent(
+      t.deps.infra.bus,
+      wsEvent(
+        'computer.status',
+        { computerId: '00000000-0000-4000-8000-000000000003', status: 'stopped', error: null },
+        { user_id: aliceId },
+      ),
+    );
+    inHome.send({ type: 'ping' });
+    expect(await inHome.next()).toMatchObject({ type: 'pong' });
+    expect(inHome.frames).toEqual([]);
+    expect(inSecond.frames).toEqual([]);
+    inHome.close();
+    inSecond.close();
   });
 });
 

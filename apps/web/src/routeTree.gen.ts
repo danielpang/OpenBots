@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root';
 import { Route as AppRouteImport } from './routes/_app';
+import { Route as OnboardingRouteImport } from './routes/onboarding';
 import { Route as SetupRouteImport } from './routes/setup';
 import { Route as SignInRouteImport } from './routes/sign-in';
 import { Route as SignUpRouteImport } from './routes/sign-up';
@@ -22,9 +23,8 @@ import { Route as AppToolsRouteImport } from './routes/_app/tools';
 import { Route as AppBotsBotIdRouteImport } from './routes/_app/bots/$botId';
 import { Route as AppGroupsChatIdRouteImport } from './routes/_app/groups/$chatId';
 import { Route as AppSettingsIndexRouteImport } from './routes/_app/settings/index';
+import { Route as AppSettingsSectionRouteImport } from './routes/_app/settings/$section';
 import { Route as AppSettingsAccountRouteImport } from './routes/_app/settings/account';
-import { Route as AppSettingsAdminRouteImport } from './routes/_app/settings/admin';
-import { Route as AppSettingsAuditRouteImport } from './routes/_app/settings/audit';
 import { Route as AppSettingsEventsRouteImport } from './routes/_app/settings/events';
 import { Route as AppSettingsGeneralRouteImport } from './routes/_app/settings/general';
 import { Route as AppSettingsLimitsRouteImport } from './routes/_app/settings/limits';
@@ -37,6 +37,11 @@ import { Route as AppBotsBotIdSettingsRouteImport } from './routes/_app/bots/$bo
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
+  getParentRoute: () => rootRouteImport,
+} as any);
+const OnboardingRoute = OnboardingRouteImport.update({
+  id: '/onboarding',
+  path: '/onboarding',
   getParentRoute: () => rootRouteImport,
 } as any);
 const SetupRoute = SetupRouteImport.update({
@@ -99,19 +104,14 @@ const AppSettingsIndexRoute = AppSettingsIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppSettingsRoute,
 } as any);
+const AppSettingsSectionRoute = AppSettingsSectionRouteImport.update({
+  id: '/$section',
+  path: '/$section',
+  getParentRoute: () => AppSettingsRoute,
+} as any);
 const AppSettingsAccountRoute = AppSettingsAccountRouteImport.update({
   id: '/account',
   path: '/account',
-  getParentRoute: () => AppSettingsRoute,
-} as any);
-const AppSettingsAdminRoute = AppSettingsAdminRouteImport.update({
-  id: '/admin',
-  path: '/admin',
-  getParentRoute: () => AppSettingsRoute,
-} as any);
-const AppSettingsAuditRoute = AppSettingsAuditRouteImport.update({
-  id: '/audit',
-  path: '/audit',
   getParentRoute: () => AppSettingsRoute,
 } as any);
 const AppSettingsEventsRoute = AppSettingsEventsRouteImport.update({
@@ -162,6 +162,7 @@ const AppBotsBotIdSettingsRoute = AppBotsBotIdSettingsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute;
+  '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
   '/sign-up': typeof SignUpRoute;
@@ -172,9 +173,8 @@ export interface FileRoutesByFullPath {
   '/tools': typeof AppToolsRoute;
   '/bots/$botId': typeof AppBotsBotIdRouteWithChildren;
   '/groups/$chatId': typeof AppGroupsChatIdRoute;
+  '/settings/$section': typeof AppSettingsSectionRoute;
   '/settings/account': typeof AppSettingsAccountRoute;
-  '/settings/admin': typeof AppSettingsAdminRoute;
-  '/settings/audit': typeof AppSettingsAuditRoute;
   '/settings/events': typeof AppSettingsEventsRoute;
   '/settings/general': typeof AppSettingsGeneralRoute;
   '/settings/limits': typeof AppSettingsLimitsRoute;
@@ -187,6 +187,7 @@ export interface FileRoutesByFullPath {
   '/bots/$botId/': typeof AppBotsBotIdIndexRoute;
 }
 export interface FileRoutesByTo {
+  '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
   '/sign-up': typeof SignUpRoute;
@@ -196,9 +197,8 @@ export interface FileRoutesByTo {
   '/tools': typeof AppToolsRoute;
   '/': typeof AppIndexRoute;
   '/groups/$chatId': typeof AppGroupsChatIdRoute;
+  '/settings/$section': typeof AppSettingsSectionRoute;
   '/settings/account': typeof AppSettingsAccountRoute;
-  '/settings/admin': typeof AppSettingsAdminRoute;
-  '/settings/audit': typeof AppSettingsAuditRoute;
   '/settings/events': typeof AppSettingsEventsRoute;
   '/settings/general': typeof AppSettingsGeneralRoute;
   '/settings/limits': typeof AppSettingsLimitsRoute;
@@ -213,6 +213,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   '/_app': typeof AppRouteWithChildren;
+  '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
   '/sign-up': typeof SignUpRoute;
@@ -224,9 +225,8 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute;
   '/_app/bots/$botId': typeof AppBotsBotIdRouteWithChildren;
   '/_app/groups/$chatId': typeof AppGroupsChatIdRoute;
+  '/_app/settings/$section': typeof AppSettingsSectionRoute;
   '/_app/settings/account': typeof AppSettingsAccountRoute;
-  '/_app/settings/admin': typeof AppSettingsAdminRoute;
-  '/_app/settings/audit': typeof AppSettingsAuditRoute;
   '/_app/settings/events': typeof AppSettingsEventsRoute;
   '/_app/settings/general': typeof AppSettingsGeneralRoute;
   '/_app/settings/limits': typeof AppSettingsLimitsRoute;
@@ -242,6 +242,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
   fullPaths:
     | '/'
+    | '/onboarding'
     | '/setup'
     | '/sign-in'
     | '/sign-up'
@@ -252,9 +253,8 @@ export interface FileRouteTypes {
     | '/tools'
     | '/bots/$botId'
     | '/groups/$chatId'
+    | '/settings/$section'
     | '/settings/account'
-    | '/settings/admin'
-    | '/settings/audit'
     | '/settings/events'
     | '/settings/general'
     | '/settings/limits'
@@ -267,6 +267,7 @@ export interface FileRouteTypes {
     | '/bots/$botId/';
   fileRoutesByTo: FileRoutesByTo;
   to:
+    | '/onboarding'
     | '/setup'
     | '/sign-in'
     | '/sign-up'
@@ -276,9 +277,8 @@ export interface FileRouteTypes {
     | '/tools'
     | '/'
     | '/groups/$chatId'
+    | '/settings/$section'
     | '/settings/account'
-    | '/settings/admin'
-    | '/settings/audit'
     | '/settings/events'
     | '/settings/general'
     | '/settings/limits'
@@ -292,6 +292,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_app'
+    | '/onboarding'
     | '/setup'
     | '/sign-in'
     | '/sign-up'
@@ -303,9 +304,8 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/bots/$botId'
     | '/_app/groups/$chatId'
+    | '/_app/settings/$section'
     | '/_app/settings/account'
-    | '/_app/settings/admin'
-    | '/_app/settings/audit'
     | '/_app/settings/events'
     | '/_app/settings/general'
     | '/_app/settings/limits'
@@ -320,6 +320,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren;
+  OnboardingRoute: typeof OnboardingRoute;
   SetupRoute: typeof SetupRoute;
   SignInRoute: typeof SignInRoute;
   SignUpRoute: typeof SignUpRoute;
@@ -332,6 +333,13 @@ declare module '@tanstack/react-router' {
       path: '';
       fullPath: '/';
       preLoaderRoute: typeof AppRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    '/onboarding': {
+      id: '/onboarding';
+      path: '/onboarding';
+      fullPath: '/onboarding';
+      preLoaderRoute: typeof OnboardingRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     '/setup': {
@@ -418,25 +426,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsIndexRouteImport;
       parentRoute: typeof AppSettingsRoute;
     };
+    '/_app/settings/$section': {
+      id: '/_app/settings/$section';
+      path: '/$section';
+      fullPath: '/settings/$section';
+      preLoaderRoute: typeof AppSettingsSectionRouteImport;
+      parentRoute: typeof AppSettingsRoute;
+    };
     '/_app/settings/account': {
       id: '/_app/settings/account';
       path: '/account';
       fullPath: '/settings/account';
       preLoaderRoute: typeof AppSettingsAccountRouteImport;
-      parentRoute: typeof AppSettingsRoute;
-    };
-    '/_app/settings/admin': {
-      id: '/_app/settings/admin';
-      path: '/admin';
-      fullPath: '/settings/admin';
-      preLoaderRoute: typeof AppSettingsAdminRouteImport;
-      parentRoute: typeof AppSettingsRoute;
-    };
-    '/_app/settings/audit': {
-      id: '/_app/settings/audit';
-      path: '/audit';
-      fullPath: '/settings/audit';
-      preLoaderRoute: typeof AppSettingsAuditRouteImport;
       parentRoute: typeof AppSettingsRoute;
     };
     '/_app/settings/events': {
@@ -506,9 +507,8 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppSettingsRouteChildren {
+  AppSettingsSectionRoute: typeof AppSettingsSectionRoute;
   AppSettingsAccountRoute: typeof AppSettingsAccountRoute;
-  AppSettingsAdminRoute: typeof AppSettingsAdminRoute;
-  AppSettingsAuditRoute: typeof AppSettingsAuditRoute;
   AppSettingsEventsRoute: typeof AppSettingsEventsRoute;
   AppSettingsGeneralRoute: typeof AppSettingsGeneralRoute;
   AppSettingsLimitsRoute: typeof AppSettingsLimitsRoute;
@@ -517,9 +517,8 @@ interface AppSettingsRouteChildren {
 }
 
 const AppSettingsRouteChildren: AppSettingsRouteChildren = {
+  AppSettingsSectionRoute: AppSettingsSectionRoute,
   AppSettingsAccountRoute: AppSettingsAccountRoute,
-  AppSettingsAdminRoute: AppSettingsAdminRoute,
-  AppSettingsAuditRoute: AppSettingsAuditRoute,
   AppSettingsEventsRoute: AppSettingsEventsRoute,
   AppSettingsGeneralRoute: AppSettingsGeneralRoute,
   AppSettingsLimitsRoute: AppSettingsLimitsRoute,
@@ -577,6 +576,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren);
 
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
+  OnboardingRoute: OnboardingRoute,
   SetupRoute: SetupRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,

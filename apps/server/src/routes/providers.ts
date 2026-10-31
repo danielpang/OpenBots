@@ -13,8 +13,11 @@ import {
   ProviderStatusSchema,
   ProviderTestResultSchema,
 } from '@openbot/shared';
-import type { CurrentUser } from '../context.js';
-import { requireAdmin, requireUser } from '../middleware/auth.js';
+import type { Context } from 'hono';
+import type { AppEnv, CurrentUser } from '../context.js';
+import { forbidden } from '../errors.js';
+import { requireUser } from '../middleware/auth.js';
+import { isOrgAdmin } from '../workspace.js';
 import {
   adminProblems,
   authenticated,
@@ -30,6 +33,7 @@ import {
   defaultModelConfig,
   deleteProvider,
   discoverProviderModels,
+  getProvider,
   listProviderModels,
   listProviders,
   modelsByProvider,
@@ -44,11 +48,14 @@ import {
   type ProviderRow,
 } from '../services/providers.js';
 
-// Models and providers (L1 to L5; plan 5.9, 14.1). Members read instance-level
-// providers; only admins change them in v1 (per-account keys, L6, come later).
-// API keys are write-only: responses say `hasKey`, and admins also get
-// `keyHint`, the vendor prefix and last four characters (P3). Extra headers
-// come back by name only (S-9).
+// Models and providers (L1 to L6; plan 5.9, 14.1, 21.4). Providers come at
+// two levels: the organization's, which owners and admins add and change and
+// every member's Bots may use, and a member's own (`scope: account`), which
+// only they see and change and which come first for their Bots. A
+// self-hosted install has one list, its owner's organization providers.
+// API keys are write-only: responses say `hasKey`, and whoever may change the
+// provider also gets `keyHint`, the vendor prefix and last four characters
+// (P3). Extra headers come back by name only (S-9).
 
 // Shared schemas may be built before @hono/zod-openapi extends zod, so the
 // named components are rebuilt from their shapes here.
@@ -87,8 +94,9 @@ const ProviderSchema = z
     status: ProviderStatusSchema,
     lastTestedAt: z.iso.datetime().nullable(),
     testResult: TestResultSchema.nullable(),
-    scope: z.enum(['instance', 'account']).openapi({
-      description: '`instance` providers serve every member',
+    scope: z.enum(['organization', 'account']).openapi({
+      description:
+        "`organization` providers serve every member's Bots; `account` providers are the caller's own",
     }),
     smallModelId: z.string().nullable().openapi({
       description:
@@ -155,6 +163,10 @@ const CreateProviderSchema = z
     headers: HeadersSchema.optional(),
     discovery: ProviderDiscoverySchema.optional(),
     models: z.array(ModelInputSchema).max(500).optional(),
+    scope: z.enum(['organization', 'account']).optional().openapi({
+      description:
+        "Managed service: `organization` (owners and admins; the default for them) or `account` (the caller's own; the default for members). A self-hosted install has only `organization`.",
+    }),
   })
   .openapi('CreateProvider');
 
@@ -211,9 +223,17 @@ const params = z.object({ id: z.uuid() });
 
 const iso = (date: Date | null) => (date ? new Date(date).toISOString() : null);
 
-/** Who sees a key's hint (P3): admins, and the owner of an account-level provider. */
-const seesKeyHint = (row: ProviderRow, user: CurrentUser) =>
-  user.role === 'admin' || (row.ownerId !== null && row.ownerId === user.id);
+/** Who may change a provider and see its key's hint (P3): admins for the organization's, the owner for their own. */
+const manages = (row: Pick<ProviderRow, 'ownerId'>, user: CurrentUser) =>
+  row.ownerId === null ? isOrgAdmin(user.role) : row.ownerId === user.id;
+
+/** 404 unless the caller sees the provider, 403 unless they may change it. */
+async function assertManages(c: Context<AppEnv>, id: string) {
+  const { row } = await getProvider(c.var.deps.db, c.var.user, id);
+  if (!manages(row, c.var.user)) {
+    throw forbidden("Only an admin can change the organization's providers");
+  }
+}
 
 function toProvider(
   { row, smallModelId, botCount }: ProviderRecord,
@@ -229,13 +249,13 @@ function toProvider(
     local: row.local,
     headers: headerNames(row),
     hasKey: row.secrets !== null,
-    keyHint: row.secrets !== null && seesKeyHint(row, user) ? row.keyHint : null,
+    keyHint: row.secrets !== null && manages(row, user) ? row.keyHint : null,
     discovery: row.discovery,
     presetId: row.presetId,
     status: ProviderStatusSchema.catch('untested').parse(row.status),
     lastTestedAt: iso(row.lastTestedAt),
     testResult: testResultOf(row),
-    scope: row.ownerId ? 'account' : 'instance',
+    scope: row.ownerId ? 'account' : 'organization',
     smallModelId,
     botCount,
     createdAt: iso(row.createdAt)!,
@@ -381,7 +401,7 @@ export const providerRoutes = createRouter()
       path: '/providers',
       tags: ['models'],
       summary: 'Add a built-in or custom model provider',
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: {
         body: { required: true, content: { 'application/json': { schema: CreateProviderSchema } } },
@@ -394,8 +414,22 @@ export const providerRoutes = createRouter()
       },
     }),
     async (c) => {
-      const record = await createProvider(c.var.deps, c.var.user, c.req.valid('json'));
-      return c.json(toProvider(record, c.var.user), 201);
+      const { config } = c.var.deps;
+      const user = c.var.user;
+      const input = c.req.valid('json');
+      const admin = isOrgAdmin(user.role);
+      if (config.deployment === 'self_hosted' && input.scope === 'account') {
+        throw forbidden('A self-hosted install has one list of providers');
+      }
+      const scope =
+        config.deployment === 'self_hosted'
+          ? 'organization'
+          : (input.scope ?? (admin ? 'organization' : 'account'));
+      if (scope === 'organization' && !admin) {
+        throw forbidden('Only an admin can add a provider for the organization');
+      }
+      const record = await createProvider(c.var.deps, user, { ...input, scope });
+      return c.json(toProvider(record, user), 201);
     },
   )
   .openapi(
@@ -404,7 +438,7 @@ export const providerRoutes = createRouter()
       path: '/providers/{id}',
       tags: ['models'],
       summary: "Edit a provider's endpoint, key, headers or small model",
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: {
         params,
@@ -419,6 +453,7 @@ export const providerRoutes = createRouter()
     }),
     async (c) => {
       const { id } = c.req.valid('param');
+      await assertManages(c, id);
       const record = await updateProvider(c.var.deps, c.var.user, id, c.req.valid('json'));
       return c.json(toProvider(record, c.var.user), 200);
     },
@@ -429,7 +464,7 @@ export const providerRoutes = createRouter()
       path: '/providers/{id}',
       tags: ['models'],
       summary: 'Delete a provider no Bot uses',
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: { params },
       responses: {
@@ -440,6 +475,7 @@ export const providerRoutes = createRouter()
       },
     }),
     async (c) => {
+      await assertManages(c, c.req.valid('param').id);
       await deleteProvider(c.var.deps, c.var.user, c.req.valid('param').id);
       return c.body(null, 204);
     },
@@ -452,7 +488,7 @@ export const providerRoutes = createRouter()
       summary: 'Test streaming and tool calling',
       description:
         'Runs a tiny streamed completion, then a tool-call round trip. The outcome is stored in `testResult` and `status`; a failing endpoint is reported there, not as an error. A model whose tool calling fails gets its `tools` flag turned off.',
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: {
         params,
@@ -476,6 +512,7 @@ export const providerRoutes = createRouter()
     }),
     async (c) => {
       const { id } = c.req.valid('param');
+      await assertManages(c, id);
       const body = c.req.header('content-type')?.includes('json') ? c.req.valid('json') : {};
       const record = await testProvider(c.var.deps, c.var.user, id, body ?? {});
       return c.json(toProvider(record, c.var.user), 200);
@@ -488,7 +525,7 @@ export const providerRoutes = createRouter()
       tags: ['models'],
       summary: "Pull an OpenAI-compatible endpoint's model list",
       description: 'New models join as `discovered`; models already listed keep their edits.',
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: { params },
       responses: {
@@ -508,6 +545,7 @@ export const providerRoutes = createRouter()
     }),
     async (c) => {
       const { id } = c.req.valid('param');
+      await assertManages(c, id);
       const { added, models } = await discoverProviderModels(c.var.deps, c.var.user, id);
       return c.json({ added, items: models.map(toProviderModel) }, 200);
     },
@@ -534,7 +572,7 @@ export const providerRoutes = createRouter()
       path: '/providers/{id}/models',
       tags: ['models'],
       summary: 'Edit capabilities and pricing, enable, disable, add or remove models',
-      middleware: [requireAdmin] as const,
+      middleware: [requireUser] as const,
       security: authenticated,
       request: {
         params,
@@ -549,6 +587,7 @@ export const providerRoutes = createRouter()
     }),
     async (c) => {
       const { id } = c.req.valid('param');
+      await assertManages(c, id);
       const rows = await upsertProviderModels(c.var.deps, c.var.user, id, c.req.valid('json'));
       return c.json({ items: rows.map(toProviderModel) }, 200);
     },

@@ -137,7 +137,7 @@ const provider: Provider = {
   status: 'untested',
   lastTestedAt: null,
   testResult: null,
-  scope: 'instance',
+  scope: 'organization',
   smallModelId: null,
   botCount: 0,
   createdAt: '2026-10-16T00:00:00.000Z',

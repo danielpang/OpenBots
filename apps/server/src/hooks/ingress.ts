@@ -6,7 +6,7 @@ import type { AppEnv } from '../context.js';
 import { schema } from '../db/client.js';
 import { DomainError, notFound, unauthorized } from '../errors.js';
 import { observeWebhook } from '../metrics.js';
-import { effectiveSettings, ensureWorkspace } from '../workspace.js';
+import { organizationSettings } from '../workspace.js';
 import {
   acceptDelivery,
   hasToken,
@@ -100,17 +100,34 @@ function route(rest: string[]): [slug: string, token: string | undefined] {
   return first.startsWith(TOKEN_PREFIX) ? [INBOX_SLUG, first] : [first, undefined];
 }
 
-async function findEndpoint(c: Context<AppEnv>, handle: string, slug: string) {
-  const { db } = c.var.deps;
-  const [found] = await db
+const BOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The endpoint a path names (plan 21.3), and through it the organization the
+ * delivery belongs to. The Bot is named by id, or on a self-hosted install
+ * also by handle: handles are unique only per (organization, owner), so on
+ * the managed service a handle could name a Bot of any organization.
+ */
+async function findEndpoint(c: Context<AppEnv>, bot: string, slug: string) {
+  const { db, config } = c.var.deps;
+  const byId = BOT_ID.test(bot);
+  if (!byId && config.deployment === 'managed') throw notFound('No such webhook endpoint');
+  const found = await db
     .select({ endpoint: schema.webhookEndpoints })
     .from(schema.webhookEndpoints)
     .innerJoin(schema.bots, eq(schema.bots.id, schema.webhookEndpoints.botId))
     .where(
-      and(eq(schema.bots.handle, handle.toLowerCase()), eq(schema.webhookEndpoints.slug, slug)),
-    );
-  if (!found?.endpoint.enabled) throw notFound('No such webhook endpoint');
-  return found.endpoint;
+      and(
+        byId ? eq(schema.bots.id, bot) : eq(schema.bots.handle, bot.toLowerCase()),
+        eq(schema.webhookEndpoints.slug, slug),
+      ),
+    )
+    .limit(2);
+  // Two Bots with one handle (left from a managed install): neither is guessed.
+  if (found.length !== 1 || !found[0]!.endpoint.enabled) {
+    throw notFound('No such webhook endpoint');
+  }
+  return found[0]!.endpoint;
 }
 
 /** IP allowlist, token and signature (H3); returns whether a signature verified it. */
@@ -162,15 +179,22 @@ function handshake(
 
 async function ingress(c: Context<AppEnv>, rest: string[]) {
   const { deps } = c.var;
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(deps.db));
-  const handle = c.req.param('handle')!;
+  const bot = c.req.param('handle')!;
   const [slug, pathToken] = route(rest);
   const remoteIp = clientIp(c);
-  if (remoteIp)
-    await throttle(c, `hook-ip:${remoteIp}`, limits.webhookIpRatePerMin, 'from this address');
+  // Before the endpoint is known, the install's limits; after, its organization's.
+  if (remoteIp) {
+    await throttle(
+      c,
+      `hook-ip:${remoteIp}`,
+      deps.config.limits.webhookIpRatePerMin,
+      'from this address',
+    );
+  }
+  const endpoint = await findEndpoint(c, bot, slug);
+  const { limits } = await organizationSettings(deps, endpoint.workspaceId);
   const body =
     c.req.method === 'GET' ? Buffer.alloc(0) : await readBody(c, limits.webhookPayloadBytes);
-  const endpoint = await findEndpoint(c, handle, slug);
   const headers = lowerHeaders(c);
   try {
     authenticate(c, endpoint, headers, body, pathToken, remoteIp);

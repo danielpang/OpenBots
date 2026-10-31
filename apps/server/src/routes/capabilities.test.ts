@@ -17,6 +17,8 @@ describe('capabilities route', () => {
       oauth: { github: false, google: false },
       computer: false,
       deployment: 'self_hosted',
+      customStdio: true,
+      localEndpoints: true,
       auth: 'password',
     });
   });
@@ -33,6 +35,8 @@ describe('capabilities route', () => {
       oauth: { github: true, google: false },
       computer: false,
       deployment: 'self_hosted',
+      customStdio: true,
+      localEndpoints: true,
       auth: 'password',
     });
   });
@@ -43,5 +47,19 @@ describe('capabilities route', () => {
       '/api/v1/capabilities',
     );
     expect(((await res.json()) as { auth: string }).auth).toBe('local');
+  });
+
+  it('keeps custom stdio and local endpoints off on the managed service by default', async () => {
+    const managed = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed' });
+    try {
+      const res = await managed.app.request('/api/v1/capabilities');
+      expect(await res.json()).toMatchObject({
+        deployment: 'managed',
+        customStdio: false,
+        localEndpoints: false,
+      });
+    } finally {
+      await managed.close();
+    }
   });
 });

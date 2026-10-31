@@ -206,7 +206,7 @@ export interface BotToolDefault extends DefaultSummary {
  * would. Bot Settings shows these as each setting's Default.
  */
 export async function botToolDefaults(
-  deps: Pick<AppDeps, 'db'>,
+  deps: Pick<AppDeps, 'db' | 'config'>,
   viewer: { id: string; workspaceId: string },
   botId: string,
 ): Promise<BotToolDefault[]> {
@@ -228,7 +228,7 @@ export async function botToolDefaults(
       )
       .orderBy(asc(schema.connectors.createdAt)),
     blockRules(deps.db, bot.workspaceId),
-    customStdioRefusal(deps.db, bot.workspaceId, bot.ownerId),
+    customStdioRefusal(deps, bot.workspaceId, bot.ownerId),
   ]);
   const blocked = new Set(blockedBuiltins(rules));
   const builtinRows = new Map<string, string>();

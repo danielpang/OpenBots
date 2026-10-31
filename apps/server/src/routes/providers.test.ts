@@ -53,7 +53,12 @@ describe('/api/v1/providers', () => {
   let fake: FakeOpenAI;
 
   beforeAll(async () => {
-    t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
+    t = await createTestApp({
+      OPENBOT_DEPLOYMENT: 'managed',
+      OPENBOT_SIGNUP_MODE: 'open',
+      // The fakes listen on 127.0.0.1; the hosted service keeps this off.
+      OPENBOT_LOCAL_ENDPOINTS: 'true',
+    });
     admin = (await t.signUp('admin@example.com')).cookie!;
     member = (await t.signUp('member@example.com')).cookie!;
     fake = await startFakeOpenAI({ models: [{ id: 'qwen3' }, { id: 'llama3.2' }] });
@@ -102,7 +107,7 @@ describe('/api/v1/providers', () => {
       // A key under 20 characters keeps only its last two in the hint (P3).
       keyHint: '…et',
       status: 'untested',
-      scope: 'instance',
+      scope: 'organization',
       botCount: 0,
     });
     const models = await modelsOf(provider.id);
@@ -125,19 +130,67 @@ describe('/api/v1/providers', () => {
     expect(await codes({ presetId: 'anthropic', apiKey: 'again' })).toBe('SLUG_TAKEN');
   });
 
-  it('lets members read but not change providers', async () => {
+  it("lets members read but not change the organization's providers", async () => {
     const list = await call(member, 'GET', '/providers');
     expect(list.status).toBe(200);
     const { items } = (await list.json()) as { items: Provider[] };
     expect(items.map((p) => p.slug)).toEqual(['anthropic']);
     // Members learn that a key is set, not which (P3).
     expect(items[0]).toMatchObject({ hasKey: true, keyHint: null });
-    expect(
-      (await call(member, 'POST', '/providers', { presetId: 'groq', apiKey: 'k' })).status,
-    ).toBe(403);
+    const orgWide = { presetId: 'groq', apiKey: 'k', scope: 'organization' };
+    expect((await call(member, 'POST', '/providers', orgWide)).status).toBe(403);
     expect((await call(member, 'DELETE', `/providers/${items[0]!.id}`)).status).toBe(403);
     expect((await call(member, 'POST', `/providers/${items[0]!.id}/test`)).status).toBe(403);
+    expect((await call(member, 'PATCH', `/providers/${items[0]!.id}`, { name: 'X' })).status).toBe(
+      403,
+    );
+    expect(
+      (await call(member, 'PUT', `/providers/${items[0]!.id}/models`, { models: [] })).status,
+    ).toBe(403);
     expect((await call(undefined, 'GET', '/providers')).status).toBe(401);
+  });
+
+  it("gives members their own providers, first for their Bots and hidden from everyone else's (L6)", async () => {
+    const res = await call(member, 'POST', '/providers', {
+      presetId: 'anthropic',
+      apiKey: 'sk-ant-mine-0123456789',
+    });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const own = (await res.json()) as Provider;
+    // The same slug as the organization's: they live side by side.
+    expect(own).toMatchObject({ scope: 'account', slug: 'anthropic', keyHint: 'sk-ant-…6789' });
+    const mine = ((await (await call(member, 'GET', '/providers')).json()) as { items: Provider[] })
+      .items;
+    expect(mine.map((p) => [p.scope, p.slug])).toEqual([
+      ['account', 'anthropic'],
+      ['organization', 'anthropic'],
+    ]);
+    // A new Bot of theirs gets their own provider's default.
+    const bot = await call(member, 'POST', '/bots', { name: 'Mine first' });
+    expect(
+      ((await bot.json()) as { modelConfig: { provider_id: string } }).modelConfig,
+    ).toMatchObject({ provider_id: own.id });
+    // An admin neither sees nor changes it.
+    const theirs = (
+      (await (await call(admin, 'GET', '/providers')).json()) as { items: Provider[] }
+    ).items;
+    expect(theirs.map((p) => p.id)).not.toContain(own.id);
+    expect((await call(admin, 'PATCH', `/providers/${own.id}`, { name: 'Taken' })).status).toBe(
+      404,
+    );
+    expect((await call(admin, 'DELETE', `/providers/${own.id}`)).status).toBe(404);
+    // Nor may another member's Bot name it.
+    const adminBot = await call(admin, 'POST', '/bots', {
+      name: 'Borrower',
+      modelConfig: { provider_id: own.id, model_id: 'claude-opus-5-5' },
+    });
+    expect(adminBot.status).toBe(404);
+    // Theirs to change and delete, once no Bot uses it.
+    expect((await call(member, 'PATCH', `/providers/${own.id}`, { name: 'Mine' })).status).toBe(
+      200,
+    );
+    await t.deps.db.delete(schema.bots).where(eq(schema.bots.name, 'Mine first'));
+    expect((await call(member, 'DELETE', `/providers/${own.id}`)).status).toBe(204);
   });
 
   it("shows a key's hint to admins, and to the owner of an account provider (P3)", async () => {

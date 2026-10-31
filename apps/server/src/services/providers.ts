@@ -34,7 +34,7 @@ import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
-import { ensureWorkspace, storedSettings, updateSettings } from '../workspace.js';
+import { ensureWorkspace, getOrganization, storedSettings, updateSettings } from '../workspace.js';
 
 // Model providers (plan 4.10, 5.9; L1 to L5). Built-ins are seeded from `.env`
 // at start; custom endpoints come from Settings > Models. Instance-level rows
@@ -83,6 +83,28 @@ export interface ProviderInput {
   headers?: Record<string, string>;
   discovery?: ProviderDiscovery;
   models?: ModelInput[];
+  /**
+   * `organization` (every member's Bots may use it; owners and admins add
+   * these) or `account` (the caller's own, first for their Bots; L6).
+   */
+  scope?: ProviderScope;
+}
+
+/** Where a provider belongs (plan 21.4): `owner_id` null is the organization's. */
+export type ProviderScope = 'organization' | 'account';
+
+export const scopeOf = (row: Pick<ProviderRow, 'ownerId'>): ProviderScope =>
+  row.ownerId ? 'account' : 'organization';
+
+/** A provider may reach private addresses only where the install allows it (S-8, plan 21.6). */
+function assertLocalAllowed(deps: Pick<AppDeps, 'config'>, local: boolean | undefined) {
+  if (local && !deps.config.localEndpoints) {
+    throw new DomainError(
+      403,
+      'LOCAL_UNAVAILABLE',
+      'Providers cannot reach private addresses on the hosted service.',
+    );
+  }
 }
 
 export interface ProviderPatch {
@@ -358,6 +380,15 @@ export async function seedProvidersFromEnv(
 ): Promise<void> {
   const specs = seedSpecs(deps.config);
   if (!specs.length) return;
+  // Each organization on the managed service brings its own keys (plan 21.4).
+  if (deps.config.deployment === 'managed') {
+    deps.logger.warn(
+      { providers: specs.map((s) => s.slug) },
+      'provider keys in .env are not used on the managed service; organizations add their own',
+    );
+    return;
+  }
+  // The implicit organization of a self-hosted install.
   const workspace = await ensureWorkspace(deps.db);
   for (const spec of specs) {
     const preset = presetById(spec.presetId)!;
@@ -432,12 +463,20 @@ async function insertCatalogModels(db: Db, row: ProviderRow): Promise<void> {
 
 // --- Reads -----------------------------------------------------------------------
 
+/** The organization's providers and the viewer's own, never another member's (L6). */
 function visibleTo(viewer: Viewer) {
   return and(
     eq(schema.providers.workspaceId, viewer.workspaceId),
     or(isNull(schema.providers.ownerId), eq(schema.providers.ownerId, viewer.id)),
   );
 }
+
+/** The viewer's own providers first (they take priority for their Bots, L6), then by age. */
+const viewerOrder = [
+  sql`${schema.providers.ownerId} is null`,
+  asc(schema.providers.createdAt),
+  asc(schema.providers.id),
+] as const;
 
 /** Bots per provider id, read from `bots.model_config.provider_id` (L5). */
 async function botCounts(db: Db, providerIds: string[]): Promise<Map<string, number>> {
@@ -451,12 +490,16 @@ async function botCounts(db: Db, providerIds: string[]): Promise<Map<string, num
   return new Map(rows.map((r) => [r.providerId, Number(r.n)]));
 }
 
-async function records(db: Db, rows: ProviderRow[]): Promise<ProviderRecord[]> {
+async function records(
+  db: Db,
+  workspaceId: string,
+  rows: ProviderRow[],
+): Promise<ProviderRecord[]> {
   const counts = await botCounts(
     db,
     rows.map((r) => r.id),
   );
-  const workspace = await ensureWorkspace(db);
+  const workspace = await getOrganization(db, workspaceId);
   const small = storedSettings(workspace).smallModels ?? {};
   return rows.map((row) => ({
     row,
@@ -470,8 +513,8 @@ export async function listProviders(db: Db, viewer: Viewer): Promise<ProviderRec
     .select()
     .from(schema.providers)
     .where(visibleTo(viewer))
-    .orderBy(asc(schema.providers.createdAt), asc(schema.providers.id));
-  return records(db, rows);
+    .orderBy(...viewerOrder);
+  return records(db, viewer.workspaceId, rows);
 }
 
 async function providerRow(db: Db, viewer: Viewer, id: string): Promise<ProviderRow> {
@@ -484,7 +527,7 @@ async function providerRow(db: Db, viewer: Viewer, id: string): Promise<Provider
 }
 
 export async function getProvider(db: Db, viewer: Viewer, id: string): Promise<ProviderRecord> {
-  const [record] = await records(db, [await providerRow(db, viewer, id)]);
+  const [record] = await records(db, viewer.workspaceId, [await providerRow(db, viewer, id)]);
   return record!;
 }
 
@@ -516,7 +559,7 @@ export async function modelsByProvider(
     .select()
     .from(schema.providers)
     .where(visibleTo(viewer))
-    .orderBy(asc(schema.providers.createdAt), asc(schema.providers.id));
+    .orderBy(...viewerOrder);
   const models = await modelRows(
     db,
     providers.map((p) => p.id),
@@ -593,7 +636,7 @@ export async function defaultModelConfig(
       .select()
       .from(schema.providers)
       .where(visibleTo(viewer))
-      .orderBy(asc(schema.providers.createdAt), asc(schema.providers.id))
+      .orderBy(...viewerOrder)
   ).filter((p) => p.status !== 'error');
   const models = (
     await modelRows(
@@ -685,6 +728,7 @@ export async function createProvider(
         : (preset?.base_url ?? null);
   assertBaseUrl(baseUrl, protocol);
   const local = input.local ?? false;
+  assertLocalAllowed(deps, local);
   await assertEndpoint(deps, baseUrl, local);
   if (preset?.key_required && !input.apiKey) {
     throw invalid('API_KEY_REQUIRED', `${preset.name} needs an API key`);
@@ -692,12 +736,11 @@ export async function createProvider(
   const slug = input.slug ?? slugFromName(input.presetId && !input.name ? input.presetId : name);
 
   const id = await deps.db.transaction(async (tx) => {
-    const workspace = await ensureWorkspace(tx);
     const [row] = await tx
       .insert(schema.providers)
       .values({
-        workspaceId: workspace.id,
-        ownerId: null,
+        workspaceId: viewer.workspaceId,
+        ownerId: input.scope === 'account' ? viewer.id : null,
         kind,
         protocol,
         name,
@@ -739,7 +782,10 @@ export async function updateProvider(
     assertBaseUrl(patch.baseUrl, row.protocol);
     set.baseUrl = patch.baseUrl;
   }
-  if (patch.local !== undefined) set.local = patch.local;
+  if (patch.local !== undefined) {
+    assertLocalAllowed(deps, patch.local);
+    set.local = patch.local;
+  }
   if (patch.baseUrl !== undefined || patch.local === false) {
     await assertEndpoint(
       deps,
@@ -773,7 +819,7 @@ export async function updateProvider(
         throw invalid('UNKNOWN_MODEL', `No enabled model ${patch.smallModelId} on this provider`);
       }
     }
-    await setSmallModel(deps.db, id, patch.smallModelId);
+    await setSmallModel(deps.db, row.workspaceId, id, patch.smallModelId);
   }
   // Which fields changed, never the key or header values.
   const fields = Object.keys(patch).filter((k) => patch[k as keyof ProviderPatch] !== undefined);
@@ -786,8 +832,13 @@ export async function updateProvider(
   return getProvider(deps.db, viewer, id);
 }
 
-async function setSmallModel(db: Db, providerId: string, modelId: string | null) {
-  const workspace = await ensureWorkspace(db);
+async function setSmallModel(
+  db: Db,
+  workspaceId: string,
+  providerId: string,
+  modelId: string | null,
+) {
+  const workspace = await getOrganization(db, workspaceId);
   const small = { ...storedSettings(workspace).smallModels };
   if (modelId) small[providerId] = modelId;
   else delete small[providerId];
@@ -800,7 +851,7 @@ export async function deleteProvider(
   viewer: Viewer,
   id: string,
 ): Promise<void> {
-  await providerRow(deps.db, viewer, id);
+  const row = await providerRow(deps.db, viewer, id);
   await deps.db.transaction(async (tx) => {
     // Serializes with Bot edits only loosely; a Bot moved onto the provider in
     // the same instant is caught by the runtime's provider-not-found error.
@@ -810,7 +861,7 @@ export async function deleteProvider(
     await audit(tx, viewer, 'provider.delete', id, {});
   });
   providerRegistry(deps).invalidate(id);
-  await setSmallModel(deps.db, id, null);
+  await setSmallModel(deps.db, row.workspaceId, id, null);
 }
 
 export async function upsertProviderModels(
@@ -1053,12 +1104,12 @@ export async function smallModelFor(
   deps: ProvidersDeps,
   providerId: string,
 ): Promise<ProviderModel | null> {
-  const workspace = await ensureWorkspace(deps.db);
-  const override = storedSettings(workspace).smallModels?.[providerId];
   const [provider] = await deps.db
-    .select({ presetId: schema.providers.presetId })
+    .select({ presetId: schema.providers.presetId, workspaceId: schema.providers.workspaceId })
     .from(schema.providers)
     .where(eq(schema.providers.id, providerId));
+  const workspace = provider ? await getOrganization(deps.db, provider.workspaceId) : null;
+  const override = workspace ? storedSettings(workspace).smallModels?.[providerId] : undefined;
   const models = (await modelRows(deps.db, [providerId])).map(toProviderModel);
   return pickSmallModel(models, override, provider?.presetId);
 }

@@ -26,6 +26,7 @@ import { mergeDiscovered, providerInUseText } from './format.js';
 import { ModelRows, modelsPatch, type ModelDraft } from './model-editor.js';
 import { chooseModel, ModelPicker, pickerNeeds } from './ModelPicker.js';
 import { ModelsSettings } from './models-settings.js';
+import { capabilitiesQuery } from '../../app/api.js';
 
 // The API client binds `fetch` when its module loads, so the fake goes in
 // before any import: it answers `server.handler` and 404s without one.
@@ -71,7 +72,7 @@ function provider(overrides: Partial<Provider>): Provider {
       latency_ms: 412,
       error: null,
     },
-    scope: 'instance',
+    scope: 'organization',
     smallModelId: null,
     botCount: 0,
     createdAt: '2026-10-16T00:00:00.000Z',
@@ -135,8 +136,18 @@ function render(queryClient: QueryClient, node: ReactNode) {
   );
 }
 
-function settings(items: Provider[], canEdit: boolean, models: ProviderModel[] = []) {
+function settings(
+  items: Provider[],
+  canEdit: boolean,
+  models: ProviderModel[] = [],
+  deployment: 'self_hosted' | 'managed' = 'self_hosted',
+) {
   const queryClient = new QueryClient();
+  queryClient.setQueryData(capabilitiesQuery.queryKey, {
+    oauth: { github: false, google: false },
+    deployment,
+    localEndpoints: deployment === 'self_hosted',
+  });
   queryClient.setQueryData(providersQuery.queryKey, { items });
   queryClient.setQueryData(presetsQuery.queryKey, { items: PRESETS });
   for (const p of items) {
@@ -146,6 +157,39 @@ function settings(items: Provider[], canEdit: boolean, models: ProviderModel[] =
   }
   return render(queryClient, <ModelsSettings canEdit={canEdit} />);
 }
+
+describe('Settings > Models on the managed service (L6)', () => {
+  it("lists the organization's providers and the caller's own apart", async () => {
+    const html = await settings(
+      [
+        provider({}),
+        provider({
+          id: '00000000-0000-4000-8000-0000000000f1',
+          name: 'My Anthropic',
+          scope: 'account',
+          keyHint: 'sk-ant-…9999',
+        }),
+      ],
+      false,
+      [],
+      'managed',
+    );
+    const text = html.replace(/<[^>]*>/g, ' ');
+    expect(text).toContain('Organization');
+    expect(text).toContain('Yours');
+    expect(text.indexOf('Anthropic')).toBeLessThan(text.indexOf('Yours'));
+    expect(text.indexOf('My Anthropic')).toBeGreaterThan(text.indexOf('Yours'));
+    // A member adds their own custom providers, not the organization's.
+    expect(html.match(/Add custom model provider/g)).toHaveLength(1);
+    // No private network on the hosted service.
+    expect(html).not.toContain('Runs on my network');
+  });
+
+  it('shows one list on a self-hosted install', async () => {
+    const text = (await settings([provider({})], true)).replace(/<[^>]*>/g, ' ');
+    expect(text).not.toContain('Yours');
+  });
+});
 
 describe('Settings > Models', () => {
   const stored = [

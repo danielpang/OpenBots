@@ -146,20 +146,26 @@ export function customConnectorBody(input: CustomServerInput): CreateConnector {
 }
 
 /** Whether the custom form may add a command (stdio) server (S-1). */
-export type StdioAvailability = 'on' | 'admin_only' | 'off';
+export type StdioAvailability = 'on' | 'admin_only' | 'off' | 'unavailable';
 
-/** Admins only, and only once an admin turns custom stdio on in the workspace settings. */
+/**
+ * Admins only, and only once an admin turns custom stdio on in the
+ * settings; never where the install keeps them off (the managed service).
+ */
 export function stdioAvailability(
-  role: string | undefined,
+  role: string | null | undefined,
   enabled: boolean | undefined,
+  available = true,
 ): StdioAvailability {
-  if (role !== 'admin') return 'admin_only';
+  if (!available) return 'unavailable';
+  if (role !== 'owner' && role !== 'admin') return 'admin_only';
   return enabled ? 'on' : 'off';
 }
 
 export const STDIO_NOTES: Record<Exclude<StdioAvailability, 'on'>, string> = {
   admin_only: 'Only an admin can add a command (stdio) server. Use the catalog or an HTTP URL.',
   off: 'Command (stdio) servers are off. Turn them on under "Admin: connector policy" below.',
+  unavailable: 'Command (stdio) servers are not available here. Use the catalog or an HTTP URL.',
 };
 
 /** The "off" note on a self-hosted install, whose owner sets the connector policy. */

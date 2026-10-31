@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { meQuery } from '../../app/api.js';
+import { capabilitiesQuery, meQuery } from '../../app/api.js';
 import { adminLabel, useManaged } from '../../app/deployment.js';
 import { settingsQuery } from '../settings/admin-settings.js';
 import { catalogQuery, connectorsQuery } from './api.js';
@@ -37,10 +37,15 @@ export function ToolsPage({
   onSearchHandled?(): void;
 }) {
   const me = useQuery(meQuery);
-  const isAdmin = me.data?.role === 'admin';
+  const isAdmin = me.data?.role === 'owner' || me.data?.role === 'admin';
   const managed = useManaged();
+  const capabilities = useQuery({ ...capabilitiesQuery, enabled: false });
   const settings = useQuery({ ...settingsQuery, enabled: isAdmin });
-  const stdio = stdioAvailability(me.data?.role, settings.data?.customStdioEnabled);
+  const stdio = stdioAvailability(
+    me.data?.role,
+    settings.data?.customStdioEnabled,
+    capabilities.data?.customStdio ?? true,
+  );
   const catalog = useQuery(catalogQuery);
   const connectors = useQuery(connectorsQuery);
   const test = useTestConnector();

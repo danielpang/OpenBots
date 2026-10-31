@@ -24,7 +24,7 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
   }
 
   return {
-    signUpEmail: (input: { name: string; email: string; password: string; inviteToken?: string }) =>
+    signUpEmail: (input: { name: string; email: string; password: string }) =>
       post<unknown>('/sign-up/email', input),
     signInEmail: (input: { email: string; password: string }) =>
       post<unknown>('/sign-in/email', input),

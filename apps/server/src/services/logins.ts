@@ -144,7 +144,7 @@ export async function requestLogin(
   // The screen opens on the host asked for, a subdomain (`accounts.google.com`)
   // or the site itself, rather than on a blank page.
   const url = input.url ?? `https://${host}/`;
-  const main = await mainBotOf(deps.db, bot.ownerId);
+  const main = await mainBotOf(deps.db, { id: bot.ownerId, workspaceId: bot.workspaceId });
   const screenBot = main && !main.archivedAt ? main : bot;
   const checked = validateWidgetProps(KIND, {
     site,
@@ -267,6 +267,7 @@ async function transcriptOf(db: Db, bot: BotRow): Promise<ChatRow> {
     .where(
       and(
         eq(schema.chats.ownerId, bot.ownerId),
+        eq(schema.chats.workspaceId, bot.workspaceId),
         eq(schema.chats.botId, bot.id),
         eq(schema.chats.type, 'bot_dm'),
       ),
@@ -497,7 +498,7 @@ export function registerLoginHooks(): () => void {
   return onWidgetAction(KIND, async (deps, tx, { message, state }) => {
     const answered = state as LoginRequestState;
     const [chat] = await tx
-      .select({ ownerId: schema.chats.ownerId })
+      .select({ ownerId: schema.chats.ownerId, workspaceId: schema.chats.workspaceId })
       .from(schema.chats)
       .where(eq(schema.chats.id, message.chatId));
     return {
@@ -506,7 +507,7 @@ export function registerLoginHooks(): () => void {
           // Every live screen: the one signed in on gives, the others take.
           // The computer helpers key their provider on the process's
           // AppDeps, the object every widget action is called with.
-          await syncCookies(deps as AppDeps, chat.ownerId);
+          await syncCookies(deps as AppDeps, { id: chat.ownerId, workspaceId: chat.workspaceId });
         }
         const output = widgetToolResult(KIND, answered);
         for (const waiter of answered.waiting ?? []) {

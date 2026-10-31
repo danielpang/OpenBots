@@ -1,3 +1,4 @@
+import { DEFAULT_LIMITS } from '@openbot/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
 import { renderToString } from 'react-dom/server';
@@ -33,7 +34,7 @@ export async function renderPath(path: string) {
   return { html, pathname, search: searchStr };
 }
 
-export const me = (role: 'admin' | 'member') => ({
+export const me = (role: 'owner' | 'admin' | 'member') => ({
   user: {
     id: '00000000-0000-4000-8000-000000000001',
     email: 'ada@example.com',
@@ -43,6 +44,6 @@ export const me = (role: 'admin' | 'member') => ({
     createdAt: '2026-10-14T00:00:00.000Z',
   },
   role,
-  workspace: { id: '00000000-0000-4000-8000-000000000002', name: 'OpenBot' },
-  limits: {},
+  workspace: { id: '00000000-0000-4000-8000-000000000002', name: 'OpenBot', suspended: false },
+  limits: { ...DEFAULT_LIMITS },
 });

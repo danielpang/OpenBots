@@ -407,6 +407,6 @@ export function artifactServices(
         bytes: new Uint8Array(await readBytes(stream)),
       };
     },
-    byteLimit: () => uploadLimit(deps),
+    byteLimit: () => uploadLimit(deps, owner.workspaceId),
   };
 }

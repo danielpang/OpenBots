@@ -63,6 +63,8 @@ export function createApp(deps: AppDeps, { webDist = WEB_DIST }: AppOptions = {}
 
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
   mountRoutes(app);
+  // The managed build's routes (plan 21.5), before the SPA fallback.
+  deps.extensions?.routes?.(app);
   app.get(OPENAPI_PATH, (c) => c.json(openApiDocument(app)));
 
   const index = webDist && join(webDist, 'index.html');

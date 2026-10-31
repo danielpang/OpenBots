@@ -7,17 +7,20 @@ import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
 import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
+import { afterAuth, signedIn } from '../features/auth/after-auth.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 
 // A self-hosted install has one account, so there is no Sign up link;
-// `?signup=closed` (from /sign-up) says why.
+// `?signup=closed` (from /sign-up) says why. An invite (`?invite=<id>`)
+// goes on to /onboarding once signed in (plan 21.5).
 
 export const Route = createFileRoute('/sign-in')({
-  validateSearch: (search): { error?: string; signup?: 'closed' } => ({
+  validateSearch: (search): { error?: string; signup?: 'closed'; invite?: string } => ({
     error: typeof search.error === 'string' ? search.error : undefined,
     signup: search.signup === 'closed' ? 'closed' : undefined,
+    invite: typeof search.invite === 'string' ? search.invite : undefined,
   }),
-  beforeLoad: async ({ context }) => {
+  beforeLoad: async ({ context, search }) => {
     if ((await loadAuthMode(context.queryClient)) === 'local') {
       // The Mac app signs the owner in: a signed-in window goes on to the app.
       const signedIn = await context.queryClient.fetchQuery({ ...meQuery, staleTime: 0 }).then(
@@ -29,6 +32,10 @@ export const Route = createFileRoute('/sign-in')({
     }
     if (await setupRequired(() => context.queryClient.fetchQuery(setupQuery))) {
       throw redirect({ to: '/setup' });
+    }
+    // Signed in already: an invite goes on to be accepted.
+    if (search.invite && (await signedIn(context.queryClient))) {
+      throw redirect({ to: '/onboarding', search: { invite: search.invite } });
     }
     return { local: false as const, deployment: await loadDeployment(context.queryClient) };
   },
@@ -49,7 +56,7 @@ function SignIn() {
     mutationFn: auth.signInEmail,
     onSuccess: async () => {
       queryClient.removeQueries({ queryKey: ['me'] });
-      await navigate({ to: '/' });
+      await navigate(afterAuth(search.invite));
     },
   });
   const error = signIn.error ?? oauthError;
@@ -81,11 +88,15 @@ function SignIn() {
           required
         />
       </AuthForm>
-      <OAuthButtons onError={setOAuthError} />
+      <OAuthButtons invite={search.invite} onError={setOAuthError} />
       {deployment === 'managed' && (
         <p className="text-center text-sm text-muted-foreground">
           No account?{' '}
-          <Link to="/sign-up" className="text-foreground underline underline-offset-4">
+          <Link
+            to="/sign-up"
+            search={search.invite ? { invite: search.invite } : {}}
+            className="text-foreground underline underline-offset-4"
+          >
             Sign up
           </Link>
         </p>

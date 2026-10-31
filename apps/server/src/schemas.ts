@@ -10,11 +10,7 @@ import type { schema } from './db/client.js';
 
 // zod schemas shared by more than one route file.
 
-export const RoleSchema = z.enum(['admin', 'member']).openapi('Role');
-
-export const SignupModeSchema = z
-  .enum(['first_user_admin', 'invite', 'open'])
-  .openapi('SignupMode');
+export const RoleSchema = z.enum(['owner', 'admin', 'member']).openapi('Role');
 
 const limitCount = z.number().int().positive();
 

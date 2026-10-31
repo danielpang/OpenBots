@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { schema } from '../db/client.js';
-import { MEMBER_DISABLED_CHANNEL, type MemberDisabled } from '../services/members.js';
+import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
 import { useTestComputer, type TestComputer } from '../test-computer.js';
 import {
@@ -173,7 +173,7 @@ describe('computer socket proxies', () => {
     expect(audit).toMatchObject({ targetId: botId, actorType: 'user' });
   });
 
-  it("closes a disabled member's sockets and hands back their screens (U3)", async () => {
+  it("closes a suspended member's sockets and hands back their screens (U3, plan 21.6)", async () => {
     await control('take');
     const pty = await opened(`${base}/api/v1/computer/pty?cols=80&rows=24`, dana);
     const screen = await opened(`${base}/api/v1/bots/${botId}/screen/vnc?control=1`, dana, [
@@ -181,10 +181,13 @@ describe('computer socket proxies', () => {
     ]);
     const closed = Promise.all([closing(pty), closing(screen)]);
     const userId = (await holder())!;
-    await t.deps.infra.bus.publish<MemberDisabled>(MEMBER_DISABLED_CHANNEL, { userId });
+    await t.deps.infra.bus.publish<MembershipEnded>(MEMBERSHIP_ENDED_CHANNEL, {
+      userId,
+      workspaceId: await t.defaultOrganization(),
+    });
     expect(await closed).toEqual([
-      { code: 1008, reason: 'account disabled' },
-      { code: 1008, reason: 'account disabled' },
+      { code: 1008, reason: 'membership ended' },
+      { code: 1008, reason: 'membership ended' },
     ]);
     await vi.waitFor(async () => expect(await holder()).toBeNull());
   });

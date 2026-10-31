@@ -13,11 +13,14 @@ import { useCallback, useState, type ReactNode } from 'react';
 import { Roster } from '../features/bots/roster.js';
 import { ConnectionIndicator } from './connection-indicator.js';
 import { NAV_LINKS } from './nav.js';
+import { webExtensions } from './extensions.js';
 import { NewDialog } from './new-dialog.js';
 import { platform as appPlatform, hasInsetTitleBar, WINDOW_DRAG } from './platform.js';
 import { newShortcutLabel, useNewShortcut } from './shortcuts.js';
 
 export function Sidebar() {
+  // The managed build's organization switcher (plan 21.5).
+  const { SidebarHeader } = webExtensions();
   const [newOpen, setNewOpen] = useState(false);
   const openNew = useCallback(() => setNewOpen(true), []);
   useNewShortcut(openNew);
@@ -27,6 +30,7 @@ export function Sidebar() {
   return (
     <nav className="flex w-60 shrink-0 flex-col border-r bg-sidebar">
       <TitleBarInset />
+      {SidebarHeader && <SidebarHeader />}
       <div className="p-3">
         <TooltipProvider delayDuration={300}>
           <Tooltip>

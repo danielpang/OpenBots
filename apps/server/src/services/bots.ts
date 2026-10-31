@@ -16,18 +16,23 @@ import { ensureInbox } from '../hooks/inbox.js';
 import { assertBotOwner } from '../ownership.js';
 import { assertBotModel } from './providers.js';
 import type { Config } from '../config.js';
-import { effectiveSettings, ensureWorkspace, raiseLimitHint } from '../workspace.js';
+import { organizationSettings, raiseLimitHint } from '../workspace.js';
 import { avatarFileStatus, invalidAvatar } from './files.js';
 import { announceMessage, storeMessage } from './messages.js';
 
 // Bots and the roster (B1 to B5, B7, B8). A Bot always comes with its one
 // transcript (a `bot_dm` chat, B4) and its `bot_state` row. Every function
-// here is owner-scoped: another user's Bot is not found.
+// here is owner-scoped within the active organization (plan 21.3): another
+// user's Bot, or the caller's own in another organization, is not found.
+// Handles, the main Bot and the roster limit are per (organization, owner).
 //
 // A new Bot is only a name and an avatar. It speaks first: its transcript
 // opens with its own message asking what to work on (`greeting`), written
 // with the Bot and costing no model call, and the owner's answer is how it
 // learns its job.
+
+/** The owner's roster lock key: one roster per (organization, owner). */
+const rosterLock = (owner: Owner) => `bots:${owner.workspaceId}:${owner.id}`;
 
 type Owner = Pick<CurrentUser, 'id' | 'workspaceId'>;
 type BotsDeps = Pick<AppDeps, 'db' | 'config' | 'infra' | 'logger'>;
@@ -170,25 +175,32 @@ export async function updateBot(
  * leave one.
  */
 async function clearMain(tx: Db, owner: Owner, exceptBotId: string) {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`bots:${owner.id}`}))`);
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${rosterLock(owner)}))`);
   await tx
     .update(schema.bots)
     .set({ isMain: false })
     .where(
       and(
         eq(schema.bots.ownerId, owner.id),
+        eq(schema.bots.workspaceId, owner.workspaceId),
         eq(schema.bots.isMain, true),
         ne(schema.bots.id, exceptBotId),
       ),
     );
 }
 
-/** The owner's main Bot (K8), if they have one. */
-export async function mainBotOf(db: Db, ownerId: string): Promise<BotRow | null> {
+/** The owner's main Bot (K8) in an organization, if they have one. */
+export async function mainBotOf(db: Db, owner: Owner): Promise<BotRow | null> {
   const [row] = await db
     .select()
     .from(schema.bots)
-    .where(and(eq(schema.bots.ownerId, ownerId), eq(schema.bots.isMain, true)));
+    .where(
+      and(
+        eq(schema.bots.ownerId, owner.id),
+        eq(schema.bots.workspaceId, owner.workspaceId),
+        eq(schema.bots.isMain, true),
+      ),
+    );
   return row ?? null;
 }
 
@@ -385,7 +397,7 @@ export async function insertBot(
   >,
 ): Promise<BotRow & { chatId: string }> {
   const ids = { workspaceId: owner.workspaceId, ownerId: owner.id };
-  const isMain = !(await mainBotOf(tx, owner.id));
+  const isMain = !(await mainBotOf(tx, owner));
   let bot: BotRow;
   try {
     [bot] = (await tx
@@ -412,8 +424,8 @@ export async function insertBot(
  * limit (B8, admin-overridable) is reached.
  */
 export async function reserveSlot(deps: BotsDeps, tx: Db, owner: Owner) {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`bots:${owner.id}`}))`);
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(tx));
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${rosterLock(owner)}))`);
+  const { limits } = await organizationSettings({ ...deps, db: tx }, owner.workspaceId);
   const [row] = await tx
     .select({ n: count() })
     .from(schema.bots)
@@ -426,12 +438,18 @@ async function assertHandleFree(tx: Db, owner: Owner, handle: string, exceptBotI
   const [taken] = await tx
     .select({ id: schema.bots.id })
     .from(schema.bots)
-    .where(and(eq(schema.bots.workspaceId, owner.workspaceId), eq(schema.bots.handle, handle)));
+    .where(
+      and(
+        eq(schema.bots.workspaceId, owner.workspaceId),
+        eq(schema.bots.ownerId, owner.id),
+        eq(schema.bots.handle, handle),
+      ),
+    );
   if (taken && taken.id !== exceptBotId) throw handleTaken(handle);
   return handle;
 }
 
-/** `base`, or `base-2`, `base-3`, ... whichever is free in the workspace. */
+/** `base`, or `base-2`, `base-3`, ... whichever is free in the owner's roster. */
 export async function freeHandle(tx: Db, owner: Owner, base: string): Promise<string> {
   for (let n = 1; ; n++) {
     const candidate = n === 1 ? base : withHandleSuffix(base, String(n));
@@ -439,7 +457,11 @@ export async function freeHandle(tx: Db, owner: Owner, base: string): Promise<st
       .select({ id: schema.bots.id })
       .from(schema.bots)
       .where(
-        and(eq(schema.bots.workspaceId, owner.workspaceId), eq(schema.bots.handle, candidate)),
+        and(
+          eq(schema.bots.workspaceId, owner.workspaceId),
+          eq(schema.bots.ownerId, owner.id),
+          eq(schema.bots.handle, candidate),
+        ),
       );
     if (!taken) return candidate;
   }

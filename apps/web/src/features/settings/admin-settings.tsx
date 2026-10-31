@@ -5,25 +5,18 @@ import type { FormEvent } from 'react';
 import { api, meQuery } from '../../app/api.js';
 import { useLocalAuth } from '../../app/deployment.js';
 
-// Admin controls (U3): signup mode, limits and how long the audit log keeps
-// its rows, on the managed service. A self-hosted
-// install has one owner and only the limits (`LimitsSettings`); the rest
-// keep their defaults there.
+// The limits (U3): a self-hosted owner's in Settings > Limits. On the
+// managed service each organization's owners and admins change them, with
+// the audit log's retention, in the settings the managed build adds (plan
+// 21.5), which reuses the pieces below.
 
 type Settings = components['schemas']['Settings'];
-type SignupMode = Settings['signupMode'];
 type Limits = Settings['limits'];
 
 export const settingsQuery = queryOptions({
   queryKey: ['settings'],
   queryFn: () => unwrap(api.GET('/api/v1/settings')),
 });
-
-export const SIGNUP_MODES: { value: SignupMode; label: string }[] = [
-  { value: 'first_user_admin', label: 'First user admin, then invites' },
-  { value: 'invite', label: 'Invite only' },
-  { value: 'open', label: 'Open' },
-];
 
 export const LIMIT_LABELS: Record<keyof Limits, string> = {
   botsPerAccount: 'Bots per account',
@@ -62,18 +55,9 @@ export function limitsPatch(form: FormData, current: Limits): Partial<Limits> {
   return limits;
 }
 
-/** The PATCH body for the managed service's Admin settings form. */
-export function settingsPatch(form: FormData, current: Limits) {
-  return {
-    signupMode: form.get('signupMode') as SignupMode,
-    limits: limitsPatch(form, current),
-    auditRetentionDays: Number(form.get('auditRetentionDays')),
-  };
-}
-
 type SettingsPatch = components['schemas']['SettingsPatch'];
 
-function useSaveSettings() {
+export function useSaveSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: SettingsPatch) => unwrap(api.PATCH('/api/v1/settings', { body })),
@@ -84,7 +68,7 @@ function useSaveSettings() {
   });
 }
 
-function LimitFields({ limits }: { limits: Limits }) {
+export function LimitFields({ limits }: { limits: Limits }) {
   const localAuth = useLocalAuth();
   return (
     <fieldset className="grid grid-cols-2 gap-4">
@@ -99,7 +83,7 @@ function LimitFields({ limits }: { limits: Limits }) {
   );
 }
 
-function SaveRow({ save }: { save: ReturnType<typeof useSaveSettings> }) {
+export function SaveRow({ save }: { save: ReturnType<typeof useSaveSettings> }) {
   return (
     <>
       {save.error && <p className="text-sm text-destructive">{save.error.message}</p>}
@@ -128,52 +112,6 @@ export function LimitsSettings() {
   return (
     <form className="flex flex-col gap-6" onSubmit={submit}>
       <LimitFields limits={current} />
-      <SaveRow save={save} />
-    </form>
-  );
-}
-
-export function AdminSettings() {
-  const { data } = useQuery(settingsQuery);
-  const save = useSaveSettings();
-  if (!data) return null;
-  const current = data.limits;
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    save.mutate(settingsPatch(new FormData(event.currentTarget), current));
-  }
-
-  return (
-    <form className="flex flex-col gap-6" onSubmit={submit}>
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        Signup mode
-        <select
-          name="signupMode"
-          defaultValue={data.signupMode}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          {SIGNUP_MODES.map((mode) => (
-            <option key={mode.value} value={mode.value}>
-              {mode.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <LimitFields limits={data.limits} />
-      <label className="flex flex-col gap-1.5 text-sm">
-        <span className="font-medium">Keep the audit log for (days)</span>
-        <Input
-          name="auditRetentionDays"
-          type="number"
-          min={1}
-          max={3650}
-          step={1}
-          defaultValue={data.auditRetentionDays}
-          required
-          className="w-40"
-        />
-      </label>
       <SaveRow save={save} />
     </form>
   );

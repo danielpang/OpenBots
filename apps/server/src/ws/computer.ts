@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { screenNumber } from '@openbot/computer';
 import { COMPUTER_OFF, COMPUTER_OFF_CLOSE_CODE, type Unsubscribe } from '@openbot/shared';
-import { and, eq, lte } from 'drizzle-orm';
+import { and, eq, inArray, lte } from 'drizzle-orm';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema } from '../db/client.js';
@@ -18,7 +18,7 @@ import {
   syncCookies,
   touchComputer,
 } from '../services/computer.js';
-import { MEMBER_DISABLED_CHANNEL, type MemberDisabled } from '../services/members.js';
+import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 import { reject, toHeaders, type UpgradeSource } from './gateway.js';
 
 // WebSocket proxies to the computer's control agent (plan 9.3, 9.4, 14.1):
@@ -202,7 +202,7 @@ export async function attachComputerProxies(
       )!,
     );
     for (const screen of released) {
-      if (screen.status === 'running') await syncCookies(deps, user.id, screen);
+      if (screen.status === 'running') await syncCookies(deps, user, screen);
     }
   }
 
@@ -236,20 +236,30 @@ export async function attachComputerProxies(
     upstream.on('error', () => upstream.terminate());
   }
 
-  // A disabled member's shell and screens close now, not when they next connect.
-  const unsubscribeDisabled: Unsubscribe = await deps.infra.bus.subscribe<MemberDisabled>(
-    MEMBER_DISABLED_CHANNEL,
-    async ({ userId }) => {
+  // A suspended or removed member's shell and screens in that organization
+  // close now, not when they next connect.
+  const unsubscribeDisabled: Unsubscribe = await deps.infra.bus.subscribe<MembershipEnded>(
+    MEMBERSHIP_ENDED_CHANNEL,
+    async ({ userId, workspaceId }) => {
       for (const [client, target] of open) {
-        if (target.user.id !== userId) continue;
+        if (target.user.id !== userId || target.user.workspaceId !== workspaceId) continue;
         // No grace: they are not coming back.
         open.delete(client);
-        client.close(1008, 'account disabled');
+        client.close(1008, 'membership ended');
       }
       await releaseScreens(
         deps,
         SYSTEM_ACTOR,
-        eq(schema.botScreens.controlledByUserId, userId),
+        and(
+          eq(schema.botScreens.controlledByUserId, userId),
+          inArray(
+            schema.botScreens.botId,
+            deps.db
+              .select({ id: schema.bots.id })
+              .from(schema.bots)
+              .where(eq(schema.bots.workspaceId, workspaceId)),
+          ),
+        )!,
       ).catch((error: unknown) =>
         deps.logger.warn(
           { err: error, userId },

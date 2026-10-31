@@ -38,12 +38,12 @@ describe('@openbot/api-client', () => {
     const fetchImpl = respond(403, { code: 'INVITE_REQUIRED', message: 'An invite is required' });
     const auth = createAuthClient('', fetchImpl);
     const error = await auth
-      .signUpEmail({ name: 'a', email: 'a@b.c', password: 'pw', inviteToken: 'obi_x' })
+      .signUpEmail({ name: 'a', email: 'a@b.c', password: 'pw' })
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ status: 403, code: 'INVITE_REQUIRED' });
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe('/api/auth/sign-up/email');
     expect(init).toMatchObject({ method: 'POST', credentials: 'include' });
-    expect(JSON.parse(init!.body as string)).toMatchObject({ inviteToken: 'obi_x' });
+    expect(JSON.parse(init!.body as string)).toMatchObject({ email: 'a@b.c' });
   });
 });

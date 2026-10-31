@@ -119,10 +119,12 @@
             "required": ["id", "email", "name", "image", "emailVerified", "createdAt"]
           },
           "role": {
-            "$ref": "#/components/schemas/Role"
+            "type": ["string", "null"],
+            "enum": ["owner", "admin", "member", null],
+            "description": "Their role in the active organization; null without one"
           },
           "workspace": {
-            "type": "object",
+            "type": ["object", "null"],
             "properties": {
               "id": {
                 "type": "string",
@@ -130,81 +132,80 @@
               },
               "name": {
                 "type": "string"
+              },
+              "suspended": {
+                "type": "boolean",
+                "description": "They are suspended here: every other route refuses them in it"
               }
             },
-            "required": ["id", "name"]
+            "required": ["id", "name", "suspended"],
+            "description": "The active organization; null when they have none"
           },
           "limits": {
-            "$ref": "#/components/schemas/Limits"
+            "type": ["object", "null"],
+            "properties": {
+              "botsPerAccount": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "botsPerGroup": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "routinesPerBot": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "skillsPerAccount": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "runRecordsPerRoutine": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookPayloadBytes": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "syncWebhookWaitSeconds": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookIpRatePerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookFailedAuthPerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookEndpointRatePerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "uploadBytes": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              }
+            },
+            "required": [
+              "botsPerAccount",
+              "botsPerGroup",
+              "routinesPerBot",
+              "skillsPerAccount",
+              "runRecordsPerRoutine",
+              "webhookPayloadBytes",
+              "syncWebhookWaitSeconds",
+              "webhookIpRatePerMin",
+              "webhookFailedAuthPerMin",
+              "webhookEndpointRatePerMin",
+              "uploadBytes"
+            ],
+            "description": "The active organization's limits; null without one"
           }
         },
         "required": ["user", "role", "workspace", "limits"]
-      },
-      "Role": {
-        "type": "string",
-        "enum": ["admin", "member"]
-      },
-      "Limits": {
-        "type": "object",
-        "properties": {
-          "botsPerAccount": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "botsPerGroup": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "routinesPerBot": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "skillsPerAccount": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "runRecordsPerRoutine": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "webhookPayloadBytes": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "syncWebhookWaitSeconds": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "webhookIpRatePerMin": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "webhookFailedAuthPerMin": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "webhookEndpointRatePerMin": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          },
-          "uploadBytes": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          }
-        },
-        "required": [
-          "botsPerAccount",
-          "botsPerGroup",
-          "routinesPerBot",
-          "skillsPerAccount",
-          "runRecordsPerRoutine",
-          "webhookPayloadBytes",
-          "syncWebhookWaitSeconds",
-          "webhookIpRatePerMin",
-          "webhookFailedAuthPerMin",
-          "webhookEndpointRatePerMin",
-          "uploadBytes"
-        ]
       },
       "ApiKey": {
         "type": "object",
@@ -272,9 +273,6 @@
       "Settings": {
         "type": "object",
         "properties": {
-          "signupMode": {
-            "$ref": "#/components/schemas/SignupMode"
-          },
           "limits": {
             "$ref": "#/components/schemas/Limits"
           },
@@ -287,18 +285,73 @@
             "description": "Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)"
           }
         },
-        "required": ["signupMode", "limits", "auditRetentionDays", "customStdioEnabled"]
+        "required": ["limits", "auditRetentionDays", "customStdioEnabled"]
       },
-      "SignupMode": {
-        "type": "string",
-        "enum": ["first_user_admin", "invite", "open"]
+      "Limits": {
+        "type": "object",
+        "properties": {
+          "botsPerAccount": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "botsPerGroup": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "routinesPerBot": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "skillsPerAccount": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "runRecordsPerRoutine": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "webhookPayloadBytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "syncWebhookWaitSeconds": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "webhookIpRatePerMin": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "webhookFailedAuthPerMin": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "webhookEndpointRatePerMin": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "uploadBytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "botsPerAccount",
+          "botsPerGroup",
+          "routinesPerBot",
+          "skillsPerAccount",
+          "runRecordsPerRoutine",
+          "webhookPayloadBytes",
+          "syncWebhookWaitSeconds",
+          "webhookIpRatePerMin",
+          "webhookFailedAuthPerMin",
+          "webhookEndpointRatePerMin",
+          "uploadBytes"
+        ]
       },
       "SettingsPatch": {
         "type": "object",
         "properties": {
-          "signupMode": {
-            "$ref": "#/components/schemas/SignupMode"
-          },
           "limits": {
             "type": "object",
             "properties": {
@@ -359,194 +412,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "Invite": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "token": {
-            "type": "string",
-            "description": "Send as `inviteToken` in the signup body; shown only once"
-          },
-          "email": {
-            "type": ["string", "null"]
-          },
-          "role": {
-            "$ref": "#/components/schemas/Role"
-          },
-          "expiresAt": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": ["id", "token", "email", "role", "expiresAt"]
-      },
-      "CreateInvite": {
-        "type": "object",
-        "properties": {
-          "email": {
-            "type": "string",
-            "format": "email",
-            "description": "Only this address can redeem it"
-          },
-          "role": {
-            "$ref": "#/components/schemas/Role"
-          },
-          "expiresInDays": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 90,
-            "default": 7
-          }
-        },
-        "additionalProperties": false
-      },
-      "PendingInvite": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "email": {
-            "type": ["string", "null"],
-            "description": "Only this address can redeem it"
-          },
-          "role": {
-            "$ref": "#/components/schemas/Role"
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "expiresAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "createdBy": {
-            "type": ["string", "null"],
-            "description": "The email of the admin who made it"
-          }
-        },
-        "required": ["id", "email", "role", "createdAt", "expiresAt", "createdBy"]
-      },
-      "Member": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The user id"
-          },
-          "name": {
-            "type": "string"
-          },
-          "email": {
-            "type": "string"
-          },
-          "role": {
-            "$ref": "#/components/schemas/Role"
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time",
-            "description": "When they joined the workspace"
-          },
-          "disabledAt": {
-            "type": ["string", "null"],
-            "format": "date-time",
-            "description": "When an admin disabled their sign-in; null while they can sign in"
-          },
-          "botCount": {
-            "type": "integer",
-            "minimum": 0
-          }
-        },
-        "required": ["id", "name", "email", "role", "createdAt", "disabledAt", "botCount"]
-      },
-      "MemberPatch": {
-        "type": "object",
-        "properties": {
-          "role": {
-            "$ref": "#/components/schemas/Role"
-          },
-          "disabled": {
-            "type": "boolean",
-            "description": "true ends their sessions, stops their API keys and refuses sign-in; their Bots and data stay. false lets them sign in again."
-          }
-        },
-        "additionalProperties": false
-      },
-      "AuditPage": {
-        "type": "object",
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/AuditEntry"
-            }
-          },
-          "nextCursor": {
-            "type": ["string", "null"],
-            "format": "uuid",
-            "description": "Pass as `cursor` for the next page; null on the last"
-          }
-        },
-        "required": ["items", "nextCursor"]
-      },
-      "AuditEntry": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "actorType": {
-            "type": "string",
-            "enum": ["user", "bot", "system"]
-          },
-          "actorId": {
-            "type": ["string", "null"],
-            "format": "uuid"
-          },
-          "actorLabel": {
-            "type": ["string", "null"],
-            "description": "The user's email or the Bot's name, while they exist"
-          },
-          "action": {
-            "type": "string",
-            "example": "auth.sign_in"
-          },
-          "targetType": {
-            "type": ["string", "null"]
-          },
-          "targetId": {
-            "type": ["string", "null"],
-            "format": "uuid"
-          },
-          "metadata": {
-            "type": "object",
-            "additionalProperties": {}
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "id",
-          "actorType",
-          "actorId",
-          "actorLabel",
-          "action",
-          "targetType",
-          "targetId",
-          "metadata",
-          "createdAt"
-        ]
       },
       "Resync": {
         "type": "object",
@@ -908,6 +773,14 @@
             "type": "string",
             "enum": ["self_hosted", "managed"],
             "description": "`self_hosted`: one account, its owner, with sign-up closed once it exists and no members, invites or audit log. `managed`: the hosted service, with admins and members."
+          },
+          "customStdio": {
+            "type": "boolean",
+            "description": "Admins may turn on custom command (stdio) connectors (OPENBOT_CUSTOM_STDIO; off by default on the managed service)"
+          },
+          "localEndpoints": {
+            "type": "boolean",
+            "description": "Admins may mark endpoints as on their own network (OPENBOT_LOCAL_ENDPOINTS; off by default on the managed service)"
           },
           "auth": {
             "type": "string",
@@ -2889,8 +2762,8 @@
           },
           "scope": {
             "type": "string",
-            "enum": ["instance", "account"],
-            "description": "`instance` providers serve every member"
+            "enum": ["organization", "account"],
+            "description": "`organization` providers serve every member's Bots; `account` providers are the caller's own"
           },
           "smallModelId": {
             "type": ["string", "null"],
@@ -3119,6 +2992,11 @@
               "$ref": "#/components/schemas/ModelInput"
             },
             "maxItems": 500
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["organization", "account"],
+            "description": "Managed service: `organization` (owners and admins; the default for them) or `account` (the caller's own; the default for members). A self-hosted install has only `organization`."
           }
         },
         "additionalProperties": false
@@ -6476,7 +6354,7 @@
     "/api/v1/me": {
       "get": {
         "tags": ["auth"],
-        "summary": "The signed-in user, their role, the workspace, and its limits",
+        "summary": "The signed-in user, the active organization, their role there, and its limits",
         "security": [
           {
             "session": []
@@ -6661,7 +6539,7 @@
     "/api/v1/settings": {
       "get": {
         "tags": ["settings"],
-        "summary": "Workspace settings",
+        "summary": "The active organization's settings",
         "security": [
           {
             "session": []
@@ -6672,7 +6550,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Workspace settings in effect",
+            "description": "The organization's settings in effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6705,7 +6583,7 @@
       },
       "patch": {
         "tags": ["settings"],
-        "summary": "Change workspace settings",
+        "summary": "Change the active organization's settings",
         "security": [
           {
             "session": []
@@ -6726,7 +6604,7 @@
         },
         "responses": {
           "200": {
-            "description": "Workspace settings in effect",
+            "description": "The organization's settings in effect",
             "content": {
               "application/json": {
                 "schema": {
@@ -6736,7 +6614,7 @@
             }
           },
           "400": {
-            "description": "Invalid settings, or a managed-only setting on a self-hosted install",
+            "description": "Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6757,499 +6635,6 @@
           },
           "403": {
             "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/admin/invites": {
-      "post": {
-        "tags": ["settings"],
-        "summary": "Create a signup invite",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateInvite"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "The invite",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Invite"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid invite",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not on a self-hosted install",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": ["settings"],
-        "summary": "List pending invites",
-        "description": "Invites nobody has redeemed that have not expired, newest first.",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Pending invites",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/PendingInvite"
-                      }
-                    }
-                  },
-                  "required": ["items"]
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not on a self-hosted install",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/admin/invites/{id}": {
-      "delete": {
-        "tags": ["settings"],
-        "summary": "Revoke an invite",
-        "description": "Its token no longer signs anyone up. A used invite cannot be revoked.",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Revoked"
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such pending invite, or a self-hosted install",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/admin/members": {
-      "get": {
-        "tags": ["settings"],
-        "summary": "List members",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Members, oldest first",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "items": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Member"
-                      }
-                    }
-                  },
-                  "required": ["items"]
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not on a self-hosted install",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/admin/members/{id}": {
-      "patch": {
-        "tags": ["settings"],
-        "summary": "Change a member's role or sign-in",
-        "description": "The workspace always keeps an admin who can sign in (409 LAST_ADMIN), and an admin cannot disable themselves (409 CANNOT_DISABLE_SELF).",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MemberPatch"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The member",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Member"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid change",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such member, or a self-hosted install",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The change would leave no admin, or disables the caller",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/admin/audit": {
-      "get": {
-        "tags": ["settings"],
-        "summary": "Read the audit log",
-        "security": [
-          {
-            "session": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "required": false,
-            "name": "actorId",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "maxLength": 100,
-              "description": "An action (`auth.sign_in`), or a group ending in `.` (`auth.`)"
-            },
-            "required": false,
-            "description": "An action (`auth.sign_in`), or a group ending in `.` (`auth.`)",
-            "name": "action",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "date-time",
-              "description": "At or after"
-            },
-            "required": false,
-            "description": "At or after",
-            "name": "from",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "date-time",
-              "description": "At or before"
-            },
-            "required": false,
-            "description": "At or before",
-            "name": "to",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "required": false,
-            "name": "cursor",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200
-            },
-            "required": false,
-            "name": "limit",
-            "in": "query"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Entries, newest first",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuditPage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid filters",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not an admin",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not on a self-hosted install",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14915,6 +14300,7 @@
       "post": {
         "tags": ["setup"],
         "summary": "Create the first account (the owner) and sign them in",
+        "description": "Self-hosted only: the managed service answers 404.",
         "requestBody": {
           "required": true,
           "content": {
@@ -14948,6 +14334,16 @@
           },
           "403": {
             "description": "The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The managed service, where people sign up instead",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15011,6 +14407,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "The managed service",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       },
@@ -15048,6 +14454,16 @@
           },
           "403": {
             "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The managed service",
             "content": {
               "application/problem+json": {
                 "schema": {

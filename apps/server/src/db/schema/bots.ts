@@ -34,7 +34,7 @@ export const bots = pgTable(
     ownerId: uuid('owner_id')
       .notNull()
       .references(() => users.id),
-    /** The `@slug`, without the `@`. Unique per workspace. */
+    /** The `@slug`, without the `@`. Unique per (organization, owner). */
     handle: text('handle').notNull(),
     name: text('name').notNull(),
     label: text('label'),
@@ -59,9 +59,9 @@ export const bots = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    unique().on(t.workspaceId, t.handle),
+    unique('bots_handle_per_owner').on(t.workspaceId, t.ownerId, t.handle),
     uniqueIndex('bots_one_main_per_owner')
-      .on(t.ownerId)
+      .on(t.workspaceId, t.ownerId)
       .where(sql`${t.isMain}`),
   ],
 );

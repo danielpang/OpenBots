@@ -1,5 +1,6 @@
 import { boolean, index, integer, pgTable, text, uuid } from 'drizzle-orm/pg-core';
 import { createdAt, id, timestamptz, updatedAt } from './columns.js';
+import { workspaces } from './workspace.js';
 
 // The better-auth tables (user, session, account, verification, apikey) in
 // Drizzle form. Leaf 0.3 wires the adapter to these with `usePlural: true` and
@@ -25,6 +26,13 @@ export const sessions = pgTable('sessions', {
   userId: uuid('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
+  /**
+   * The organization this session works in (better-auth's organization
+   * plugin, plan 21.2). Ignored on a self-hosted install, which has one.
+   */
+  activeOrganizationId: uuid('active_organization_id').references(() => workspaces.id, {
+    onDelete: 'set null',
+  }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -86,6 +94,12 @@ export const apikeys = pgTable(
     expiresAt: timestamptz('expires_at'),
     permissions: text('permissions'),
     metadata: text('metadata'),
+    /**
+     * The organization the key was made in, and the only one it opens (plan
+     * 21.2). Set by `POST /api/v1/api-keys`; a managed install refuses a key
+     * without one.
+     */
+    workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

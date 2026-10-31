@@ -148,6 +148,20 @@
       "when": 1793422141994,
       "tag": "0020_drop_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793424115444,
+      "tag": "0021_organizations",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793424122189,
+      "tag": "0022_organizations_cleanup",
+      "breakpoints": true
     }
   ]
 }

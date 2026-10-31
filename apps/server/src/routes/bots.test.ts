@@ -169,9 +169,12 @@ describe('/api/v1/bots', () => {
     expect((await call(alice, 'POST', '/bots', { name: '' })).status).toBe(400);
     expect((await call(alice, 'POST', '/bots', { name: 'X', nope: 1 })).status).toBe(400);
 
+    // Handles are per (organization, owner) (plan 21.1): another member's take
+    // nothing from, and say nothing about, Alice's.
     const res = await call(bob, 'POST', '/bots', { name: 'Grace', handle: 'grace_h' });
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ code: 'HANDLE_TAKEN' });
+    expect(res.status).toBe(201);
+    const graces = (await res.json()) as Bot;
+    expect((await call(bob, 'DELETE', `/bots/${graces.id}`)).status).toBe(204);
   });
 
   it('edits the profile', async () => {

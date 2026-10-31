@@ -55,7 +55,7 @@ export const skills = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [unique().on(t.ownerId, t.slug)],
+  (t) => [unique('skills_slug_per_owner').on(t.workspaceId, t.ownerId, t.slug)],
 );
 
 export const botSkills = pgTable(

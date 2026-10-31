@@ -25,6 +25,9 @@ const COMPOSE_VARS = [
   'POSTGRES_PASSWORD',
 ];
 
+/** Read by the managed build (ee/server), not by the core server. */
+const MANAGED_VARS = ['RESEND_API_KEY', 'OPENBOT_EMAIL_FROM'];
+
 describe('.env.example', () => {
   const example = parseEnv(readFileSync(EXAMPLE, 'utf8'));
 
@@ -34,7 +37,7 @@ describe('.env.example', () => {
   });
 
   it('lists nothing that neither the server nor compose reads', () => {
-    const known = new Set([...CONFIG_ENV_VARS, ...COMPOSE_VARS]);
+    const known = new Set([...CONFIG_ENV_VARS, ...COMPOSE_VARS, ...MANAGED_VARS]);
     expect(Object.keys(example).filter((name) => !known.has(name))).toEqual([]);
   });
 

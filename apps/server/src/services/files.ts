@@ -16,14 +16,16 @@ import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
-import { effectiveSettings, ensureWorkspace } from '../workspace.js';
+import { organizationSettings } from '../workspace.js';
 
 // Stored files (plan 4.8): chat attachments, Artifact version blobs, webhook
 // delivery bodies and avatar uploads, told apart by `purpose`. Only
 // attachments are listed to the owner or attachable to a message (plan 12.1).
 // Blobs live on local disk under OPENBOT_FILES_DIR, named by a random storage
-// key; the row records the name the user gave, the sniffed mime type and a
-// sha256.
+// key under the organization's directory (`orgs/<organization>/`, plan 21.3;
+// files from before have keys without one); the row records the name the
+// user gave, the sniffed mime type and a sha256. Every read is by a row the
+// caller owns in the active organization.
 
 type Owner = Pick<CurrentUser, 'id' | 'workspaceId'>;
 type FilesDeps = Pick<AppDeps, 'db' | 'config'>;
@@ -40,9 +42,9 @@ export const invalidAvatar = () =>
 export const fileTooLarge = (limit: number) =>
   new DomainError(413, 'FILE_TOO_LARGE', `Files can be at most ${limit} bytes`);
 
-/** The effective upload cap (`uploadBytes`, PRD section 6 style limits). */
-export async function uploadLimit(deps: FilesDeps): Promise<number> {
-  return effectiveSettings(deps.config, await ensureWorkspace(deps.db)).limits.uploadBytes;
+/** The organization's upload cap (`uploadBytes`, PRD section 6 style limits). */
+export async function uploadLimit(deps: FilesDeps, workspaceId: string): Promise<number> {
+  return (await organizationSettings(deps, workspaceId)).limits.uploadBytes;
 }
 
 type Signature = [offset: number, bytes: number[] | string];
@@ -96,11 +98,11 @@ export async function storeFile(
   owner: Owner,
   input: { name: string; bytes: Uint8Array; declaredMime?: string; purpose: FilePurpose },
 ): Promise<FileRow> {
-  const limit = await uploadLimit(deps);
+  const limit = await uploadLimit(deps, owner.workspaceId);
   if (input.bytes.byteLength > limit) throw fileTooLarge(limit);
   const mime = sniffMime(input.bytes, input.declaredMime);
   if (input.purpose === 'avatar' && !isAvatarMime(mime)) throw invalidAvatar();
-  const storageKey = randomUUID();
+  const storageKey = `${owner.workspaceId}/${randomUUID()}`;
   const target = blobPath(deps, storageKey);
   await mkdir(path.dirname(target), { recursive: true });
   // Write then rename, so a crash never leaves a half file under a real key.
@@ -270,9 +272,17 @@ export async function listAttachments(
   };
 }
 
+/** `<organization>/<key>`, or a bare `<key>` from before organizations. */
+const STORAGE_KEY = /^(?:([0-9a-f-]{36})\/)?([A-Za-z0-9_-]+)$/;
+
 function blobPath(deps: FilesDeps, storageKey: string) {
+  const match = STORAGE_KEY.exec(storageKey);
+  if (!match) throw new Error('Malformed storage key');
+  const [, workspaceId, key] = match as unknown as [string, string | undefined, string];
   // Two-character fan-out keeps any one directory small.
-  return path.join(deps.config.filesDir, storageKey.slice(0, 2), storageKey);
+  return workspaceId
+    ? path.join(deps.config.filesDir, 'orgs', workspaceId, key.slice(0, 2), key)
+    : path.join(deps.config.filesDir, key.slice(0, 2), key);
 }
 
 function cleanName(name: string) {

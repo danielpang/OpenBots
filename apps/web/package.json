@@ -5,6 +5,10 @@
   "description": "React SPA",
   "license": "BUSL-1.1",
   "type": "module",
+  "exports": {
+    "./start": "./src/start.tsx",
+    "./*": "./src/*"
+  },
   "scripts": {
     "build": "vite build",
     "dev": "vite",

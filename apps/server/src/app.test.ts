@@ -38,8 +38,6 @@ describe('app', () => {
         '/api/v1/api-keys',
         '/api/v1/api-keys/{id}',
         '/api/v1/settings',
-        '/api/v1/admin/invites',
-        '/api/v1/admin/audit',
         '/api/v1/capabilities',
         '/api/v1/bots',
         '/api/v1/bots/{id}',

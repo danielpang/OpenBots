@@ -3,11 +3,13 @@ import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { effectiveSettings } from '../workspace.js';
 
-// The audit log (plan 17 control 9, S-11). Services write one row per
-// security-relevant action: sign-in and sign-out, keys and share tokens,
-// invites, members' roles and sign-in, admin settings, providers, connectors, webhooks, approvals and the
-// computer. Admins read it through `GET /admin/audit`; rows older than the
-// workspace's `auditRetentionDays` (default 180) are trimmed by the workers.
+// The audit log (plan 17 control 9, S-11), one per organization (plan
+// 21.3). Services write one row per security-relevant action: sign-in and
+// sign-out, keys, invitations, members' roles and suspension, settings,
+// providers, connectors, webhooks, approvals and the computer. On the
+// managed service an organization's owners and admins read it through the
+// managed build's route; rows older than the organization's
+// `auditRetentionDays` (default 180) are trimmed by the workers.
 
 export type AuditActorType = 'user' | 'bot' | 'system';
 

@@ -29,6 +29,8 @@ export async function setupRequired(db: Db): Promise<boolean> {
  */
 export async function wizardRequired(deps: Pick<AppDeps, 'db' | 'config'>): Promise<boolean> {
   const { db, config } = deps;
+  // The managed service has no wizard: people sign up (plan 21.5).
+  if (config.deployment === 'managed') return false;
   if (await setupRequired(db)) return true;
   if (!config.localToken) return false;
   const [localOwner] = await db

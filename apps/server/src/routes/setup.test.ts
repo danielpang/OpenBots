@@ -32,12 +32,39 @@ describe('/api/v1/setup with sign-in rate limits on (the default)', () => {
   });
 });
 
+describe('/api/v1/setup on the managed service', () => {
+  let t: TestApp;
+  beforeAll(async () => {
+    t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
+  });
+  afterAll(() => t.close());
+
+  it('offers no wizard: people sign up, and the account step and image pull are not there', async () => {
+    const setup = await t.app.request('/api/v1/setup');
+    expect(await setup.json()).toEqual({ setupRequired: false });
+    const admin = await t.app.request('/api/v1/setup/admin', {
+      method: 'POST',
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ada', email: 'ada@example.com', password: 'correct horse' }),
+    });
+    expect(admin.status).toBe(404);
+    const cookie = (await t.signUp('owner@example.com')).cookie!;
+    for (const method of ['GET', 'POST']) {
+      const res = await t.app.request('/api/v1/setup/sandbox-image', {
+        method,
+        headers: { origin: ORIGIN, cookie },
+      });
+      expect(res.status).toBe(404);
+    }
+  });
+});
+
 describe('/api/v1/setup', () => {
   let t: TestApp;
   let admin: string;
 
   beforeAll(async () => {
-    t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
+    t = await createTestApp();
   });
   afterAll(() => t.close());
 
@@ -78,7 +105,7 @@ describe('/api/v1/setup', () => {
     expect(await setupRequired()).toBe(true);
   });
 
-  it('creates the first user as admin and signs them in', async () => {
+  it('creates the first user as the owner and signs them in', async () => {
     const res = await call(undefined, 'POST', '/setup/admin', account);
     expect(res.status, await res.clone().text()).toBe(201);
     expect(await res.json()).toEqual({
@@ -90,24 +117,21 @@ describe('/api/v1/setup', () => {
       .find((c) => c.includes('session_token='))!;
     expect(admin).toBeDefined();
     const me = (await (await call(admin, 'GET', '/me')).json()) as { role: string };
-    expect(me.role).toBe('admin');
+    expect(me.role).toBe('owner');
     expect(await setupRequired()).toBe(false);
   });
 
-  it('refuses once a user exists, even in open signup mode', async () => {
+  it('refuses once a user exists, and so does sign-up', async () => {
     const res = await call(undefined, 'POST', '/setup/admin', {
       ...account,
       email: 'mallory@example.com',
     });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { code: string }).code).toBe('SETUP_COMPLETE');
-    // Ordinary signup still works and makes a member.
-    const member = (await t.signUp('member@example.com')).cookie!;
-    expect(((await (await call(member, 'GET', '/me')).json()) as { role: string }).role).toBe(
-      'member',
-    );
-    expect((await call(member, 'GET', '/setup/sandbox-image')).status).toBe(403);
-    expect((await call(member, 'POST', '/setup/sandbox-image')).status).toBe(403);
+    // A self-hosted install has one account.
+    const { res: signUp } = await t.signUp('member@example.com');
+    expect(signUp.status).toBe(403);
+    expect((await call(undefined, 'GET', '/setup/sandbox-image')).status).toBe(401);
   });
 
   describe('the provider key step (L1) through the providers API', () => {

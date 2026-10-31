@@ -66,6 +66,7 @@ import { observeProviderStep } from '../metrics.js';
 import { announceApproval, approvalTtlMs, storeApproval } from '../services/approvals.js';
 import { artifactServices } from '../services/artifacts.js';
 import { setState } from '../services/bot-state.js';
+import { canUseProvider } from '../services/bots.js';
 import {
   chatBots,
   chatHandles,
@@ -792,6 +793,22 @@ async function resolveRunModel(
     };
   }
   const config = parsed.data;
+  // Only a provider of the Bot's organization, the organization's or its
+  // owner's own (plan 21.4), even if a row says otherwise.
+  if (
+    !options.resolveModel &&
+    !(await canUseProvider(
+      deps.db,
+      { id: bot.ownerId, workspaceId: bot.workspaceId },
+      config.provider_id,
+    ))
+  ) {
+    return {
+      ok: false,
+      text: `The model provider for @${bot.handle} no longer exists.`,
+      fix: "Pick another model in the Bot's settings.",
+    };
+  }
   let resolved: RunModel;
   try {
     resolved = options.resolveModel

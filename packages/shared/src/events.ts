@@ -215,8 +215,13 @@ const envelope = <T extends WsEventType>(type: T) =>
     seq: z.number().int().nonnegative().optional(),
     chat_id: id.optional(),
     bot_id: id.optional(),
-    /** Account-level events (`computer.status`, `connector.updated`) go to every socket of this user. */
+    /**
+     * Account-level events (`computer.status`, `connector.updated`) go to every
+     * socket of this user in the organization `workspace_id`, which they carry.
+     */
     user_id: id.optional(),
+    /** The organization an account-level event belongs to (plan 21.3). */
+    workspace_id: id.optional(),
     payload: EVENT_PAYLOADS[type],
   });
 
@@ -238,7 +243,13 @@ export type WsEventPayload<T extends WsEventType> = z.infer<(typeof EVENT_PAYLOA
 export function wsEvent<T extends WsEventType>(
   type: T,
   payload: WsEventPayload<T>,
-  scope: { chat_id?: string; bot_id?: string; user_id?: string; seq?: number } = {},
+  scope: {
+    chat_id?: string;
+    bot_id?: string;
+    user_id?: string;
+    workspace_id?: string;
+    seq?: number;
+  } = {},
 ): WsEventOf<T> {
   return { type, ts: Date.now(), ...scope, payload } as WsEventOf<T>;
 }

@@ -19,7 +19,7 @@ export const chatsQuery = queryOptions({
 });
 
 /** The group limit from `/me`, or the default before it loads. */
-export function groupLimit(limits: { botsPerGroup?: number } | undefined): number {
+export function groupLimit(limits: { botsPerGroup?: number } | null | undefined): number {
   return limits?.botsPerGroup ?? DEFAULT_LIMITS.botsPerGroup;
 }
 

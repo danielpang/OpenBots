@@ -82,7 +82,10 @@ describe('database', () => {
 
   beforeAll(async () => {
     t = await createTestDb();
-    const [workspace] = await t.db.insert(schema.workspaces).values({ name: 'Home' }).returning();
+    const [workspace] = await t.db
+      .insert(schema.workspaces)
+      .values({ name: 'Home', slug: 'home' })
+      .returning();
     const [owner] = await t.db
       .insert(schema.users)
       .values({ name: 'Ada', email: 'ada@example.com' })
@@ -249,7 +252,7 @@ describe('test databases', () => {
   });
 
   it('each start migrated and empty, and do not share rows', async () => {
-    await a.db.insert(schema.workspaces).values({ name: 'Only in a' });
+    await a.db.insert(schema.workspaces).values({ name: 'Only in a', slug: 'only-in-a' });
     expect(await a.db.select().from(schema.workspaces)).toHaveLength(1);
     expect(await b.db.select().from(schema.workspaces)).toEqual([]);
     await expect(migrate(b.db)).resolves.toBeUndefined();

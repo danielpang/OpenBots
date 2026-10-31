@@ -109,6 +109,8 @@ const envSchema = z.object({
   OPENBOT_LOCAL_TOKEN: optional(
     z.string().min(32, { message: 'must be 32 characters or more (the Mac app generates one)' }),
   ),
+  OPENBOT_LOCAL_ENDPOINTS: optional(z.stringbool()),
+  OPENBOT_CUSTOM_STDIO: optional(z.stringbool()),
   OPENBOT_SIGNUP_MODE: withDefault(
     z.enum(['first_user_admin', 'invite', 'open']),
     'first_user_admin',
@@ -188,8 +190,27 @@ export interface Config {
    * sign-in, sign-up or sign-out. Only the app's main process holds it.
    */
   localToken?: string;
-  /** Who may sign up after the first user. Managed only; self-hosted is always closed. */
+  /**
+   * Who may sign up on the managed service (plan 21.6): `open` lets anyone
+   * sign up and make an organization; `invite` and `first_user_admin` (its
+   * old name) let only the first user and people with a pending invitation.
+   * Self-hosted is always closed after its owner.
+   */
   signupMode: 'first_user_admin' | 'invite' | 'open';
+  /**
+   * Whether admins may mark a provider, connector or event subscription as
+   * on their own network, so it may reach private addresses (S-8,
+   * OPENBOT_LOCAL_ENDPOINTS). On by default for a self-hosted install; off by
+   * default on the managed service, whose network every organization shares.
+   */
+  localEndpoints: boolean;
+  /**
+   * Whether an organization's admins may turn custom stdio connectors on at
+   * all (S-1, OPENBOT_CUSTOM_STDIO): each runs a command on the server. On by
+   * default for a self-hosted install; off by default on the managed
+   * service, whose server every organization shares.
+   */
+  customStdio: boolean;
   filesDir: string;
   /** The catalog's pre-installed stdio servers (S-20). */
   mcpCatalog: CatalogInstall;
@@ -281,6 +302,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deployment: e.OPENBOT_DEPLOYMENT,
     localToken: e.OPENBOT_LOCAL_TOKEN,
     signupMode: e.OPENBOT_SIGNUP_MODE,
+    localEndpoints: e.OPENBOT_LOCAL_ENDPOINTS ?? e.OPENBOT_DEPLOYMENT === 'self_hosted',
+    customStdio: e.OPENBOT_CUSTOM_STDIO ?? e.OPENBOT_DEPLOYMENT === 'self_hosted',
     filesDir: e.OPENBOT_FILES_DIR,
     mcpCatalog: { dir: e.OPENBOT_MCP_DIR, allowNpx: e.OPENBOT_MCP_NPX_FALLBACK },
     role: e.OPENBOT_ROLE,

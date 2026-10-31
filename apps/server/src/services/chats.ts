@@ -6,7 +6,7 @@ import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertChatOwner, ownedBotIds } from '../ownership.js';
-import { ensureWorkspace, effectiveSettings } from '../workspace.js';
+import { organizationSettings } from '../workspace.js';
 import { postMessage, type ChatRow } from './messages.js';
 
 // Group and Bot-to-Bot chats (plan 4.2, 7; C4, C6, B8). A group is the owner
@@ -30,8 +30,8 @@ export const groupTooSmall = () =>
 export const notAGroup = () =>
   new DomainError(400, 'NOT_A_GROUP', 'Members can only change in a group chat');
 
-async function botsPerGroup(deps: ChatsDeps, db: Db = deps.db) {
-  return effectiveSettings(deps.config, await ensureWorkspace(db)).limits.botsPerGroup;
+async function botsPerGroup(deps: ChatsDeps, workspaceId: string) {
+  return (await organizationSettings(deps, workspaceId)).limits.botsPerGroup;
 }
 
 /** The ids of the chat's Bots: its one Bot, its pair, or its members in join order. */
@@ -112,7 +112,7 @@ export async function createGroup(
   input: { botIds: string[]; title?: string | null },
 ): Promise<ChatRow> {
   const botIds = [...new Set(input.botIds)];
-  const max = await botsPerGroup(deps);
+  const max = await botsPerGroup(deps, owner.workspaceId);
   if (botIds.length < MIN_GROUP_BOTS || botIds.length > max) throw groupSize(max);
   const owned = await ownedBotIds(deps.db, owner, botIds);
   if (owned.size !== botIds.length) throw notFound('Bot not found');
@@ -157,7 +157,7 @@ export async function addMembers(
   const wanted = [...new Set(botIds)];
   const owned = await ownedBotIds(deps.db, owner, wanted);
   if (owned.size !== wanted.length) throw notFound('Bot not found');
-  const max = await botsPerGroup(deps);
+  const max = await botsPerGroup(deps, owner.workspaceId);
   const added = await deps.db.transaction(async (tx) => {
     await lockChat(tx, chatId);
     const present = new Set(await chatBotIds(tx, chat));

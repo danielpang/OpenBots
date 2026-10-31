@@ -74,7 +74,7 @@ const FORM_OVERHEAD = 64 * 1024;
 
 /** Refuses an upload body over the effective `uploadBytes` before parsing it. */
 const limitUpload: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const limit = await uploadLimit(c.var.deps);
+  const limit = await uploadLimit(c.var.deps, c.var.user.workspaceId);
   return bodyLimit({
     maxSize: limit + FORM_OVERHEAD,
     onError: () => {

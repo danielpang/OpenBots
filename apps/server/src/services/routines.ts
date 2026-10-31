@@ -45,7 +45,7 @@ import { parseTriggerRule } from '../hooks/match.js';
 import { assertBotOwner } from '../ownership.js';
 import { recordAudit, userActor } from './audit.js';
 import type { Config } from '../config.js';
-import { effectiveSettings, ensureWorkspace, raiseLimitHint } from '../workspace.js';
+import { organizationSettings, raiseLimitHint } from '../workspace.js';
 import { onRunStatus, onWidgetAction } from './hooks.js';
 import { announceMessage, postMessage, storeMessage } from './messages.js';
 import { insertRun, scheduleRun, TERMINAL_STATUSES, type RunInput, type RunRow } from './runs.js';
@@ -208,7 +208,10 @@ export async function createRoutine(
   const enabled = input.enabled ?? true;
   const create = async (tx: Db) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`routines:${botId}`}))`);
-    const { limits } = effectiveSettings(deps.config, await ensureWorkspace(tx));
+    const { limits } = await organizationSettings(
+      { config: deps.config, db: tx },
+      owner.workspaceId,
+    );
     const [row] = await tx
       .select({ n: count() })
       .from(schema.routines)
@@ -242,7 +245,13 @@ async function assertSkillOwner(db: Db, owner: Owner, skillId: string) {
   const [skill] = await db
     .select({ id: schema.skills.id })
     .from(schema.skills)
-    .where(and(eq(schema.skills.id, skillId), eq(schema.skills.ownerId, owner.id)));
+    .where(
+      and(
+        eq(schema.skills.id, skillId),
+        eq(schema.skills.ownerId, owner.id),
+        eq(schema.skills.workspaceId, owner.workspaceId),
+      ),
+    );
   if (!skill) throw notFound('Skill not found');
 }
 
@@ -576,7 +585,10 @@ export async function claimRoutineRun(
     .update(schema.routines)
     .set({ lastRunAt: new Date() })
     .where(eq(schema.routines.id, routine.id));
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(tx));
+  const { limits } = await organizationSettings(
+    { config: deps.config, db: tx },
+    routine.workspaceId,
+  );
   await trimRoutineRuns(tx, routine.id, limits.runRecordsPerRoutine);
   return { routineRun: routineRun!, run };
 }
@@ -615,7 +627,10 @@ async function skipRoutineRun(
     .onConflictDoNothing({ target: [schema.routineRuns.routineId, schema.routineRuns.slot] })
     .returning();
   if (!record) return null;
-  const { limits } = effectiveSettings(deps.config, await ensureWorkspace(tx));
+  const { limits } = await organizationSettings(
+    { config: deps.config, db: tx },
+    routine.workspaceId,
+  );
   await trimRoutineRuns(tx, routine.id, limits.runRecordsPerRoutine);
   const repeated = previous && !previous.runId && previous.exception === problem;
   if (repeated) return { skipped: problem, routineRun: record, message: null };

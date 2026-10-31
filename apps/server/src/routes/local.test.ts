@@ -192,7 +192,7 @@ describe('POST /api/v1/local/session on a new install', () => {
   let ownerId: string;
   let cookie: string;
 
-  it('creates the owner, an admin with no password, and signs them in', async () => {
+  it('creates the owner, with no password, and signs them in', async () => {
     const res = await localSession(t, { body: { name: 'Ada Lovelace' } });
     expect(res.status, await res.clone().text()).toBe(200);
     expect(res.headers.get('access-control-allow-origin')).toBeNull();
@@ -204,7 +204,7 @@ describe('POST /api/v1/local/session on a new install', () => {
     const caller = await me(t, cookie);
     expect(caller.status).toBe(200);
     expect(caller.body.user).toMatchObject({ id: ownerId, name: 'Ada Lovelace' });
-    expect(caller.body.role).toBe('admin');
+    expect(caller.body.role).toBe('owner');
     expect(caller.body.user.email).toBe(LOCAL_OWNER_EMAIL);
     // No credential to sign in with.
     const accounts = await t.testDb.db

@@ -320,3 +320,81 @@ describe('drop_templates (B2)', () => {
     expect(workspace!.settings).toEqual({ signupMode: 'open' });
   });
 });
+
+describe('organizations backfill (plan 21.1)', () => {
+  let client: PGlite;
+  let db: Db;
+  const ws = ID(41);
+  const [ada, bea, cy] = [ID(42), ID(43), ID(44)];
+
+  beforeAll(async () => {
+    client = new PGlite({ extensions: { vector } });
+    db = drizzle(client, { schema }) as unknown as Db;
+    await migrateBefore(db, 'organizations');
+    await client.exec(`
+      INSERT INTO workspaces (id, name) VALUES ('${ws}', 'Acme & Co');
+      INSERT INTO users (id, name, email) VALUES
+        ('${ada}', 'Ada', 'ada@example.com'),
+        ('${bea}', 'Bea', 'bea@example.com'),
+        ('${cy}', 'Cy', 'cy@example.com');
+      INSERT INTO workspace_members (workspace_id, user_id, role, disabled_at, created_at) VALUES
+        ('${ws}', '${ada}', 'admin', NULL, now() - interval '3 days'),
+        ('${ws}', '${bea}', 'admin', NULL, now() - interval '2 days'),
+        ('${ws}', '${cy}', 'member', now(), now() - interval '1 day');
+      INSERT INTO sessions (expires_at, token, user_id) VALUES (now() + interval '1 day', 't1', '${bea}');
+      INSERT INTO apikeys (key, reference_id) VALUES ('hash', '${cy}');
+      INSERT INTO invites (workspace_id, token_hash, email, role, created_by, expires_at, used_at) VALUES
+        ('${ws}', 'h1', 'dee@example.com', 'member', '${ada}', now() + interval '1 day', NULL),
+        ('${ws}', 'h2', 'eve@example.com', 'admin', '${ada}', now() + interval '1 day', now()),
+        ('${ws}', 'h3', NULL, 'member', '${ada}', now() + interval '1 day', NULL);
+    `);
+    await migrateBefore(db);
+  }, 60_000);
+
+  afterAll(async () => {
+    await client?.close();
+  });
+
+  it('makes the workspace an organization with a slug', async () => {
+    const [row] = await db.select().from(schema.workspaces);
+    expect(row!.slug).toBe(`acme-co-${ws.replace(/-/g, '').slice(0, 8)}`);
+  });
+
+  it('makes the earliest admin the owner and keeps the other roles', async () => {
+    const rows = await db
+      .select({
+        userId: schema.workspaceMembers.userId,
+        role: schema.workspaceMembers.role,
+        suspended: schema.workspaceMembers.suspendedAt,
+      })
+      .from(schema.workspaceMembers)
+      .orderBy(schema.workspaceMembers.createdAt);
+    expect(rows.map((r) => [r.userId, r.role, r.suspended !== null])).toEqual([
+      [ada, 'owner', false],
+      [bea, 'admin', false],
+      [cy, 'member', true],
+    ]);
+  });
+
+  it('points sessions and API keys at their organization', async () => {
+    const [session] = await db.select().from(schema.sessions);
+    expect(session!.activeOrganizationId).toBe(ws);
+    const [key] = await db.select().from(schema.apikeys);
+    expect(key!.workspaceId).toBe(ws);
+  });
+
+  it('keeps the invites that name an address, as pending or accepted', async () => {
+    const rows = await db
+      .select({
+        email: schema.invites.email,
+        status: schema.invites.status,
+        inviterId: schema.invites.inviterId,
+      })
+      .from(schema.invites)
+      .orderBy(schema.invites.email);
+    expect(rows).toEqual([
+      { email: 'dee@example.com', status: 'pending', inviterId: ada },
+      { email: 'eve@example.com', status: 'accepted', inviterId: ada },
+    ]);
+  });
+});

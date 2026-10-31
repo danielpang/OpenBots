@@ -1,14 +1,15 @@
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { schema } from '../db/client.js';
-import { recordAudit, trimAuditLog } from '../services/audit.js';
+import { listAudit, trimAuditLog } from '../services/audit.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
 import { ensureWorkspace } from '../workspace.js';
 
-// The audit log (plan 17 control 9, S-11): what is recorded, the admin
-// reader `GET /admin/audit` and its filters, and the retention trim. The
-// computer's rows are covered in routes/computer.test.ts, webhooks' in
-// hooks/ingress.test.ts.
+// The audit log (plan 17 control 9, S-11): what is recorded, per
+// organization (plan 21.3), and the retention trim. The managed service's
+// reader, `GET /api/v1/organizations/audit`, and its filters are tested in
+// ee/server. The computer's rows are covered in routes/computer.test.ts,
+// webhooks' in hooks/ingress.test.ts.
 
 interface Entry {
   id: string;
@@ -69,10 +70,21 @@ describe('audit log', () => {
       body: JSON.stringify(body),
     });
 
-  const read = async (query = '', cookie = admin) => {
-    const res = await call(cookie, 'GET', `/admin/audit${query}`);
-    expect(res.status, await res.clone().text()).toBe(200);
-    return (await res.json()) as Page;
+  /** The organization's rows, as the managed service's reader lists them. */
+  const read = async (query = ''): Promise<Page> => {
+    const params = new URLSearchParams(query.replace(/^\?/, ''));
+    const page = await listAudit(t.deps.db, workspaceId, {
+      ...(params.get('action') ? { action: params.get('action')! } : {}),
+      limit: Number(params.get('limit') ?? 50),
+    });
+    return {
+      items: page.items.map((row) => ({
+        ...row,
+        metadata: row.metadata as Record<string, unknown>,
+        createdAt: row.createdAt.toISOString(),
+      })),
+      nextCursor: page.nextCursor,
+    };
   };
 
   /** The rows for one action, oldest first. */
@@ -118,11 +130,9 @@ describe('audit log', () => {
         actorId: memberId,
         metadata: expect.objectContaining({ email: 'member@example.com', status: 401 }),
       }),
-      expect.objectContaining({
-        actorId: null,
-        metadata: expect.objectContaining({ email: 'nobody@example.com', status: 401 }),
-      }),
     ]);
+    // An unknown address belongs to no organization, so none records it.
+    expect(JSON.stringify(await read('?limit=200'))).not.toContain('nobody@example.com');
     // The password tried is never kept.
     expect(JSON.stringify(failed)).not.toContain('wrong password');
   });
@@ -142,42 +152,17 @@ describe('audit log', () => {
     expect(JSON.stringify(await read())).not.toContain(key.key);
   });
 
-  it('records invites made and redeemed, and settings changes', async () => {
-    const invite = (await (
-      await call(admin, 'POST', '/admin/invites', { email: 'new@example.com' })
-    ).json()) as { id: string; token: string };
-    expect(await rows('invite.create')).toEqual([
-      expect.objectContaining({
-        actorId: adminId,
-        targetType: 'invite',
-        targetId: invite.id,
-        metadata: expect.objectContaining({ email: 'new@example.com', role: 'member' }),
-      }),
-    ]);
-    expect(JSON.stringify(await read())).not.toContain(invite.token);
-
-    const patched = await call(admin, 'PATCH', '/settings', {
-      signupMode: 'invite',
-      auditRetentionDays: 90,
-    });
-    expect(await patched.json()).toMatchObject({ signupMode: 'invite', auditRetentionDays: 90 });
-    const { res } = await t.signUp('new@example.com', { inviteToken: invite.token });
-    expect(res.status).toBe(200);
-    const [newUser] = await t.deps.db
-      .select()
-      .from(schema.users)
-      .where(eq(schema.users.email, 'new@example.com'));
-    expect(await rows('invite.redeem')).toEqual([
-      expect.objectContaining({ actorId: newUser!.id, targetId: invite.id }),
-    ]);
+  it('records settings changes', async () => {
+    const patched = await call(admin, 'PATCH', '/settings', { auditRetentionDays: 90 });
+    expect(await patched.json()).toMatchObject({ auditRetentionDays: 90 });
     expect(await rows('settings.update')).toEqual([
       expect.objectContaining({
         actorId: adminId,
         targetId: workspaceId,
-        metadata: { signupMode: 'invite', auditRetentionDays: 90 },
+        metadata: { auditRetentionDays: 90 },
       }),
     ]);
-    await call(admin, 'PATCH', '/settings', { signupMode: 'open', auditRetentionDays: 180 });
+    await call(admin, 'PATCH', '/settings', { auditRetentionDays: 180 });
   });
 
   it('records providers and connectors created, updated and deleted, without secrets', async () => {
@@ -254,80 +239,6 @@ describe('audit log', () => {
       ['event_subscription.update', { enabled: false }],
       ['event_subscription.delete', {}],
     ]);
-  });
-
-  it('is for admins only', async () => {
-    expect((await call(member, 'GET', '/admin/audit')).status).toBe(403);
-    expect((await call(undefined, 'GET', '/admin/audit')).status).toBe(401);
-    const key = (await (await call(member, 'POST', '/api-keys', { name: 'k' })).json()) as {
-      key: string;
-    };
-    const viaKey = await t.app.request('/api/v1/admin/audit', {
-      headers: { authorization: `Bearer ${key.key}` },
-    });
-    expect(viaKey.status).toBe(403);
-  });
-
-  it('filters by actor, action and time, and pages newest first', async () => {
-    const { db } = t.deps;
-    // A separate workspace's rows never show.
-    const [other] = await db.insert(schema.workspaces).values({ name: 'Other' }).returning();
-    await recordAudit(db, {
-      workspaceId: other!.id,
-      actor: { type: 'system', id: null },
-      action: 'probe.elsewhere',
-    });
-    const at = (iso: string) => new Date(iso);
-    for (const [action, createdAt] of [
-      ['probe.one', '2026-01-01T00:00:00Z'],
-      ['probe.two', '2026-02-01T00:00:00Z'],
-      ['probe.three', '2026-03-01T00:00:00Z'],
-    ] as const) {
-      await db.insert(schema.auditLog).values({
-        workspaceId,
-        actorType: 'user',
-        actorId: adminId,
-        action,
-        createdAt: at(createdAt),
-      });
-    }
-
-    const probes = await read('?action=probe.');
-    expect(probes.items.map((e) => e.action)).toEqual(['probe.three', 'probe.two', 'probe.one']);
-    expect((await read('?action=probe.two')).items.map((e) => e.action)).toEqual(['probe.two']);
-    // `_` and `%` in a group prefix are literal.
-    expect((await read('?action=probe_%25.')).items).toEqual([]);
-    expect(
-      (await read('?action=probe.&from=2026-01-15T00:00:00Z&to=2026-03-01T00:00:00Z')).items.map(
-        (e) => e.action,
-      ),
-    ).toEqual(['probe.three', 'probe.two']);
-
-    const byMember = await read(`?actorId=${memberId}&limit=200`);
-    expect(byMember.items.length).toBeGreaterThan(0);
-    expect(byMember.items.every((e) => e.actorId === memberId)).toBe(true);
-    expect(byMember.items.some((e) => e.action.startsWith('probe.'))).toBe(false);
-
-    const first = await read('?action=probe.&limit=2');
-    expect(first.items.map((e) => e.action)).toEqual(['probe.three', 'probe.two']);
-    const second = await read(`?action=probe.&limit=2&cursor=${first.nextCursor}`);
-    expect(second.items.map((e) => e.action)).toEqual(['probe.one']);
-    expect(second.nextCursor).toBeNull();
-
-    // Rows written in one instant still page without gaps or repeats.
-    const all = await read('?limit=200');
-    const seen: string[] = [];
-    let cursor: string | null = null;
-    do {
-      const page: Page = await read(`?limit=3${cursor ? `&cursor=${cursor}` : ''}`);
-      seen.push(...page.items.map((e) => e.id));
-      cursor = page.nextCursor;
-    } while (cursor);
-    expect(seen).toEqual(all.items.map((e) => e.id));
-
-    expect((await call(admin, 'GET', '/admin/audit?from=yesterday')).status).toBe(400);
-    expect((await call(admin, 'GET', '/admin/audit?limit=500')).status).toBe(400);
-    expect(JSON.stringify(all)).not.toContain('probe.elsewhere');
   });
 
   it('trims rows past the retention period, 180 days unless changed', async () => {

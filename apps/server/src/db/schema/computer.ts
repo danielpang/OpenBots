@@ -8,26 +8,29 @@ import { workspaceId } from './workspace.js';
 
 export const computerProvider = pgEnum('computer_provider', ['docker', 'remote']);
 
-/** One per account (K1). */
-export const computers = pgTable('computers', {
-  id: id(),
-  workspaceId: workspaceId(),
-  ownerId: uuid('owner_id')
-    .notNull()
-    .unique()
-    .references(() => users.id),
-  provider: computerProvider('provider').notNull().default('docker'),
-  spec: jsonb('spec').notNull().default({}),
-  status: text('status').notNull(),
-  containerId: text('container_id'),
-  agentUrl: text('agent_url'),
-  agentToken: bytea('agent_token'),
-  volumeName: text('volume_name'),
-  alwaysOn: boolean('always_on').notNull().default(false),
-  idleTimeoutMin: integer('idle_timeout_min'),
-  lastUsedAt: timestamptz('last_used_at'),
-  createdAt: createdAt(),
-});
+/** One per account in each organization (K1, plan 21.3). */
+export const computers = pgTable(
+  'computers',
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    provider: computerProvider('provider').notNull().default('docker'),
+    spec: jsonb('spec').notNull().default({}),
+    status: text('status').notNull(),
+    containerId: text('container_id'),
+    agentUrl: text('agent_url'),
+    agentToken: bytea('agent_token'),
+    volumeName: text('volume_name'),
+    alwaysOn: boolean('always_on').notNull().default(false),
+    idleTimeoutMin: integer('idle_timeout_min'),
+    lastUsedAt: timestamptz('last_used_at'),
+    createdAt: createdAt(),
+  },
+  (t) => [unique('computers_one_per_owner').on(t.workspaceId, t.ownerId)],
+);
 
 /** One screen per Bot (K2); `controlled_by_user_id` set during takeover (K3). */
 export const botScreens = pgTable(

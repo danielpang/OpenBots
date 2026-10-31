@@ -44,7 +44,10 @@ describe('rotateMasterKey', () => {
 
   beforeAll(async () => {
     t = await createTestDb();
-    const [workspace] = await t.db.insert(schema.workspaces).values({ name: 'Home' }).returning();
+    const [workspace] = await t.db
+      .insert(schema.workspaces)
+      .values({ name: 'Home', slug: 'home' })
+      .returning();
     const [owner] = await t.db
       .insert(schema.users)
       .values({ name: 'Ada', email: 'ada@example.com' })
