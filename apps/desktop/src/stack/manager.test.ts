@@ -770,6 +770,36 @@ describe('the stack port', () => {
     expect(verbs(exec)).toContain('up');
   });
 
+  it('applies new settings to a stack an older app left running, and leaves a current one alone', async () => {
+    const running = {
+      code: 0,
+      stdout: '{"Service":"openbot","State":"running","Health":"healthy"}',
+      stderr: '',
+    };
+    // Recorded by an app from before the local token and the loopback port.
+    const old = `POSTGRES_PASSWORD=pw\n${PROJECT_ONLY}OPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\n`;
+    const { manager, files, exec } = makeManager({
+      files: memoryFiles({ [paths.envFile]: old }),
+      exec: composeExec({ ...IMAGES_HERE, ps: running }),
+    });
+    expect(await manager.refresh()).toBe(true);
+    const env = files.data.get(paths.envFile)!;
+    expect(envValue(env, 'OPENBOT_LOCAL_TOKEN')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(envValue(env, 'OPENBOT_HTTP_BIND')).toBe('127.0.0.1:');
+    expect(verbs(exec).filter((v) => v === 'up')).toHaveLength(1);
+    // Now current: nothing to do.
+    expect(await manager.refresh()).toBe(false);
+    expect(verbs(exec).filter((v) => v === 'up')).toHaveLength(1);
+  });
+
+  it('leaves a stopped stack to start', async () => {
+    const old = `POSTGRES_PASSWORD=pw\n${RECORDED}`;
+    const { manager, files, exec } = makeManager({ files: memoryFiles({ [paths.envFile]: old }) });
+    expect(await manager.refresh()).toBe(false);
+    expect(files.data.get(paths.envFile)).toBe(old);
+    expect(verbs(exec)).not.toContain('up');
+  });
+
   it('moves a stopped stack to a free port on request, with its localhost URL', async () => {
     const env = `OPENBOT_HTTP_PORT=3000\nOPENBOT_PUBLIC_URL=http://localhost:3000\n${RECORDED}`;
     const { manager, files } = makeManager({

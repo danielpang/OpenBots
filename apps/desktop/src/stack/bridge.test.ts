@@ -48,6 +48,7 @@ function fakeManager(overrides: Partial<StackManager> = {}): StackManager {
     status: vi.fn(async () => status),
     start: vi.fn(async () => status),
     stop: vi.fn(async () => status),
+    refresh: vi.fn(async () => false),
     upgrade: vi.fn(async () => status),
     changePort: vi.fn(async () => status),
     useOwnNetwork: vi.fn(async () => status),

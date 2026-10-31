@@ -37,7 +37,10 @@ export interface LauncherWindow {
   showWelcome(): Promise<void>;
 }
 
-export type LauncherStack = Pick<StackManager, 'status' | 'start' | 'stop' | 'pendingUpgrade'>;
+export type LauncherStack = Pick<
+  StackManager,
+  'status' | 'start' | 'stop' | 'refresh' | 'pendingUpgrade'
+>;
 
 export interface LauncherOptions {
   profiles: ProfileStore;
@@ -144,6 +147,8 @@ export function createLauncher(options: LauncherOptions): Launcher {
         return 'welcome';
       }
       const profile = view.profiles.find((p) => p.id === view.activeId)!;
+      // A stack left running by an older app gets this one's settings first.
+      if (profile.kind === 'local') await stack.refresh().catch(() => false);
       // The start page already shows why; a stopped stack's start there moves it to the release.
       if (!(await window.openServer(profile))) return 'start';
       // The app was updated past the local stack's release: the start page moves it.

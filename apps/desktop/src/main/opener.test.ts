@@ -91,6 +91,7 @@ function setup(
     status: vi.fn(async () => options.status ?? running),
     start: vi.fn(async () => running),
     stop: vi.fn(async () => stopped),
+    refresh: vi.fn(async () => false),
     pendingUpgrade: vi.fn(async () => null),
   };
   const gate = createServerGate({

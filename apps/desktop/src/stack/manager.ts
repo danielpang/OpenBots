@@ -193,6 +193,13 @@ export interface StackManager {
   start(onPhase?: StackProgressListener): Promise<StackStatus>;
   stop(): Promise<StackStatus>;
   /**
+   * For a stack that is already running when the app opens: brings `.env` up
+   * to date as a start would (a local token, the loopback port, and so on)
+   * and, only when that changed it, runs `compose up` so the services take
+   * the new settings. True when it did. A stopped stack is left to `start`.
+   */
+  refresh(): Promise<boolean>;
+  /**
    * Like `start`, but always pulls first: the images of the app's release, or
    * newer ones for a moving tag such as `latest`.
    */
@@ -901,6 +908,17 @@ export function createStackManager(options: StackManagerOptions): StackManager {
       const choice = await freeSandbox(docker.cli, [leaving]);
       await files.writeFile(paths.envFile, withSandbox(current, choice));
       return statusOf(docker, name);
+    },
+
+    async refresh() {
+      const docker = await detectHere();
+      if (docker.state !== 'ready' || !(await files.exists(paths.envFile))) return false;
+      const name = await project(docker.cli);
+      if (!anyRunning(await services(docker.cli, name))) return false;
+      const before = await files.readFile(paths.envFile);
+      if ((await ensureEnv(docker.cli, name)) === before) return false;
+      await up(false);
+      return true;
     },
 
     async stop() {

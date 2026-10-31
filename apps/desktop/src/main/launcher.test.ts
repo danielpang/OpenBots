@@ -63,6 +63,7 @@ function setup(
     status: vi.fn(async () => options.status ?? running),
     start: vi.fn(async () => running),
     stop: vi.fn(async () => ({ ...running, services: [] })),
+    refresh: vi.fn(async () => false),
     pendingUpgrade: vi.fn(async () => null as { from: string; to: string } | null),
   };
   const window = {
@@ -216,6 +217,18 @@ describe('Run OpenBots on this Mac', () => {
     stack.pendingUpgrade.mockResolvedValueOnce({ from: '1.0.0', to: '1.1.0' });
     await expect(launcher.launch()).resolves.toBe('start');
     expect(window.showStart).not.toHaveBeenCalled();
+  });
+
+  it('brings a running local stack up to date before opening it, and only a local one', async () => {
+    const local = setup({ file: { activeId: 'local', profiles: [] } });
+    await local.launcher.launch();
+    expect(local.stack.refresh).toHaveBeenCalledOnce();
+    expect(local.stack.refresh.mock.invocationCallOrder[0]).toBeLessThan(
+      local.window.openServer.mock.invocationCallOrder[0]!,
+    );
+    // A failed refresh still opens the app.
+    local.stack.refresh.mockRejectedValueOnce(new Error('docker went away'));
+    await expect(local.launcher.launch()).resolves.toBe('server');
   });
 
   it('moves an older stack to the app release on launch', async () => {
