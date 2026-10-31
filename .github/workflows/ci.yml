@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit
+      - run: node scripts/check-licenses.mjs
+      - run: pnpm lint
+      - run: pnpm typecheck
+      # The committed OpenAPI document and the client generated from it must
+      # match the routes: regenerate both and fail on any difference.
+      - name: Check the OpenAPI document and client are current
+        run: |
+          pnpm --filter @openbot/server openapi
+          pnpm exec prettier --write packages/api-client/openapi.json
+          pnpm --filter @openbot/api-client generate
+          if ! git diff --exit-code -- packages/api-client; then
+            echo "::error::packages/api-client is stale; run the three commands above and commit the result"
+            exit 1
+          fi
+      - run: pnpm test
+      - run: pnpm build
+
+  server-image:
+    runs-on: ubuntu-24.04
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      # Every Dockerfile, with the repository's .hadolint.yaml.
+      - name: Lint the Dockerfiles
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro" -w /repo hadolint/hadolint:v2.12.0
+          hadolint docker/server.Dockerfile docker/computer.Dockerfile
+          docker/sandbox-firewall.Dockerfile
+      - name: Validate the compose files
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose --profile s3 --profile ngrok --profile cloudflare config --quiet
+          docker compose --project-directory . -f docker/docker-compose.yml -f docker/docker-compose.dev.yml config --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/server.Dockerfile
+          push: false
+          load: true
+          tags: openbot-ci/server:ci
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+      - name: Smoke-test the stack
+        run: |
+          key="$(docker run --rm openbot-ci/server:ci keygen)"
+          # As install.sh does: one database password in both places.
+          db="$(openssl rand -hex 24)"
+          sed -i "s|^OPENBOT_MASTER_KEY=.*|OPENBOT_MASTER_KEY=$key|; s|^OPENBOT_IMAGE_PREFIX=.*|OPENBOT_IMAGE_PREFIX=openbot-ci|; s|^OPENBOT_VERSION=.*|OPENBOT_VERSION=ci|; s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$db|; s|:change-me@|:$db@|" .env
+          docker compose up -d --wait
+          curl -fsS http://localhost:3000/readyz
+          curl -fsS http://localhost:3000/ | grep -q "<title>OpenBot</title>"
+      - if: failure()
+        run: docker compose logs
+
+  # The Playwright specs in apps/web/e2e against the built server and web app,
+  # with Postgres and Redis as services and the scripted model of
+  # e2e/fake-model.ts. Every spec that adds a provider must be the first
+  # signup (the admin), so each gets a fresh database in its own job; the
+  # others share one. The computer spec skips: there is no Docker provider.
+  # The server runs as the managed service, since specs sign up several
+  # users; a self-hosted install closes sign-up after its owner. The
+  # self-hosted job runs the default deployment on a fresh database.
+  e2e:
+    name: e2e (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: basics
+            specs: e2e/smoke.spec.ts e2e/bots.spec.ts e2e/computer.spec.ts
+          - name: transcript
+            specs: e2e/transcript.spec.ts
+          - name: tools
+            specs: e2e/tools.spec.ts
+          - name: groups
+            specs: e2e/groups.spec.ts
+          - name: routines
+            specs: e2e/routines.spec.ts
+          - name: artifacts
+            specs: e2e/artifacts.spec.ts
+          - name: self-hosted
+            specs: e2e/self-hosted.spec.ts
+            deployment: self_hosted
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: openbot
+          POSTGRES_PASSWORD: openbot
+          POSTGRES_DB: openbot
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U openbot -d openbot"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://openbot:openbot@localhost:5432/openbot
+      REDIS_URL: redis://localhost:6379
+      OPENBOT_PUBLIC_URL: http://localhost:3000
+      OPENBOT_DEPLOYMENT: ${{ matrix.deployment || 'managed' }}
+      OPENBOT_SIGNUP_MODE: open
+      E2E: '1'
+      # The server serves the built web app, so Playwright reuses it instead
+      # of starting the Vite dev server.
+      E2E_BASE_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @openbot/web exec playwright install --with-deps chromium
+      - name: Start the server
+        run: |
+          mkdir -p "$RUNNER_TEMP/files"
+          OPENBOT_MASTER_KEY="$(node apps/server/dist/keygen.js)" \
+            OPENBOT_FILES_DIR="$RUNNER_TEMP/files" \
+            nohup node apps/server/dist/main.js >"$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS http://localhost:3000/readyz && exit 0
+            sleep 1
+          done
+          echo "::error::the server did not become ready"
+          exit 1
+      - name: Run the specs
+        working-directory: apps/web
+        env:
+          SPECS: ${{ matrix.specs }}
+        # SPECS is a space-separated list of paths.
+        run: |
+          read -ra specs <<<"$SPECS"
+          pnpm exec playwright test --workers=1 "${specs[@]}"
+      - if: failure()
+        run: cat "$RUNNER_TEMP/server.log"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.name }}
+          path: |
+            apps/web/test-results/
+            ${{ runner.temp }}/server.log
+          retention-days: 7

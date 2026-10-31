@@ -1,0 +1,39 @@
+import { ApiError } from './client.js';
+
+// Accounts and sessions live under `/api/auth/*` (better-auth), outside the
+// OpenAPI document, so these few calls are written by hand. Errors keep
+// better-auth's `{ code, message }` shape and surface as `ApiError`.
+
+export type SocialProvider = 'github' | 'google';
+export type AuthClient = ReturnType<typeof createAuthClient>;
+
+export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetch) {
+  async function post<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetchImpl(`${baseUrl}/api/auth${path}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => undefined)) as
+      { code?: string; message?: string } | undefined;
+    if (!res.ok) {
+      throw new ApiError(res.status, { code: data?.code, detail: data?.message });
+    }
+    return data as T;
+  }
+
+  return {
+    signUpEmail: (input: { name: string; email: string; password: string; inviteToken?: string }) =>
+      post<unknown>('/sign-up/email', input),
+    signInEmail: (input: { email: string; password: string }) =>
+      post<unknown>('/sign-in/email', input),
+    /** Returns the provider's authorization URL to navigate to. */
+    signInSocial: async (input: {
+      provider: SocialProvider;
+      callbackURL: string;
+      errorCallbackURL?: string;
+    }) => (await post<{ url: string }>('/sign-in/social', input)).url,
+    signOut: () => post<unknown>('/sign-out', {}),
+  };
+}

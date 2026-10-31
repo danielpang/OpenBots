@@ -1,0 +1,149 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { DEFAULT_CAPABILITIES } from '@openbot/shared';
+import { createApp, type App } from './app.js';
+import { createAuth } from './auth.js';
+import { loadConfig, type Config } from './config.js';
+import type { AppDeps } from './context.js';
+import { createTestDb, type TestDb } from './db/test-db.js';
+import { createInfra } from './infra/index.js';
+import { schema } from './db/client.js';
+import { createLogger } from './logger.js';
+import { generateMasterKey } from './secrets.js';
+import { ensureWorkspace } from './workspace.js';
+
+// An app over a fresh test database (see db/test-db.ts), plus helpers that
+// drive it the way a browser or script would.
+//
+// The config is built from `env` alone, never from process.env, so anything
+// the server would default to a path in the image (OPENBOT_FILES_DIR is
+// /data/files) has to be given here. Each app stores files in its own
+// temporary directory, removed on close, unless the test names one.
+//
+// Apps are self-hosted, like the server's default: one account, and a second
+// signup is refused. Tests with several users, or of members, invites and the
+// audit log, pass `OPENBOT_DEPLOYMENT: 'managed'`.
+
+export interface TestApp {
+  app: App;
+  deps: AppDeps;
+  testDb: TestDb;
+  /** Closes the app and its database; calling it again waits for the first close. */
+  close(): Promise<void>;
+  /** Signs up through better-auth and returns the response and the session cookie. */
+  signUp(
+    email: string,
+    extra?: Record<string, unknown>,
+  ): Promise<{ res: Response; cookie: string | undefined }>;
+  /**
+   * An instance-level provider row every user may name in `modelConfig`, for
+   * tests whose runs use a scripted model instead of calling it. It lists one
+   * enabled model, `scripted`, with tool calling.
+   */
+  providerId(): Promise<string>;
+  /** Lists enabled models with tool calling on a provider, so Bots may pick them (L5). */
+  addModels(providerId: string, modelIds: string[]): Promise<void>;
+}
+
+export const ORIGIN = 'http://localhost:3000';
+
+export interface TestAppOptions {
+  /** better-auth's rate limit; off by default, as tests sign up many people from no address. */
+  rateLimit?: boolean;
+}
+
+export async function createTestApp(
+  env: Record<string, string> = {},
+  { rateLimit = false }: TestAppOptions = {},
+): Promise<TestApp> {
+  const testDb = await createTestDb();
+  const ownFilesDir = env.OPENBOT_FILES_DIR
+    ? undefined
+    : await mkdtemp(path.join(tmpdir(), 'openbot-test-files-'));
+  const config: Config = loadConfig({
+    OPENBOT_MASTER_KEY: generateMasterKey(),
+    DATABASE_URL: 'postgres://unused',
+    OPENBOT_PUBLIC_URL: ORIGIN,
+    OPENBOT_DEPLOYMENT: 'self_hosted',
+    ...(ownFilesDir ? { OPENBOT_FILES_DIR: ownFilesDir } : {}),
+    ...env,
+  });
+  const logger = createLogger('silent');
+  const db = testDb.db;
+  const infra = createInfra(config);
+  const auth = createAuth({ config, db, logger, limiter: infra.limiter, rateLimit });
+  const deps: AppDeps = { config, db, logger, infra, auth };
+  const app = createApp(deps, { webDist: '' });
+  let provider: Promise<string> | undefined;
+  let closed: Promise<void> | undefined;
+  const addModels = async (providerId: string, modelIds: string[]) => {
+    const workspace = await ensureWorkspace(db);
+    await db
+      .insert(schema.providerModels)
+      .values(
+        modelIds.map((modelId) => ({
+          workspaceId: workspace.id,
+          providerId,
+          modelId,
+          displayName: modelId,
+          capabilities: { ...DEFAULT_CAPABILITIES, tools: true },
+          source: 'manual' as const,
+        })),
+      )
+      .onConflictDoNothing();
+  };
+
+  return {
+    app,
+    deps,
+    testDb,
+    close() {
+      closed ??= (async () => {
+        await infra.close();
+        await testDb.close();
+        if (ownFilesDir) await rm(ownFilesDir, { recursive: true, force: true });
+      })();
+      return closed;
+    },
+    providerId() {
+      provider ??= ensureWorkspace(db).then(async (workspace) => {
+        const [row] = await db
+          .insert(schema.providers)
+          .values({
+            workspaceId: workspace.id,
+            kind: 'custom',
+            protocol: 'openai_compatible',
+            name: 'Scripted',
+            slug: 'scripted',
+            status: 'untested',
+          })
+          .returning({ id: schema.providers.id });
+        await addModels(row!.id, ['scripted']);
+        return row!.id;
+      });
+      return provider;
+    },
+    addModels,
+    async signUp(email, extra = {}) {
+      const res = await app.request('/api/auth/sign-up/email', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({
+          name: email.split('@')[0],
+          email,
+          password: 'correct horse battery',
+          ...extra,
+        }),
+      });
+      return { res, cookie: sessionCookie(res) };
+    },
+  };
+}
+
+function sessionCookie(res: Response): string | undefined {
+  return res.headers
+    .getSetCookie()
+    .map((c) => c.split(';')[0]!)
+    .find((c) => c.includes('session_token='));
+}

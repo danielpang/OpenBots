@@ -1,0 +1,25 @@
+import { DEFAULT_LIMITS } from '@openbot/shared';
+import { describe, expect, it } from 'vitest';
+import { LIMIT_LABELS, settingsPatch } from './admin-settings.js';
+
+describe('admin settings form', () => {
+  it('labels every limit the server has', () => {
+    expect(Object.keys(LIMIT_LABELS).sort()).toEqual(Object.keys(DEFAULT_LIMITS).sort());
+  });
+
+  it('sends the signup mode, public links, retention and only the limits that changed', () => {
+    const form = new FormData();
+    form.set('signupMode', 'open');
+    for (const [key, value] of Object.entries(DEFAULT_LIMITS)) form.set(key, String(value));
+    form.set('botsPerAccount', '10');
+    form.set('auditRetentionDays', '90');
+    expect(settingsPatch(form, { ...DEFAULT_LIMITS })).toEqual({
+      signupMode: 'open',
+      publicTemplatesEnabled: false,
+      limits: { botsPerAccount: 10 },
+      auditRetentionDays: 90,
+    });
+    form.set('publicTemplatesEnabled', 'on');
+    expect(settingsPatch(form, { ...DEFAULT_LIMITS }).publicTemplatesEnabled).toBe(true);
+  });
+});
