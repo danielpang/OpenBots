@@ -3,16 +3,18 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { upgradeAuthorized } from './auth.js';
 import { childEnv } from './config.js';
+import { mcpStdioSession, stopAllMcpStdio } from './mcp-stdio.js';
 import { PtyClientMessageSchema, ScreenNumberSchema, type PtyServerMessage } from './protocol.js';
 import { acceptClient, authenticateToServer, ByteReader } from './rfb.js';
 import type { ScreenManager } from './screens.js';
 import { BOT, UNPRIVILEGED, type Users } from './users.js';
 
-// The two WebSocket endpoints (plan 9.3). `/pty` is a terminal session on
+// The WebSocket endpoints (plan 9.3). `/pty` is a terminal session on
 // node-pty; `/vnc/:n` is websockify: binary frames carrying RFB, bridged to
 // the screen's x11vnc on its unix socket (`ScreenManager.vnc`), which is what
 // noVNC speaks. The bridge logs in to x11vnc with the screen's password
-// (rfb.ts, S-7).
+// (rfb.ts, S-7). `/mcp/stdio` runs a connector's stdio MCP server
+// (mcp-stdio.ts).
 
 export interface WsDeps {
   token: string;
@@ -20,6 +22,7 @@ export interface WsDeps {
   screens: ScreenManager;
   shell?: string;
   users?: Users;
+  log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
 function reject(socket: Duplex, status: number, reason: string) {
@@ -44,6 +47,15 @@ export function attachWebSockets(server: Server, deps: WsDeps): { close: () => P
       });
       return;
     }
+    if (url.pathname === '/mcp/stdio') {
+      return wss.handleUpgrade(req, socket, head, (ws) =>
+        mcpStdioSession(ws, {
+          home: deps.home,
+          ...(deps.users ? { users: deps.users } : {}),
+          ...(deps.log ? { log: deps.log } : {}),
+        }),
+      );
+    }
     const vnc = /^\/vnc\/(\d+)$/.exec(url.pathname);
     if (vnc) {
       const n = ScreenNumberSchema.safeParse(vnc[1]);
@@ -62,6 +74,7 @@ export function attachWebSockets(server: Server, deps: WsDeps): { close: () => P
     close: () =>
       new Promise((resolve) => {
         server.off('upgrade', onUpgrade);
+        stopAllMcpStdio();
         for (const client of wss.clients) client.terminate();
         wss.close(() => resolve());
       }),

@@ -111,6 +111,8 @@ const envSchema = z.object({
   ),
   OPENBOT_LOCAL_ENDPOINTS: optional(z.stringbool()),
   OPENBOT_CUSTOM_STDIO: optional(z.stringbool()),
+  OPENBOT_STDIO_RUNNER: optional(z.enum(['host', 'computer'])),
+  OPENBOT_ALLOW_HOST_STDIO: withDefault(z.stringbool(), 'false'),
   OPENBOT_SIGNUP_MODE: withDefault(
     z.enum(['first_user_admin', 'invite', 'open']),
     'first_user_admin',
@@ -134,6 +136,7 @@ const envSchema = z.object({
 });
 
 export type Deployment = 'self_hosted' | 'managed';
+export type StdioRunner = 'host' | 'computer';
 
 export interface OAuthClient {
   clientId: string;
@@ -211,6 +214,16 @@ export interface Config {
    * service, whose server every organization shares.
    */
   customStdio: boolean;
+  /**
+   * Where stdio connectors run (OPENBOT_STDIO_RUNNER). `host`, the default
+   * for a self-hosted install, runs them as child processes of this server,
+   * as an unprivileged user. `computer`, the default on the managed service,
+   * runs each in its owner's computer for that organization, so no two
+   * accounts or organizations share a process or a filesystem. The managed
+   * service refuses `host` unless the operator sets
+   * OPENBOT_ALLOW_HOST_STDIO, and then warns at every start.
+   */
+  stdioRunner: StdioRunner;
   filesDir: string;
   /** The catalog's pre-installed stdio servers (S-20). */
   mcpCatalog: CatalogInstall;
@@ -260,6 +273,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       'invalid configuration:\n  OPENBOT_LOCAL_TOKEN: only a self-hosted install signs in with the Mac app; unset it for managed',
     );
   }
+  const stdioRunner =
+    e.OPENBOT_STDIO_RUNNER ?? (e.OPENBOT_DEPLOYMENT === 'managed' ? 'computer' : 'host');
+  if (e.OPENBOT_DEPLOYMENT === 'managed' && stdioRunner === 'host' && !e.OPENBOT_ALLOW_HOST_STDIO) {
+    throw new Error(
+      "invalid configuration:\n  OPENBOT_STDIO_RUNNER: host would run every organization's stdio connectors on this one server; use computer, or set OPENBOT_ALLOW_HOST_STDIO=1 to accept that",
+    );
+  }
   let sandboxNetwork: SandboxNetwork;
   try {
     sandboxNetwork = resolveSandboxNetwork(e.OPENBOT_SANDBOX_NETWORK, e.OPENBOT_SANDBOX_BRIDGE);
@@ -304,6 +324,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     signupMode: e.OPENBOT_SIGNUP_MODE,
     localEndpoints: e.OPENBOT_LOCAL_ENDPOINTS ?? e.OPENBOT_DEPLOYMENT === 'self_hosted',
     customStdio: e.OPENBOT_CUSTOM_STDIO ?? e.OPENBOT_DEPLOYMENT === 'self_hosted',
+    stdioRunner,
     filesDir: e.OPENBOT_FILES_DIR,
     mcpCatalog: { dir: e.OPENBOT_MCP_DIR, allowNpx: e.OPENBOT_MCP_NPX_FALLBACK },
     role: e.OPENBOT_ROLE,

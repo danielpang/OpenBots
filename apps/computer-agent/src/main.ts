@@ -98,7 +98,7 @@ const app = createApp({
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) =>
   log('listening', { port: info.port, home: config.home }),
 ) as Server;
-const sockets = attachWebSockets(server, { token, home: config.home, screens, users });
+const sockets = attachWebSockets(server, { token, home: config.home, screens, users, log });
 wallpaper.start();
 cookies.start();
 

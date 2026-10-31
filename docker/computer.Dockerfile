@@ -63,6 +63,18 @@ RUN pnpm install --prod --frozen-lockfile --offline \
 # --- node: the Node binary for the target platform ----------------------------
 FROM ${NODE_RUNTIME_IMAGE} AS node
 
+# --- mcp-catalog: the catalog's stdio MCP servers, from their lockfile -------
+# On the managed service a connector's stdio server runs in its owner's
+# computer (OPENBOT_STDIO_RUNNER=computer), which starts these binaries, the
+# same pinned install as the server image's: nothing is downloaded at run
+# time (S-20). Pure JavaScript, no install scripts: the same lockfile serves
+# every platform, and the runtime's node runs them.
+FROM ${NODE_RUNTIME_IMAGE} AS mcp-catalog
+WORKDIR /opt/openbot/mcp
+COPY docker/mcp-catalog/package.json docker/mcp-catalog/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache \
+    && rm -rf /tmp/npm-cache
+
 # --- runtime --------------------------------------------------------------------
 FROM ${UBUNTU_IMAGE} AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
@@ -88,6 +100,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# Owned by root: the bot user can run the catalog servers but not change them.
+COPY --from=mcp-catalog /opt/openbot/mcp /opt/openbot/mcp
 WORKDIR /app
 COPY --from=prod-deps /app /app
 COPY --from=build /out /app

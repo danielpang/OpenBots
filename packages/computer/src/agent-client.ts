@@ -8,8 +8,11 @@ import type {
   FsEntry,
   FsListing,
   InputAction as AgentInputAction,
+  McpStdioServerMessage,
+  McpStdioStart,
   ScreenInfo,
 } from '@openbot/computer-agent/protocol';
+import { WebSocket, type RawData } from 'ws';
 import type { InputAction } from './actions.js';
 import { COMPUTER_HOME } from './types.js';
 
@@ -48,6 +51,33 @@ export interface DirListing {
   /** Absolute, under /home/bot. */
   path: string;
   entries: DirEntry[];
+}
+
+/** What `mcpStdio` starts: a connector's stdio MCP server, in the computer. */
+export type McpStdioLaunch = Omit<McpStdioStart, 'type'>;
+
+/** How a stdio MCP server in the computer ended. */
+export interface McpStdioExit {
+  exitCode: number | null;
+  signal: string | null;
+  /** Set when it never ran or the connection to the agent dropped. */
+  error?: string;
+}
+
+export interface McpStdioHandlers {
+  stdout(data: string): void;
+  stderr(data: string): void;
+  /** Called once, when the process ends or the connection to it drops. */
+  exit(info: McpStdioExit): void;
+}
+
+/** A running stdio MCP server in the computer. */
+export interface McpStdioProcess {
+  pid: number;
+  /** Writes to its stdin; throws once it ended. */
+  write(data: string): void;
+  /** Closes the connection, which stops the process; resolves once closed. */
+  close(): Promise<void>;
 }
 
 export type PageInfo = BrowserResult;
@@ -96,6 +126,15 @@ export interface ComputerAgentClient {
    * computer's shared store now and spreads them to the other screens (K1).
    */
   syncCookies(screen?: number, signal?: AbortSignal): Promise<CookieSyncResult>;
+  /**
+   * Starts a stdio MCP server in the computer over `WS /mcp/stdio` and
+   * resolves once it runs; `handlers` get its output and its end.
+   */
+  mcpStdio(
+    launch: McpStdioLaunch,
+    handlers: McpStdioHandlers,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<McpStdioProcess>;
   /** The WebSocket URL and headers the server's proxies dial (`/pty`, `/vnc/:n`). */
   socket(path: `/pty${string}` | `/vnc/${number}`): {
     url: string;
@@ -266,8 +305,124 @@ export function createAgentClient({
           signal,
         }),
       ),
+    mcpStdio: (launch, handlers, options) =>
+      openMcpStdio(`${base.replace(/^http/, 'ws')}/mcp/stdio`, auth, launch, handlers, options),
     socket: (path) => ({ url: `${base.replace(/^http/, 'ws')}${path}`, headers: { ...auth } }),
   };
+}
+
+/** How long `mcpStdio` waits for the agent to say the process runs. */
+const MCP_STDIO_START_MS = 30_000;
+
+function openMcpStdio(
+  url: string,
+  headers: Record<string, string>,
+  launch: McpStdioLaunch,
+  handlers: McpStdioHandlers,
+  { signal, timeoutMs = MCP_STDIO_START_MS }: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<McpStdioProcess> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, { headers });
+    let started = false;
+    let ended = false;
+    /** The agent's own reason, from an `error` frame, for the close that follows. */
+    let reason: string | undefined;
+    const closed = new Promise<void>((done) => ws.once('close', () => done()));
+    const fail = (error: Error) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(error);
+      ws.terminate();
+    };
+    const end = (info: McpStdioExit) => {
+      if (!started || ended) return;
+      ended = true;
+      handlers.exit(info);
+    };
+    const timer = setTimeout(
+      () =>
+        fail(
+          new AgentError(504, 'The computer did not start the server in time', 'MCP_STDIO_TIMEOUT'),
+        ),
+      timeoutMs,
+    );
+    const abort = () => fail(new AgentError(499, 'Cancelled', 'ABORTED'));
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
+
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'start', ...launch })));
+    ws.on('unexpected-response', (_req, res) => {
+      res.resume();
+      fail(
+        new AgentError(
+          res.statusCode ?? 502,
+          `The computer refused the server (${res.statusCode ?? 'no status'})`,
+          'MCP_STDIO_REFUSED',
+        ),
+      );
+    });
+    ws.on('message', (raw: RawData) => {
+      let msg: McpStdioServerMessage;
+      try {
+        msg = JSON.parse(raw.toString()) as McpStdioServerMessage;
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case 'started':
+          if (started) return;
+          started = true;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', abort);
+          resolve({
+            pid: msg.pid,
+            write(data) {
+              if (ended || ws.readyState !== ws.OPEN) throw new Error('The server is not running');
+              ws.send(JSON.stringify({ type: 'stdin', data }));
+            },
+            async close() {
+              if (ws.readyState === ws.CLOSED) return;
+              ws.close(1000);
+              const late = setTimeout(() => ws.terminate(), 5_000);
+              await closed;
+              clearTimeout(late);
+            },
+          });
+          return;
+        case 'stdout':
+          if (started) handlers.stdout(msg.data);
+          return;
+        case 'stderr':
+          if (started) handlers.stderr(msg.data);
+          return;
+        case 'exit':
+          return end({ exitCode: msg.exitCode, signal: msg.signal });
+        case 'error':
+          reason = msg.message;
+          if (!started) fail(new AgentError(502, msg.message, 'MCP_STDIO_FAILED'));
+          else end({ exitCode: null, signal: null, error: msg.message });
+          return;
+      }
+    });
+    ws.on('error', (error) => {
+      if (!started)
+        fail(
+          new AgentError(
+            502,
+            `The computer is unreachable: ${error.message}`,
+            'MCP_STDIO_UNREACHABLE',
+          ),
+        );
+      else end({ exitCode: null, signal: null, error: error.message });
+    });
+    ws.on('close', () => {
+      if (!started) {
+        fail(
+          new AgentError(502, reason ?? 'The computer closed the connection', 'MCP_STDIO_CLOSED'),
+        );
+      } else end({ exitCode: null, signal: null, error: 'The connection to the computer closed' });
+    });
+  });
 }
 
 /** The agent's xdotool input for one of the plan's pixel actions. */

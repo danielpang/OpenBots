@@ -50,6 +50,11 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
       'secrets came from the environment, where /proc/<pid>/environ and `docker inspect` show them; give each as NAME_FILE instead (docker/entrypoint.sh does this for the compose service)',
     );
   }
+  if (config.deployment === 'managed' && config.stdioRunner === 'host') {
+    logger.warn(
+      "OPENBOT_STDIO_RUNNER=host on the managed service (OPENBOT_ALLOW_HOST_STDIO): every organization's stdio connectors run on this server as one user, with no isolation between them",
+    );
+  }
   // Files this process makes are its own; stdio servers run as another user (S-1).
   process.umask(0o077);
   protectFilesDir(config.filesDir);

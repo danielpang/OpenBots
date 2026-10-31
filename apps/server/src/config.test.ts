@@ -46,6 +46,34 @@ describe('loadConfig', () => {
     );
   });
 
+  it('runs stdio connectors on the host when self-hosted and in the computer on managed', () => {
+    const managed = { ...base, OPENBOT_DEPLOYMENT: 'managed' };
+    expect(loadConfig(base).stdioRunner).toBe('host');
+    expect(loadConfig({ ...base, OPENBOT_STDIO_RUNNER: '' }).stdioRunner).toBe('host');
+    expect(loadConfig({ ...base, OPENBOT_STDIO_RUNNER: 'computer' }).stdioRunner).toBe('computer');
+    expect(loadConfig(managed).stdioRunner).toBe('computer');
+    expect(loadConfig({ ...managed, OPENBOT_STDIO_RUNNER: 'computer' }).stdioRunner).toBe(
+      'computer',
+    );
+    expect(() => loadConfig({ ...base, OPENBOT_STDIO_RUNNER: 'container' })).toThrow(
+      /OPENBOT_STDIO_RUNNER/,
+    );
+  });
+
+  it('refuses host stdio on managed unless the operator opts in', () => {
+    const managed = { ...base, OPENBOT_DEPLOYMENT: 'managed', OPENBOT_STDIO_RUNNER: 'host' };
+    expect(() => loadConfig(managed)).toThrow(
+      /OPENBOT_STDIO_RUNNER: host would run every organization's stdio connectors on this one server/,
+    );
+    expect(() => loadConfig({ ...managed, OPENBOT_ALLOW_HOST_STDIO: 'false' })).toThrow(
+      /OPENBOT_ALLOW_HOST_STDIO=1/,
+    );
+    expect(loadConfig({ ...managed, OPENBOT_ALLOW_HOST_STDIO: '1' }).stdioRunner).toBe('host');
+    expect(loadConfig({ ...managed, OPENBOT_ALLOW_HOST_STDIO: 'true' }).stdioRunner).toBe('host');
+    // Self-hosted needs no opt-in: it is one owner's server.
+    expect(loadConfig({ ...base, OPENBOT_STDIO_RUNNER: 'host' }).stdioRunner).toBe('host');
+  });
+
   it('reads the sandbox network and its bridge, the bridge named like the network by default', () => {
     expect(loadConfig({ ...base, OPENBOT_SANDBOX_NETWORK: 'openbot-dev' }).sandboxNetwork).toEqual({
       name: 'openbot-dev',

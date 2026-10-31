@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { fromAnthropicAction } from './actions.js';
 import { createAgentClient, type ComputerAgentClient } from './agent-client.js';
@@ -132,6 +132,53 @@ describe('agent client', () => {
     expect(agent.calls.at(-1)).toMatchObject({ path: '/cookies/sync', body: {} });
     expect(agent.cookieSyncs).toEqual([2, null]);
     await expect(client.syncCookies(5)).rejects.toMatchObject({ code: 'SCREEN_NOT_RUNNING' });
+  });
+
+  it('runs a stdio MCP server in the computer and relays it both ways', async () => {
+    const script = `process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (d) => process.stdout.write('got ' + d.trim() + ' ' + process.env.KEY + '\\n'));
+      process.stderr.write('warming up\\n');`;
+    const out: string[] = [];
+    const err: string[] = [];
+    const exits: unknown[] = [];
+    const proc = await client.mcpStdio(
+      { command: process.execPath, args: ['-e', script], env: { KEY: 'v1' }, dirs: ['work'] },
+      {
+        stdout: (d) => out.push(d),
+        stderr: (d) => err.push(d),
+        exit: (info) => exits.push(info),
+      },
+    );
+    expect(proc.pid).toBeGreaterThan(0);
+    expect(agent.mcpStdio).toEqual([
+      {
+        type: 'start',
+        command: process.execPath,
+        args: ['-e', script],
+        env: { KEY: 'v1' },
+        dirs: ['work'],
+      },
+    ]);
+    proc.write('hello\n');
+    await vi.waitFor(() => expect(out.join('')).toBe('got hello v1\n'));
+    await vi.waitFor(() => expect(err.join('')).toBe('warming up\n'));
+    await proc.close();
+    await vi.waitFor(() => expect(exits).toHaveLength(1));
+    expect(() => proc.write('more\n')).toThrow(/not running/);
+  });
+
+  it('rejects a stdio server that cannot start, or a wrong token', async () => {
+    const handlers = { stdout: () => {}, stderr: () => {}, exit: () => {} };
+    await expect(
+      client.mcpStdio({ command: '/nonexistent/server', args: [], env: {} }, handlers),
+    ).rejects.toMatchObject({
+      code: 'MCP_STDIO_FAILED',
+      message: expect.stringMatching(/^Could not start server: .*ENOENT/),
+    });
+    const wrong = createAgentClient({ url: agent.url, token: 'nope' });
+    await expect(
+      wrong.mcpStdio({ command: process.execPath, args: [], env: {} }, handlers),
+    ).rejects.toMatchObject({ status: 401, code: 'MCP_STDIO_REFUSED' });
   });
 
   it('gives the proxies a socket URL with the token header', async () => {

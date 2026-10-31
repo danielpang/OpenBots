@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mcpStdioSession } from '@openbot/computer-agent/mcp-stdio';
 import {
   BROWSER_ACTIONS,
   BrowserActionSchemas,
@@ -11,6 +15,7 @@ import {
   type ExecRequest,
   type FsEntry,
   type InputAction,
+  type McpStdioStart,
   type ScreenInfo,
 } from '@openbot/computer-agent/protocol';
 import type Docker from 'dockerode';
@@ -21,7 +26,8 @@ import { GUARD_NAME, GUARD_PATH, type DockerApi } from './docker.js';
 // `@openbot/computer-agent/protocol` (requests are validated with the agent's
 // own schemas, so a client that drifts from the agent fails here), with a
 // memory filesystem under the home, scripted exec, screens, a 1x1 PNG
-// screenshot and echoing pty and vnc sockets; and a dockerode stand-in that
+// screenshot, echoing pty and vnc sockets, and the agent's own `/mcp/stdio`
+// running real processes on this machine; and a dockerode stand-in that
 // records every call. Server and agent tests use these; no daemon needed.
 
 /** A 1x1 transparent PNG. */
@@ -54,6 +60,15 @@ export interface FakeAgent {
   exec: (request: ExecRequest) => { stdout?: string; stderr?: string; exitCode?: number };
   /** Answers `/healthz` with 503 while false. */
   healthy: boolean;
+  /** Each `/mcp/stdio` start, as the agent received it (secrets included: tests only). */
+  mcpStdio: McpStdioStart[];
+  /**
+   * What a start runs instead; as received by default. Tests point catalog
+   * binaries, which live only in the computer image, at a local server.
+   */
+  mcpLaunch: (start: McpStdioStart) => McpStdioStart;
+  /** A real temporary directory standing in for the home, for `/mcp/stdio` (`dirs`, `cwd`). */
+  home: string;
   close(): Promise<void>;
 }
 
@@ -69,6 +84,9 @@ export async function startFakeAgent({ token = 'agent-token' } = {}): Promise<Fa
     calls: [],
     exec: (request) => ({ stdout: `ran: ${request.command}\n`, exitCode: 0 }),
     healthy: true,
+    mcpStdio: [],
+    mcpLaunch: (start) => start,
+    home: mkdtempSync(join(tmpdir(), 'openbot-fake-home-')),
     close: async () => {},
   };
 
@@ -213,9 +231,23 @@ export async function startFakeAgent({ token = 'agent-token' } = {}): Promise<Fa
   server.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url ?? '/', 'http://agent').pathname;
     const vnc = /^\/vnc\/(\d+)$/.exec(path);
-    const known = path === '/pty' || (vnc && agent.screens.has(Number(vnc[1])));
+    const known =
+      path === '/pty' || path === '/mcp/stdio' || (vnc && agent.screens.has(Number(vnc[1])));
     if (req.headers.authorization !== `Bearer ${agent.token}` || !known) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (path === '/mcp/stdio') {
+      wss.handleUpgrade(req, socket, head, (ws) =>
+        mcpStdioSession(ws, {
+          home: agent.home,
+          graceMs: 200,
+          prepare: (start) => {
+            agent.mcpStdio.push(start);
+            return agent.mcpLaunch(start);
+          },
+        }),
+      );
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -232,6 +264,7 @@ export async function startFakeAgent({ token = 'agent-token' } = {}): Promise<Fa
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(agent.home, { recursive: true, force: true });
   };
   return agent;
 }

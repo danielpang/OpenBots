@@ -39,6 +39,7 @@ import { assertBotOwner } from '../ownership.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
 import { recordAudit, SYSTEM_ACTOR, type AuditActor } from './audit.js';
 import { setState } from './bot-state.js';
+import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 
 // The account's computer (plan 4.5, 9; K1 to K7). One `computers` row per
 // owner, created on first use through the configured provider (`remote` when
@@ -558,6 +559,16 @@ async function stopMachine(
   by: AuditActor,
   failed: Partial<ComputerRow> = {},
 ): Promise<ComputerRow> {
+  // Its owner's stdio connectors running in it end first, in every process.
+  await deps.infra.bus
+    .publish<McpControl>(MCP_CONTROL_CHANNEL, {
+      type: 'computer',
+      ownerId: row.ownerId,
+      workspaceId: row.workspaceId,
+    })
+    .catch((error: unknown) =>
+      deps.logger.warn({ err: error, computerId: row.id }, 'stopping stdio connectors failed'),
+    );
   try {
     await provider(deps).stop(refOf(deps, row));
   } catch (error) {

@@ -228,3 +228,43 @@ export const PtyClientMessageSchema = z.discriminatedUnion('type', [
     rows: z.number().int().min(1).max(1000),
   }),
 ]);
+
+// --- WS /mcp/stdio -------------------------------------------------------------
+//
+// A stdio MCP server run inside the computer for a connector of the owner (the
+// managed service's OPENBOT_STDIO_RUNNER=computer). The server opens one socket
+// per process: its first frame is `start`, then `stdin` frames carry what the
+// MCP client writes. The agent answers `started` once the process runs, then
+// relays its output; `exit` (or `error`) is the last frame. Closing the socket
+// stops the process. Every frame is one JSON text message.
+
+const EnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+
+export const McpStdioStartSchema = z.strictObject({
+  type: z.literal('start'),
+  command: z.string().min(1),
+  args: z.array(z.string()).max(256),
+  /**
+   * Added to the bot user's environment, for this process only: the
+   * connector's secrets among them, so never logged and never on disk.
+   */
+  env: z.record(EnvName, z.string()),
+  /** Absolute, or relative to the home directory (the default). */
+  cwd: z.string().optional(),
+  /** Folders under the home created first when missing: the filesystem server's roots. */
+  dirs: z.array(z.string().min(1)).max(32).optional(),
+});
+export type McpStdioStart = z.infer<typeof McpStdioStartSchema>;
+
+export const McpStdioClientMessageSchema = z.discriminatedUnion('type', [
+  McpStdioStartSchema,
+  z.strictObject({ type: z.literal('stdin'), data: z.string() }),
+]);
+export type McpStdioClientMessage = z.infer<typeof McpStdioClientMessageSchema>;
+
+export type McpStdioServerMessage =
+  | { type: 'started'; pid: number }
+  | { type: 'stdout'; data: string }
+  | { type: 'stderr'; data: string }
+  | { type: 'exit'; exitCode: number | null; signal: string | null }
+  | { type: 'error'; message: string };

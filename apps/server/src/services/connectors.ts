@@ -3,7 +3,10 @@ import { lookup } from 'node:dns/promises';
 import { chmodSync, mkdirSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import path from 'node:path';
+import { COMPUTER_HOME, type McpStdioLaunch } from '@openbot/computer';
 import {
+  ComputerStdioHost,
+  DEFAULT_CATALOG_INSTALL_DIR,
   HttpHost,
   McpManager,
   OAuthSetupError,
@@ -32,6 +35,7 @@ import {
   type ApprovalOverride,
   type BlockRule,
   type CatalogEntry,
+  type CatalogInstall,
   type ConnectorKind,
   type ConnectorSession,
   type ConnectorStatus,
@@ -48,12 +52,15 @@ import { wsEvent, type Unsubscribe } from '@openbot/shared';
 import { and, asc, count, eq, inArray, notInArray } from 'drizzle-orm';
 import { isPublicAddress, netFetch, type NetOptions } from '../builtins/net.js';
 import { publishEvent } from '../infra/index.js';
+import type { StdioRunner } from '../config.js';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertBotOwner } from '../ownership.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
 import { isOrgAdmin, storedSettings, type Role } from '../workspace.js';
+import { computerStdioSpec } from './computer-stdio.js';
+import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 
 // Connectors (plan 4.4, 8; T1 to T3, P3). Connectors belong to a user and
 // every one of their Bots may use them, narrowed per Bot by `bot_connectors`
@@ -77,10 +84,13 @@ import { isOrgAdmin, storedSettings, type Role } from '../workspace.js';
 // the flag, and changing the command or URL clears it.
 //
 // Sessions run in whichever process calls a tool (the worker for runs, the API
-// for Test). Each process keeps one `McpManager` per `AppDeps`. Streamable
-// HTTP sessions and every OAuth request (discovery, registration, token and
-// refresh) go through the outbound guard, so they reach public addresses
-// only (S-8). An admin can mark an HTTP connector `local` when its server
+// for Test). Each process keeps one `McpManager` per `AppDeps`. A stdio
+// server is a child of that process (OPENBOT_STDIO_RUNNER=host, the
+// self-hosted default) or runs in its owner's computer (`computer`, the
+// managed default; computer-stdio.ts), where it is restarted after a crash.
+// Streamable HTTP sessions and every OAuth request (discovery, registration,
+// token and refresh) go through the outbound guard, so they reach public
+// addresses only (S-8). An admin can mark an HTTP connector `local` when its server
 // runs on their own network; its requests may then reach private addresses,
 // still through the guard's pinned lookup. Changing the URL clears the mark.
 
@@ -1139,17 +1149,7 @@ const managers = new WeakMap<object, McpManager>();
 const listening = new WeakMap<object, Promise<Unsubscribe | null>>();
 const refreshing = new Map<string, Promise<string>>();
 
-/**
- * Tells every process to stop these connectors' sessions (plan 8, T3): a
- * worker may run the session a block, an edit or a delete in the API process
- * ends, and its stdio child would otherwise live until the idle sweep.
- */
-export const MCP_CONTROL_CHANNEL = 'openbot:mcp-control';
-
-export interface McpControl {
-  type: 'stop';
-  connectorIds: string[];
-}
+export { MCP_CONTROL_CHANNEL, type McpControl };
 
 /** Stops the sessions here and, through the bus, in every other process. */
 async function stopSessions(deps: ConnectorsDeps, connectorIds: string[]): Promise<void> {
@@ -1182,7 +1182,7 @@ export function mcpManager(deps: ConnectorsDeps): McpManager {
   let manager = managers.get(deps);
   if (!manager) {
     const created = new McpManager({
-      resolve: (id) => sessionFor(deps, id),
+      resolve: (id, context) => sessionFor(deps, id, context),
       onStarted: (id, snapshot) => recordSnapshot(deps, id, snapshot),
       onToolsChanged: (id, tools) => storeTools(deps.db, id, tools),
       onError: (id, error) => recordError(deps, id, error),
@@ -1195,8 +1195,16 @@ export function mcpManager(deps: ConnectorsDeps): McpManager {
       deps.infra
         ? deps.infra.bus
             .subscribe<McpControl>(MCP_CONTROL_CHANNEL, (control) => {
-              if (control.type !== 'stop') return;
-              for (const id of control.connectorIds) void created.stop(id);
+              if (control.type === 'stop') {
+                for (const id of control.connectorIds) void created.stop(id);
+              } else if (control.type === 'computer') {
+                void stopComputerSessions(deps, created, control).catch((error: unknown) =>
+                  deps.logger.warn(
+                    { err: error },
+                    'stopping stdio connectors with the computer failed',
+                  ),
+                );
+              }
             })
             .catch((error: unknown) => {
               deps.logger.warn({ err: error }, 'MCP control channel unavailable');
@@ -1207,6 +1215,29 @@ export function mcpManager(deps: ConnectorsDeps): McpManager {
     manager = created;
   }
   return manager;
+}
+
+/**
+ * When an owner's computer stops, their stdio servers in it end with it;
+ * the remote provider's machine keeps running, so they are stopped here.
+ */
+async function stopComputerSessions(
+  deps: ConnectorsDeps,
+  manager: McpManager,
+  owner: { ownerId: string; workspaceId: string },
+) {
+  if (deps.config.stdioRunner !== 'computer') return;
+  const rows = await deps.db
+    .select({ id: schema.connectors.id })
+    .from(schema.connectors)
+    .where(
+      and(
+        eq(schema.connectors.ownerId, owner.ownerId),
+        eq(schema.connectors.workspaceId, owner.workspaceId),
+        eq(schema.connectors.kind, 'mcp_stdio'),
+      ),
+    );
+  await Promise.all(rows.map((r) => manager.stop(r.id)));
 }
 
 /** Stops every session (shutdown, tests). */
@@ -1248,7 +1279,11 @@ function connectorFetch(deps: ConnectorsDeps, row: Pick<ConnectorRow, 'local'>):
   return netFetch(options);
 }
 
-async function sessionFor(deps: ConnectorsDeps, id: string): Promise<ConnectorSession> {
+async function sessionFor(
+  deps: ConnectorsDeps,
+  id: string,
+  { restart }: { restart: boolean } = { restart: false },
+): Promise<ConnectorSession> {
   const row = await rowById(deps.db, id);
   const rules = await blockRules(deps.db, row.workspaceId);
   if (isBlocked(row, rules)) throw connectorBlocked();
@@ -1273,6 +1308,17 @@ async function sessionFor(deps: ConnectorsDeps, id: string): Promise<ConnectorSe
     .digest('hex');
   const config = stored.transport;
 
+  if (config.transport === 'stdio' && deps.config.stdioRunner === 'computer') {
+    const launch = await computerLaunchFor(deps, row);
+    const owner = { id: row.ownerId, workspaceId: row.workspaceId };
+    return {
+      id,
+      version,
+      restartOnCrash: true,
+      create: (options) =>
+        new ComputerStdioHost(computerStdioSpec(deps, owner, launch, { restart }), options),
+    };
+  }
   if (config.transport === 'stdio') {
     const spec = await stdioSpawnFor(deps, row);
     return { id, version, create: (options) => new StdioHost(spec, options) };
@@ -1310,32 +1356,76 @@ async function sessionFor(deps: ConnectorsDeps, id: string): Promise<ConnectorSe
   );
 }
 
+/** Where the computer image installs the catalog's stdio servers: where the server image does. */
+const COMPUTER_CATALOG: CatalogInstall = { dir: DEFAULT_CATALOG_INSTALL_DIR, allowNpx: false };
+
 /**
- * What a stdio connector's child is started with. Catalog connectors run the
- * catalog's pinned server from the image's install (S-20), whatever the row
- * says, with `user_dir` params confined to the owner's directory and
- * `public_host` secrets re-checked, since DNS answers change (S-3). Errors are plain, so the manager stores them
- * as the connector's last error.
+ * What a stdio connector's child is started with on this host. Catalog
+ * connectors run the catalog's pinned server from the image's install (S-20),
+ * whatever the row says, with `user_dir` params confined to the owner's
+ * directory and `public_host` secrets re-checked, since DNS answers change
+ * (S-3). Errors are plain, so the manager stores them as the connector's last
+ * error.
  */
 export async function stdioSpawnFor(
   deps: Pick<AppDeps, 'config'>,
   row: ConnectorRow,
 ): Promise<StdioSpawn> {
+  const { command, args, env, cwd } = await stdioLaunchFor(deps, row, 'host');
+  return { command, args, env, homeKey: row.id, ...(cwd ? { cwd } : {}) };
+}
+
+/**
+ * What a stdio connector's server is started with in its owner's computer.
+ * Catalog connectors run the pinned server the computer image installs, and a
+ * `user_dir` param (the filesystem server's root) is a folder of the owner's
+ * files there, under the home their Bots and the file browser share; the
+ * agent creates it when missing. A custom server's command runs with the
+ * owner's own tools in the computer.
+ */
+export async function computerLaunchFor(
+  deps: Pick<AppDeps, 'config'>,
+  row: ConnectorRow,
+): Promise<McpStdioLaunch> {
+  const { command, args, env, cwd, dirs } = await stdioLaunchFor(deps, row, 'computer');
+  return { command, args, env, ...(cwd ? { cwd } : {}), ...(dirs.length ? { dirs } : {}) };
+}
+
+async function stdioLaunchFor(
+  deps: Pick<AppDeps, 'config'>,
+  row: ConnectorRow,
+  runner: StdioRunner,
+): Promise<{
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd?: string;
+  /** Folders under the computer's home to create first. */
+  dirs: string[];
+}> {
   const stored = readConfig(row);
   const config = stored.transport;
   if (config.transport !== 'stdio') throw new Error('Not a stdio connector.');
   const secrets = openSecrets(deps, row);
   const entry = row.catalogId ? catalogEntry(row.catalogId) : undefined;
   const params = { ...stored.params };
+  const dirs: string[] = [];
   try {
     for (const p of entry?.params ?? []) {
-      if (p.user_dir)
+      if (!p.user_dir) continue;
+      if (runner === 'computer') {
+        const relative = relativeUserPath(params[p.name] ?? '', p.label);
+        if (relative !== '.') dirs.push(relative);
+        params[p.name] =
+          relative === '.' ? COMPUTER_HOME : path.posix.join(COMPUTER_HOME, relative);
+      } else {
         params[p.name] = confinedFolder(
           deps,
           { id: row.ownerId, workspaceId: row.workspaceId },
           params[p.name] ?? '',
           p.label,
         );
+      }
     }
     for (const s of entry?.secrets ?? []) {
       const value = secrets.values[s.name];
@@ -1345,7 +1435,12 @@ export async function stdioSpawnFor(
     throw new Error((err as Error).message, { cause: err });
   }
   const values = { ...params, ...secrets.values };
-  const launch = entry?.stdio ? catalogLaunch(entry, deps.config.mcpCatalog) : config;
+  const launch = !entry?.stdio
+    ? config
+    : runner === 'computer'
+      ? // Installed in the computer image, not on this host.
+        catalogLaunch(entry, COMPUTER_CATALOG, () => true)
+      : catalogLaunch(entry, deps.config.mcpCatalog);
   const catalogEnv = Object.fromEntries(
     Object.entries(entry?.stdio?.env ?? {}).map(([k, v]) => [k, substitute(v, values)]),
   );
@@ -1358,8 +1453,8 @@ export async function stdioSpawnFor(
     command: launch.command,
     args: launch.args.map((a) => substitute(a, values)),
     env: { ...catalogEnv, ...ownEnv },
-    homeKey: row.id,
     ...(config.cwd ? { cwd: config.cwd } : {}),
+    dirs,
   };
 }
 

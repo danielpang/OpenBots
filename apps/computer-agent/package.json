@@ -15,6 +15,11 @@
       "@openbot/source": "./src/protocol.ts",
       "types": "./dist/protocol.d.ts",
       "default": "./dist/protocol.js"
+    },
+    "./mcp-stdio": {
+      "@openbot/source": "./src/mcp-stdio.ts",
+      "types": "./dist/mcp-stdio.d.ts",
+      "default": "./dist/mcp-stdio.js"
     }
   },
   "scripts": {

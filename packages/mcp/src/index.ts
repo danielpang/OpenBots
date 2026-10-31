@@ -3,6 +3,7 @@ export * from './types.js';
 export * from './catalog.js';
 export * from './host.js';
 export * from './stdio.js';
+export * from './computer-stdio.js';
 export * from './privileges.js';
 export * from './http.js';
 export * from './oauth.js';

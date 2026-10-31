@@ -208,15 +208,20 @@ describe('docker/mcp-catalog', () => {
     }
   });
 
-  it('is installed into the server image from the lockfile', () => {
-    const dockerfile = read('server.Dockerfile');
-    expect(dockerfile).toContain(
-      'COPY docker/mcp-catalog/package.json docker/mcp-catalog/package-lock.json ./',
-    );
-    expect(dockerfile).toMatch(/RUN npm ci --omit=dev --ignore-scripts/);
-    expect(dockerfile).toContain(`WORKDIR ${DEFAULT_CATALOG_INSTALL_DIR}`);
-    expect(dockerfile).toContain(
-      `COPY --from=mcp-catalog ${DEFAULT_CATALOG_INSTALL_DIR} ${DEFAULT_CATALOG_INSTALL_DIR}`,
-    );
-  });
+  // The server image runs them on the host; the computer image in each
+  // owner's computer (OPENBOT_STDIO_RUNNER=computer), at the same path.
+  it.each(['server.Dockerfile', 'computer.Dockerfile'])(
+    'is installed into %s from the lockfile',
+    (name) => {
+      const dockerfile = read(name);
+      expect(dockerfile).toContain(
+        'COPY docker/mcp-catalog/package.json docker/mcp-catalog/package-lock.json ./',
+      );
+      expect(dockerfile).toMatch(/RUN npm ci --omit=dev --ignore-scripts/);
+      expect(dockerfile).toContain(`WORKDIR ${DEFAULT_CATALOG_INSTALL_DIR}`);
+      expect(dockerfile).toContain(
+        `COPY --from=mcp-catalog ${DEFAULT_CATALOG_INSTALL_DIR} ${DEFAULT_CATALOG_INSTALL_DIR}`,
+      );
+    },
+  );
 });

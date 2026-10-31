@@ -111,6 +111,9 @@ describe('/api/v1/connectors', () => {
       // Both stay off on the hosted service (plan 21.6); this suite covers them.
       OPENBOT_CUSTOM_STDIO: 'true',
       OPENBOT_LOCAL_ENDPOINTS: 'true',
+      // As is host stdio, which this suite covers; computer-stdio.test.ts runs them in computers.
+      OPENBOT_STDIO_RUNNER: 'host',
+      OPENBOT_ALLOW_HOST_STDIO: '1',
     });
     admin = (await t.signUp('admin@example.com')).cookie!;
     member = (await t.signUp('member@example.com')).cookie!;
