@@ -25,13 +25,13 @@ const { renderIcons, ICON_AVATAR, ICONSET, BUILD_DIR, WEB_PUBLIC_DIR } = (await 
 };
 
 describe('app icon', () => {
-  it('is the round blue avatar with glasses and sleepy eyes, which its seed alone gives', () => {
+  it('is Pixel, the blue moon-shaped avatar with headphones, which its seed alone gives', () => {
     const { seed, ...parts } = ICON_AVATAR;
     expect(parts).toEqual({
-      shape: 'circle',
+      shape: 'bean',
       palette: 'sky',
-      eyes: 'sleepy',
-      accessory: 'glasses',
+      eyes: 'round',
+      accessory: 'headphones',
     });
     expect(resolveParts({ seed })).toEqual(parts);
   });

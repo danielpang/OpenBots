@@ -1,5 +1,6 @@
-// Renders the app icon from a Bot avatar (packages/avatars): the blue round
-// face with glasses and sleepy eyes, on a dark plate that matches the app's
+// Renders the app icon from a Bot avatar (packages/avatars): Pixel from the
+// openbots.sh landing page, the blue moon-shaped face with round eyes and
+// headphones, on a dark plate that matches the app's
 // dark background. The face is drawn by the avatars package's own generate(),
 // so it stays the same drawing a Bot with these parts shows.
 //
@@ -27,15 +28,15 @@ export const BUILD_DIR = join(desktopDir, 'build');
 export const WEB_PUBLIC_DIR = join(desktopDir, '../web/public');
 
 /**
- * The avatar: seed `OpenBot-225` resolves to these parts on its own, and
+ * The avatar: seed `OpenBots-2225` resolves to these parts on its own, and
  * pinning them keeps the icon the same if the catalogue's order changes.
  */
 export const ICON_AVATAR = {
-  seed: 'OpenBot-225',
-  shape: 'circle',
+  seed: 'OpenBots-2225',
+  shape: 'bean',
   palette: 'sky',
-  eyes: 'sleepy',
-  accessory: 'glasses',
+  eyes: 'round',
+  accessory: 'headphones',
 };
 
 /** The app's dark background (packages/ui --background in dark mode, oklch(0.145 0 0)). */
