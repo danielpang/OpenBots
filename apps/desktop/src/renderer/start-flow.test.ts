@@ -143,13 +143,13 @@ describe('the welcome screen flow', () => {
   it('keeps a failed pull output for "Show details"', async () => {
     const bridge = fakeBridge({ status: { ...running, services: [] } });
     bridge.stack.start.mockRejectedValueOnce(
-      new Error('Pulling the OpenBot images failed.\nmanifest unknown'),
+      new Error('Pulling the OpenBots images failed.\nmanifest unknown'),
     );
     const flow = createStartFlow(bridge, welcomeQuery);
     await flow.welcome.setUpLocal();
     expect(flow.store.get().welcome.local).toEqual({
       kind: 'failed',
-      message: 'Pulling the OpenBot images failed.',
+      message: 'Pulling the OpenBots images failed.',
       detail: 'manifest unknown',
     });
   });
@@ -258,13 +258,13 @@ describe('the status page flow', () => {
   it('keeps the output of a failed stack call for "Show details"', async () => {
     const bridge = fakeBridge();
     bridge.stack.stop.mockRejectedValueOnce(
-      new Error('The OpenBot stack did not stop.\ncompose exited 1'),
+      new Error('The OpenBots stack did not stop.\ncompose exited 1'),
     );
     const flow = createStartFlow(bridge, new URLSearchParams('profile=local'));
     await flow.start();
     await flow.status.stop();
     expect(flow.store.get().error).toEqual({
-      message: 'The OpenBot stack did not stop.',
+      message: 'The OpenBots stack did not stop.',
       detail: 'compose exited 1',
       place: 'stack',
     });

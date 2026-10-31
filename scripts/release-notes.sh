@@ -26,12 +26,12 @@ download="https://github.com/$REPOSITORY/releases/download/$TAG"
 fence='```'
 
 cat <<EOF
-OpenBot $version: the Mac app, the container images and the Docker Compose bundle, released
+OpenBots $version: the Mac app, the container images and the Docker Compose bundle, released
 together from one tag.
 
 ## Mac app
 
-Download \`OpenBot-$version-universal.dmg\` (Apple Silicon and Intel), open it and drag OpenBot to
+Download \`OpenBots-$version-universal.dmg\` (Apple Silicon and Intel), open it and drag OpenBots to
 Applications. "Run OpenBots on this Mac" needs Docker Desktop or OrbStack.
 
 EOF
@@ -46,7 +46,7 @@ else
   cat <<EOF
 **Unsigned build: right-click Open on first launch.** This build is not signed with a Developer
 ID or notarized, so macOS blocks a double click the first time. In Applications, right-click
-OpenBot and choose Open. On macOS 15 or later, if there is no Open button, go to System Settings,
+OpenBots and choose Open. On macOS 15 or later, if there is no Open button, go to System Settings,
 Privacy & Security, and click Open Anyway.
 
 Automatic updates (electron-updater) only work for signed builds, so this release carries no

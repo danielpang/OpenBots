@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Hardened runtime entitlements for the OpenBot Mac app and its helpers.
+<!-- Hardened runtime entitlements for the OpenBots Mac app and its helpers.
      V8 needs JIT and unsigned executable memory; nothing else is relaxed. -->
 <plist version="1.0">
   <dict>

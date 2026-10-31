@@ -11,7 +11,7 @@ import { nodeExec, type Exec } from '../stack/process.js';
 
 // The local stack's fallback when a registry pull fails (GHCR packages start
 // private, or the network blocks ghcr.io): every GitHub Release carries each
-// OpenBot image as a gzipped `docker load` archive per architecture,
+// OpenBots image as a gzipped `docker load` archive per architecture,
 // openbot-<image>-<version>-linux-<arch>.tar.gz, and a SHA256SUMS file
 // (.github/workflows/release.yml). This downloads the archives for the app's
 // own version and this Mac's architecture, checks each against SHA256SUMS and
@@ -44,7 +44,7 @@ export class ReleaseImageError extends Error {
 export function imageArch(nodeArch: string = process.arch): ImageArch {
   if (nodeArch === 'arm64') return 'arm64';
   if (nodeArch === 'x64') return 'amd64';
-  throw new ReleaseImageError(`No OpenBot image archives are built for ${nodeArch}.`, 'arch');
+  throw new ReleaseImageError(`No OpenBots image archives are built for ${nodeArch}.`, 'arch');
 }
 
 export function imageArchiveName(image: ReleaseImage, version: string, arch: ImageArch): string {
@@ -155,7 +155,7 @@ export async function loadReleaseImages(
       const expected = sums.get(file);
       if (!expected) {
         throw new ReleaseImageError(
-          `The OpenBot ${version} release has no ${image} image for ${arch} (${file} is not in SHA256SUMS).`,
+          `The OpenBots ${version} release has no ${image} image for ${arch} (${file} is not in SHA256SUMS).`,
           'checksum',
         );
       }
@@ -214,14 +214,14 @@ async function fetchText(
     response = await fetchImpl(url, { signal });
   } catch (error) {
     throw new ReleaseImageError(
-      `Could not reach GitHub to download the OpenBot ${version} images: ${errorMessage(error)}`,
+      `Could not reach GitHub to download the OpenBots ${version} images: ${errorMessage(error)}`,
       'download',
     );
   }
   if (!response.ok) {
     throw new ReleaseImageError(
       response.status === 404
-        ? `There is no OpenBot ${version} release with image archives (${url}).`
+        ? `There is no OpenBots ${version} release with image archives (${url}).`
         : `Downloading ${url} failed: HTTP ${response.status}.`,
       'download',
     );

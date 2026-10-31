@@ -445,8 +445,8 @@ export function pullFailureMessage(output: string, upgrade: StackUpgrade | null)
       : IMAGES_UNAVAILABLE;
   }
   return upgrade
-    ? `Could not download OpenBot ${upgrade.to}.`
-    : 'Pulling the OpenBot images failed.';
+    ? `Could not download OpenBots ${upgrade.to}.`
+    : 'Pulling the OpenBots images failed.';
 }
 
 /** The prefix compose pulls the release's server image from (`<prefix>/server:<version>`). */
@@ -468,7 +468,7 @@ export function upFailureMessage(output: string, port: number): string {
   if (isNetworkClash(output, { stronglyOnly: true })) return NETWORK_CLASH;
   if (UP_PORT_TAKEN.test(output)) return portTakenMessage(port);
   if (isNetworkClash(output)) return NETWORK_CLASH;
-  return 'The OpenBot stack did not start.';
+  return 'The OpenBots stack did not start.';
 }
 
 const output = (result: ExecResult) => [result.stdout, result.stderr].join('\n').trim();
@@ -926,7 +926,7 @@ export function createStackManager(options: StackManagerOptions): StackManager {
       if (!(await files.exists(paths.envFile))) return statusOf(docker);
       const name = await project(docker.cli);
       const down = await compose(docker.cli, name, { kind: 'down' });
-      if (down.code !== 0) throw new StackError('The OpenBot stack did not stop.', output(down));
+      if (down.code !== 0) throw new StackError('The OpenBots stack did not stop.', output(down));
       return statusOf(docker, name);
     },
 

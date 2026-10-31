@@ -122,10 +122,10 @@ describe('electron-builder.yml', () => {
         releaseType: 'draft',
       },
     ]);
-    expect(publishModule.releaseRepository({ GITHUB_REPOSITORY: 'ada/OpenBot-fork' })).toEqual({
+    expect(publishModule.releaseRepository({ GITHUB_REPOSITORY: 'ada/OpenBots-fork' })).toEqual({
       owner: 'ada',
-      repo: 'OpenBot-fork',
-      slug: 'ada/OpenBot-fork',
+      repo: 'OpenBots-fork',
+      slug: 'ada/OpenBots-fork',
     });
     for (const bad of ['', 'no-slash', 'a/b/c', 'a b/c', '../x']) {
       expect(publishModule.releaseRepository({ GITHUB_REPOSITORY: bad }).slug).toBe(
@@ -144,9 +144,9 @@ describe('electron-builder.yml', () => {
       expect(await getConfig(desktopDir, null, null)).toMatchObject({
         publish: [{ provider: 'github', owner: 'danielpang', repo: 'OpenBots' }],
       });
-      process.env.GITHUB_REPOSITORY = 'ada/OpenBot-fork';
+      process.env.GITHUB_REPOSITORY = 'ada/OpenBots-fork';
       expect(await getConfig(desktopDir, null, null)).toMatchObject({
-        publish: [{ provider: 'github', owner: 'ada', repo: 'OpenBot-fork' }],
+        publish: [{ provider: 'github', owner: 'ada', repo: 'OpenBots-fork' }],
       });
     } finally {
       if (saved === undefined) delete process.env.GITHUB_REPOSITORY;
@@ -250,7 +250,7 @@ describe('electron-builder.yml', () => {
 
   it('names the DMG the way the cask and workflow expect', () => {
     expect(builderConfig.dmg.artifactName).toBe('${productName}-${version}-universal.${ext}');
-    expect(builderConfig.productName).toBe('OpenBot');
+    expect(builderConfig.productName).toBe('OpenBots');
   });
 });
 
@@ -282,7 +282,7 @@ describe('the bundled compose stack', () => {
     for (const [name, service] of started) expect(service.image, name).toBeTruthy();
   });
 
-  it('pulls each OpenBot image from the release workflow, built from the same Dockerfile', () => {
+  it('pulls each OpenBots image from the release workflow, built from the same Dockerfile', () => {
     for (const [name, service] of Object.entries(bundled)) {
       const own = /^\$\{OPENBOT_IMAGE_PREFIX[^}]*\}\/([a-z-]+):\$\{OPENBOT_VERSION/.exec(
         service.image ?? '',
@@ -408,7 +408,7 @@ describe('release workflow', () => {
 
   it('renders the cask from the template and the DMG name electron-builder produces', () => {
     const run = step('Render the Homebrew cask').run!;
-    expect(run).toContain('release/OpenBot-$VERSION-universal.dmg');
+    expect(run).toContain('release/OpenBots-$VERSION-universal.dmg');
     expect(run).toContain('packaging/homebrew/openbot.rb.template');
     // The cask points at the repository the release goes to.
     expect(run).toContain("require('./electron-builder.publish.cjs').releaseRepository().slug");
@@ -429,9 +429,9 @@ describe('Homebrew cask template', () => {
 
   it('downloads the DMG from the v<version> release of the release repository', () => {
     expect(template).toContain(
-      'https://github.com/{{REPOSITORY}}/releases/download/v#{version}/OpenBot-#{version}-universal.dmg',
+      'https://github.com/{{REPOSITORY}}/releases/download/v#{version}/OpenBots-#{version}-universal.dmg',
     );
     expect(template).not.toContain('danielpang');
-    expect(template).toContain('app "OpenBot.app"');
+    expect(template).toContain('app "OpenBots.app"');
   });
 });

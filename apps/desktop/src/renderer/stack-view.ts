@@ -35,7 +35,7 @@ export const RUNTIME_NAMES = {
 export function stackView(status: StackStatus): StackView {
   const { docker, services } = status;
   const upgrade = status.upgrade
-    ? `This Mac runs OpenBot ${status.upgrade.from}. Update to ${status.upgrade.to}, the app's version.`
+    ? `This Mac runs OpenBots ${status.upgrade.from}. Update to ${status.upgrade.to}, the app's version.`
     : null;
   const none = {
     canStart: false,
@@ -50,7 +50,7 @@ export function stackView(status: StackStatus): StackView {
     case 'missing':
       return {
         ...none,
-        text: 'Docker is not installed. Install OrbStack or Docker Desktop to run OpenBot on this Mac.',
+        text: 'Docker is not installed. Install OrbStack or Docker Desktop to run OpenBots on this Mac.',
       };
     case 'stopped':
       return {

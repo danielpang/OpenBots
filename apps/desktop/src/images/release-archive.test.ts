@@ -156,7 +156,7 @@ describe('loadReleaseImages', () => {
       ),
     ).rejects.toMatchObject({
       reason: 'download',
-      message: expect.stringMatching(/no OpenBot 1\.2\.0 release with image archives/),
+      message: expect.stringMatching(/no OpenBots 1\.2\.0 release with image archives/),
     });
 
     const amd64Only = archivesFor('amd64');
@@ -250,7 +250,7 @@ describe('releaseImageLoader', () => {
     const files = {
       [imageArchiveName('computer', VERSION, process.arch === 'x64' ? 'amd64' : 'arm64')]: 'c',
     };
-    const fork = `https://github.com/ada/OpenBot-fork/releases/download/v${VERSION}`;
+    const fork = `https://github.com/ada/OpenBots-fork/releases/download/v${VERSION}`;
     const requested: string[] = [];
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input);
@@ -264,7 +264,7 @@ describe('releaseImageLoader', () => {
     const env = { PATH: '/x' };
 
     await releaseImageLoader({
-      repository: 'ada/OpenBot-fork',
+      repository: 'ada/OpenBots-fork',
       exec: docker.exec,
       fetch: fetchImpl,
       tmpDir: tmp,
@@ -295,8 +295,8 @@ describe('release archive helpers', () => {
     expect(imageArchiveName('sandbox-firewall', '1.3.0-rc.1', 'amd64')).toBe(
       'openbot-sandbox-firewall-1.3.0-rc.1-linux-amd64.tar.gz',
     );
-    expect(releaseAssetUrl('ada/OpenBot-fork', '1.2.0', 'SHA256SUMS')).toBe(
-      'https://github.com/ada/OpenBot-fork/releases/download/v1.2.0/SHA256SUMS',
+    expect(releaseAssetUrl('ada/OpenBots-fork', '1.2.0', 'SHA256SUMS')).toBe(
+      'https://github.com/ada/OpenBots-fork/releases/download/v1.2.0/SHA256SUMS',
     );
     const workflow = readFileSync(
       join(
@@ -325,9 +325,9 @@ describe('release archive helpers', () => {
   it("reads the release repository from the app's app-update.yml", () => {
     expect(
       repositoryFromAppUpdateYml(
-        'owner: ada\nrepo: OpenBot-fork\nprovider: github\nupdaterCacheDirName: x\n',
+        'owner: ada\nrepo: OpenBots-fork\nprovider: github\nupdaterCacheDirName: x\n',
       ),
-    ).toBe('ada/OpenBot-fork');
+    ).toBe('ada/OpenBots-fork');
     expect(repositoryFromAppUpdateYml('provider: generic\nurl: https://x\n')).toBeNull();
   });
 

@@ -16,8 +16,8 @@ Engine on Linux), and `git` to install from the repository.
 
 Each [release](https://github.com/danielpang/OpenBots/releases) carries:
 
-- **The Mac app**, `OpenBot-<version>-universal.dmg` (Apple Silicon and Intel). Open it and drag
-  OpenBot to Applications. It connects to an OpenBots account, to your own server, or runs
+- **The Mac app**, `OpenBots-<version>-universal.dmg` (Apple Silicon and Intel). Open it and drag
+  OpenBots to Applications. It connects to an OpenBots account, to your own server, or runs
   everything on the Mac with Docker Desktop or OrbStack. If the release notes say it is an
   unsigned build, right-click OpenBot and choose Open the first time, and download later releases
   yourself: only signed builds update themselves.

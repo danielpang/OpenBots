@@ -71,6 +71,14 @@ const RENDERER_URL = process.env.ELECTRON_RENDERER_URL;
 /** The app icon in development; a packaged app carries its own (./app-icon.ts). */
 const DEV_ICON = devAppIconPath({ packaged: app.isPackaged, mainDir: here });
 
+// A development build takes its name from package.json. Name it OpenBots in
+// menus and dialogs, as the packaged app is, and keep its data where it was.
+if (!app.isPackaged) {
+  const userData = app.getPath('userData');
+  app.setName('OpenBots');
+  app.setPath('userData', userData);
+}
+
 const files: ProfileFiles = {
   readFile: (path) => readFile(path, 'utf8'),
   // Profiles and sealed tokens are the owner's alone.
@@ -465,7 +473,7 @@ async function createMainWindow(profile: ServerProfile): Promise<BrowserWindow> 
     minWidth: 720,
     minHeight: 480,
     show: false,
-    title: 'OpenBot',
+    title: 'OpenBots',
     // Windows and Linux show it on the window and taskbar; macOS uses the Dock icon.
     icon: DEV_ICON,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -686,7 +694,7 @@ function updateTray() {
   if (!tray) return;
   const menu = trayMenu({
     approvals,
-    profileName: activeProfile?.name ?? 'OpenBot',
+    profileName: activeProfile?.name ?? 'OpenBots',
     connection: activeProfile ? connectionHeader(activeProfile) : null,
     connected: connection != null,
     actions: {
@@ -707,7 +715,7 @@ function updateTray() {
   });
   tray.setContextMenu(Menu.buildFromTemplate(menu));
   tray.setTitle(trayTitle(approvals.length, trayHasIcon));
-  tray.setToolTip(approvals.length > 0 ? `OpenBot: ${approvals.length} pending` : 'OpenBot');
+  tray.setToolTip(approvals.length > 0 ? `OpenBots: ${approvals.length} pending` : 'OpenBots');
 }
 
 async function openNewDialog() {
@@ -801,11 +809,11 @@ if (!app.requestSingleInstanceLock()) {
         openOAuth: (url) => oauthBrowser.open(url),
         oauthFinished: () => void oauthBrowser.finished(),
         quickAskBots: async () => {
-          if (!connection) throw new Error('Sign in to OpenBot first.');
+          if (!connection) throw new Error('Sign in to OpenBots first.');
           return connection.bots();
         },
         quickAsk: async (botId, text) => {
-          if (!connection) throw new Error('Sign in to OpenBot first.');
+          if (!connection) throw new Error('Sign in to OpenBots first.');
           const result = await connection.ask(botId, text);
           quickAskWindow?.hide();
           return result;

@@ -43,7 +43,7 @@ export function createQuickAskFlow(bridge: Pick<AppBridge, 'quickAsk'>, storage:
         const last = storage.getItem(LAST_BOT);
         const botId = last && bots.some((b) => b.id === last) ? last : (bots[0]?.id ?? '');
         store.update({ bots, botId });
-        if (bots.length === 0) showError('Make a Bot in OpenBot first.');
+        if (bots.length === 0) showError('Make a Bot in OpenBots first.');
       }, showError),
     choose: (botId: string) => store.update({ botId }),
     setText: (text: string) => store.update({ text }),

@@ -1,4 +1,4 @@
-# Homebrew cask for the OpenBot Mac app. The release workflow (release-mac.yml) renders
+# Homebrew cask for the OpenBots Mac app. The release workflow (release-mac.yml) renders
 # this template ({{VERSION}}, {{SHA256}}, and {{REPOSITORY}}, the GitHub
 # repository the release is published to) and attaches openbot.rb to the GitHub
 # Release; copy it into the tap's Casks/ directory to publish.
@@ -6,9 +6,9 @@ cask "openbot" do
   version "{{VERSION}}"
   sha256 "{{SHA256}}"
 
-  url "https://github.com/{{REPOSITORY}}/releases/download/v#{version}/OpenBot-#{version}-universal.dmg",
+  url "https://github.com/{{REPOSITORY}}/releases/download/v#{version}/OpenBots-#{version}-universal.dmg",
       verified: "github.com/{{REPOSITORY}}/"
-  name "OpenBot"
+  name "OpenBots"
   desc "Delegate work to AI Bots that chat, use tools and run their own computers"
   homepage "https://github.com/{{REPOSITORY}}"
 
@@ -21,11 +21,11 @@ cask "openbot" do
   auto_updates true
   depends_on macos: ">= :monterey"
 
-  app "OpenBot.app"
+  app "OpenBots.app"
 
   zap trash: [
-    "~/Library/Application Support/OpenBot",
-    "~/Library/Logs/OpenBot",
+    "~/Library/Application Support/OpenBots",
+    "~/Library/Logs/OpenBots",
     "~/Library/Preferences/app.openbot.desktop.plist",
     "~/Library/Saved Application State/app.openbot.desktop.savedState",
   ]

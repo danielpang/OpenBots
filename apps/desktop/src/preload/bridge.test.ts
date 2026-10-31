@@ -197,7 +197,7 @@ describe('isAppPage', () => {
   it('is the bundle, or the renderer dev server', () => {
     expect(
       isAppPage(
-        'file:///Applications/OpenBot.app/Contents/Resources/app.asar/dist/renderer/index.html',
+        'file:///Applications/OpenBots.app/Contents/Resources/app.asar/dist/renderer/index.html',
         undefined,
       ),
     ).toBe(true);

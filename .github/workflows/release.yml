@@ -212,8 +212,8 @@ jobs:
         working-directory: ${{ runner.temp }}/assets
         run: |
           expected=(
-            "OpenBot-$VERSION-universal.dmg"
-            "OpenBot-$VERSION-universal-mac.zip"
+            "OpenBots-$VERSION-universal.dmg"
+            "OpenBots-$VERSION-universal-mac.zip"
             "openbot.rb"
             "openbot-compose-$VERSION.tar.gz"
           )
@@ -271,12 +271,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "OpenBot $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release edit "$TAG" --title "OpenBots $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
             gh release upload "$TAG" "$RUNNER_TEMP"/assets/* --clobber
           else
             flags=(--latest)
             if [ "$PRERELEASE" = true ]; then flags=(--prerelease --latest=false); fi
-            gh release create "$TAG" --verify-tag --title "OpenBot $VERSION" \
+            gh release create "$TAG" --verify-tag --title "OpenBots $VERSION" \
               --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" "$RUNNER_TEMP"/assets/*
           fi
 
@@ -286,7 +286,7 @@ jobs:
           PRIVATE_IMAGES: ${{ steps.public.outputs.private }}
         run: |
           {
-            echo "## OpenBot $VERSION"
+            echo "## OpenBots $VERSION"
             echo
             echo "Release: https://github.com/$REPOSITORY/releases/tag/$TAG"
             echo
@@ -300,7 +300,7 @@ jobs:
               echo "> [!WARNING]"
               echo "> **These images are private: $PRIVATE_IMAGES.** Installs and the Mac app cannot pull them."
               echo "> GitHub's API cannot change a package's visibility. Open https://github.com/$OWNER?tab=packages,"
-              echo "> then for each OpenBot package: Package settings, Change visibility, Public."
+              echo "> then for each OpenBots package: Package settings, Change visibility, Public."
               echo "> Then check again: \`bash scripts/release-check-public.sh $IMAGE_PREFIX $VERSION\`"
             else
               echo "Images: all public."

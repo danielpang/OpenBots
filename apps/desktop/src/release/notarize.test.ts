@@ -4,7 +4,7 @@ import { notarizeApp, notarizeCredentials, type AfterSignContext } from './notar
 const context: AfterSignContext = {
   electronPlatformName: 'darwin',
   appOutDir: '/build/release/mac-universal',
-  packager: { appInfo: { productFilename: 'OpenBot' } },
+  packager: { appInfo: { productFilename: 'OpenBots' } },
 };
 
 const API_KEY_ENV = {
@@ -47,7 +47,7 @@ describe('notarizeApp', () => {
     const notarize = vi.fn(async () => undefined);
     await notarizeApp(context, { env: API_KEY_ENV, notarize, log: () => undefined });
     expect(notarize).toHaveBeenCalledWith({
-      appPath: '/build/release/mac-universal/OpenBot.app',
+      appPath: '/build/release/mac-universal/OpenBots.app',
       appleApiKey: '/tmp/AuthKey.p8',
       appleApiKeyId: 'T9GPZ92M7K',
       appleApiIssuer: 'c055ca8c-e5a8-4836-b61d-aa5794eeb3f4',

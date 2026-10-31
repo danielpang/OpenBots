@@ -1,11 +1,11 @@
-# electron-builder configuration for the OpenBot Mac app (plan 14.4, 18.8).
+# electron-builder configuration for the OpenBots Mac app (plan 14.4, 18.8).
 # Built by .github/workflows/release-mac.yml; see RELEASING.md for the
 # signed, notarized and unsigned paths. Paths are relative to apps/desktop.
 extends: ./electron-builder.publish.cjs
 
 appId: app.openbot.desktop
-productName: OpenBot
-copyright: Copyright © OpenBot contributors
+productName: OpenBots
+copyright: Copyright © OpenBots contributors
 
 directories:
   output: release
@@ -32,7 +32,7 @@ extraResources:
     filter: ['*.png']
 
 protocols:
-  - name: OpenBot
+  - name: OpenBots
     schemes: [openbot]
 
 # Notarization runs in this hook with @electron/notarize; electron-builder's

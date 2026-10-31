@@ -33,7 +33,7 @@ describe('updater', () => {
     expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
     autoUpdater.emit('update-downloaded', { version: '1.1.0' });
     expect(notify).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'OpenBot 1.1.0 is ready' }),
+      expect.objectContaining({ title: 'OpenBots 1.1.0 is ready' }),
     );
     notify.mock.calls[0]![0].onClick();
     expect(autoUpdater.quitAndInstall).toHaveBeenCalled();
@@ -49,7 +49,7 @@ describe('updater', () => {
     updater.checkNow();
     autoUpdater.emit('update-not-available');
     expect(notify).toHaveBeenCalledWith({
-      title: 'OpenBot is up to date',
+      title: 'OpenBots is up to date',
       body: 'You have the latest version.',
     });
   });

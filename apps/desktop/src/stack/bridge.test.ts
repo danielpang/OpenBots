@@ -194,12 +194,12 @@ describe('registerStackIpc', () => {
     const { ipcMain, invoke } = fakeIpcMain();
     const manager = fakeManager({
       start: async () => {
-        throw new StackError('The OpenBot stack did not start.', 'port 3000 is already allocated');
+        throw new StackError('The OpenBots stack did not start.', 'port 3000 is already allocated');
       },
     });
     registerStackIpc(ipcMain, manager, () => true);
     await expect(invoke(STACK_CHANNELS.start, { sender: fakeSender() })).rejects.toThrow(
-      'The OpenBot stack did not start.\nport 3000 is already allocated',
+      'The OpenBots stack did not start.\nport 3000 is already allocated',
     );
   });
 
@@ -327,11 +327,11 @@ describe('errorParts', () => {
     expect(
       errorParts(
         new Error(
-          "Error invoking remote method 'openbot:stack:upgrade': Error: Pulling the OpenBot images failed.\nline 1\nline 2",
+          "Error invoking remote method 'openbot:stack:upgrade': Error: Pulling the OpenBots images failed.\nline 1\nline 2",
         ),
       ),
     ).toEqual({
-      message: 'Pulling the OpenBot images failed.',
+      message: 'Pulling the OpenBots images failed.',
       detail: 'line 1\nline 2',
       kind: null,
     });
@@ -353,7 +353,7 @@ describe('errorParts', () => {
     ).toEqual({ message: NETWORK_CLASH, detail: 'Address already in use', kind: 'network-clash' });
     // The output alone does not make a clash: the manager chose the sentence.
     expect(
-      errorParts(new Error('The OpenBot stack did not start.\nAddress already in use')).kind,
+      errorParts(new Error('The OpenBots stack did not start.\nAddress already in use')).kind,
     ).toBeNull();
   });
 

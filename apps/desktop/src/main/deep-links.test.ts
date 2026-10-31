@@ -114,9 +114,9 @@ describe('deep links', () => {
   });
 
   it('finds the link among process arguments', () => {
-    expect(deepLinkFromArgv(['/Applications/OpenBot', '--flag', `openbot://bot/${BOT}`])).toBe(
+    expect(deepLinkFromArgv(['/Applications/OpenBots', '--flag', `openbot://bot/${BOT}`])).toBe(
       `openbot://bot/${BOT}`,
     );
-    expect(deepLinkFromArgv(['/Applications/OpenBot'])).toBeUndefined();
+    expect(deepLinkFromArgv(['/Applications/OpenBots'])).toBeUndefined();
   });
 });

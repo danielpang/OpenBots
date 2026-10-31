@@ -1,4 +1,4 @@
-# Releasing OpenBot
+# Releasing OpenBots
 
 One version tag, `v<version>`, releases everything together (plan sections 3, 14.4, 16.1, 18.8
 and 19):
@@ -180,9 +180,9 @@ export APPLE_API_KEY=~/keys/AuthKey_XXXX.p8 APPLE_API_KEY_ID=XXXX APPLE_API_ISSU
 #   or: export APPLE_ID=you@example.com APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx APPLE_TEAM_ID=ABCDE12345
 export OPENBOT_REQUIRE_NOTARIZATION=1
 pnpm dist:mac
-codesign --verify --deep --strict --verbose=2 release/mac-universal/OpenBot.app
-spctl --assess --type execute --verbose=2 release/mac-universal/OpenBot.app
-xcrun stapler validate release/mac-universal/OpenBot.app
+codesign --verify --deep --strict --verbose=2 release/mac-universal/OpenBots.app
+spctl --assess --type execute --verbose=2 release/mac-universal/OpenBots.app
+xcrun stapler validate release/mac-universal/OpenBots.app
 ```
 
 electron-builder finds the certificate in the keychain; set `CSC_NAME` to pick one when there are
@@ -201,7 +201,7 @@ satisfy library validation), as the workflow does without the secrets:
 cd apps/desktop
 CSC_IDENTITY_AUTO_DISCOVERY=false pnpm exec electron-builder --mac --universal --publish never \
   -c.mac.identity=- -c.mac.hardenedRuntime=false
-xattr -dr com.apple.quarantine release/mac-universal/OpenBot.app
+xattr -dr com.apple.quarantine release/mac-universal/OpenBots.app
 ```
 
 For a quicker local check, `CSC_IDENTITY_AUTO_DISCOVERY=false pnpm dist:dev` builds the same unsigned

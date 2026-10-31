@@ -201,7 +201,7 @@ export function trayMenu(input: {
   }
   items.push(
     { type: 'separator' },
-    { label: `Open OpenBot (${input.profileName})`, click: () => actions.open() },
+    { label: `Open OpenBots (${input.profileName})`, click: () => actions.open() },
     {
       label: 'Quick Ask…',
       accelerator: QUICK_ASK_ACCELERATOR,
@@ -211,7 +211,7 @@ export function trayMenu(input: {
     { label: 'Change connection…', click: () => actions.changeConnection() },
     { type: 'separator' },
     { label: 'Check for Updates…', click: () => actions.checkForUpdates() },
-    { label: 'Quit OpenBot', accelerator: 'CommandOrControl+Q', click: () => actions.quit() },
+    { label: 'Quit OpenBots', accelerator: 'CommandOrControl+Q', click: () => actions.quit() },
   );
   return items;
 }

@@ -1,4 +1,4 @@
-# Builds the OpenBot Mac app for a release (plan 14.4, 18.8), called by
+# Builds the OpenBots Mac app for a release (plan 14.4, 18.8), called by
 # release.yml: a universal binary with electron-builder, as a DMG plus the zip
 # and latest-mac.yml electron-updater reads, and a rendered Homebrew cask. See
 # apps/desktop/RELEASING.md.
@@ -146,15 +146,15 @@ jobs:
         if: steps.signing.outputs.signed == 'true'
         working-directory: apps/desktop/release/mac-universal
         run: |
-          codesign --verify --deep --strict --verbose=2 OpenBot.app
-          spctl --assess --type execute --verbose=2 OpenBot.app
-          xcrun stapler validate OpenBot.app
+          codesign --verify --deep --strict --verbose=2 OpenBots.app
+          spctl --assess --type execute --verbose=2 OpenBots.app
+          xcrun stapler validate OpenBots.app
 
       - name: Check the packaged files
         working-directory: apps/desktop/release
         run: |
           ls -l
-          for file in "OpenBot-$VERSION-universal.dmg" "OpenBot-$VERSION-universal-mac.zip" latest-mac.yml; do
+          for file in "OpenBots-$VERSION-universal.dmg" "OpenBots-$VERSION-universal-mac.zip" latest-mac.yml; do
             if [ ! -f "$file" ]; then
               echo "::error::electron-builder did not write $file"
               exit 1
@@ -162,7 +162,7 @@ jobs:
           done
           # electron-updater reads the version and the zip from latest-mac.yml.
           if ! grep -qx "version: $VERSION" latest-mac.yml ||
-            ! grep -q "OpenBot-$VERSION-universal-mac.zip" latest-mac.yml; then
+            ! grep -q "OpenBots-$VERSION-universal-mac.zip" latest-mac.yml; then
             echo "::error::latest-mac.yml does not name version $VERSION and its zip"
             cat latest-mac.yml
             exit 1
@@ -171,7 +171,7 @@ jobs:
       - name: Render the Homebrew cask
         working-directory: apps/desktop
         run: |
-          sha="$(shasum -a 256 "release/OpenBot-$VERSION-universal.dmg" | cut -d ' ' -f 1)"
+          sha="$(shasum -a 256 "release/OpenBots-$VERSION-universal.dmg" | cut -d ' ' -f 1)"
           # The repository the release goes to: GITHUB_REPOSITORY, or the default.
           repo="$(node -p "require('./electron-builder.publish.cjs').releaseRepository().slug")"
           sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{SHA256}}/$sha/g" -e "s#{{REPOSITORY}}#$repo#g" \

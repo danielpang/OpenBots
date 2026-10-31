@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <!-- The OpenBot menu bar icon: a Bot's head with an antenna. Black on
+  <!-- The OpenBots menu bar icon: a Bot's head with an antenna. Black on
        transparent, as macOS template images are; scripts/tray-icon.mjs
        renders it to trayTemplate.png and trayTemplate@2x.png. -->
   <circle cx="8" cy="1.75" r="1.25"/>

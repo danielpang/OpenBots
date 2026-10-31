@@ -196,10 +196,10 @@ describe('Run OpenBots on this Mac', () => {
       upgrade: null,
       port: null,
     });
-    bridge.stack.start.mockRejectedValueOnce(new Error('The OpenBot stack did not start.'));
+    bridge.stack.start.mockRejectedValueOnce(new Error('The OpenBots stack did not start.'));
     const { view } = fakeView();
     await expect(runLocalSetup(bridge, view)).resolves.toBe('failed');
-    expect(view.failed).toHaveBeenCalledWith('The OpenBot stack did not start.', null);
+    expect(view.failed).toHaveBeenCalledWith('The OpenBots stack did not start.', null);
     expect(bridge.connect.local).not.toHaveBeenCalled();
     expect(listening()).toBe(false);
   });

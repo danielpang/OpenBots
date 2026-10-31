@@ -78,7 +78,7 @@ describe('stackView', () => {
       port: null,
     });
     expect(view).toMatchObject({
-      upgrade: "This Mac runs OpenBot 0.3.0. Update to 0.4.0, the app's version.",
+      upgrade: "This Mac runs OpenBots 0.3.0. Update to 0.4.0, the app's version.",
       canUpgrade: true,
       running: true,
     });

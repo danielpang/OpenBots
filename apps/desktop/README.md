@@ -1,6 +1,6 @@
 # @openbot/desktop
 
-The OpenBot Mac app: an Electron shell around the web app (plan section 14.4, Phase 7).
+The OpenBots Mac app: an Electron shell around the web app (plan section 14.4, Phase 7).
 
 ```sh
 pnpm --filter @openbot/desktop dev     # electron-vite dev: main, preload and the app pages
@@ -76,7 +76,7 @@ its files.
     through `onNew` on the preload bridge.
   - `tray-icon.ts`: the menu bar icon, a template image in `resources/tray` rendered from
     `tray.svg` by `pnpm tray-icon` (`scripts/tray-icon.mjs`), with the pending count beside it.
-  - `app-icon.ts`: the app icon, a Bot avatar (seed `OpenBot-225`: round, sky, sleepy eyes,
+  - `app-icon.ts`: the app icon, a Bot avatar (seed `OpenBots-225`: round, sky, sleepy eyes,
     glasses) on a dark plate. `pnpm app-icon` (`scripts/make-icon.mjs`) renders it with the
     avatars package into `build/` (`icon.svg`, `icon.png` and `icon.icns`, which
     electron-builder packages) and the web app's favicon and apple-touch-icon. In development

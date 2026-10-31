@@ -35,13 +35,13 @@ export function createUpdater(options: UpdaterOptions) {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('update-downloaded', ({ version }) => {
     notify({
-      title: `OpenBot ${version} is ready`,
+      title: `OpenBots ${version} is ready`,
       body: 'Click to restart and update now, or it installs when you quit.',
       onClick: () => autoUpdater.quitAndInstall(),
     });
   });
   autoUpdater.on('update-not-available', () => {
-    if (manual) notify({ title: 'OpenBot is up to date', body: 'You have the latest version.' });
+    if (manual) notify({ title: 'OpenBots is up to date', body: 'You have the latest version.' });
     manual = false;
   });
   autoUpdater.on('error', (error) => {

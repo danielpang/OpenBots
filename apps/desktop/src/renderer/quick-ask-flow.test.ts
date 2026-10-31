@@ -34,7 +34,7 @@ describe('quick ask', () => {
     bridge.quickAsk.bots.mockResolvedValueOnce([]);
     const flow = createQuickAskFlow(bridge, memory());
     await flow.start();
-    expect(flow.store.get().error).toBe('Make a Bot in OpenBot first.');
+    expect(flow.store.get().error).toBe('Make a Bot in OpenBots first.');
     flow.setText('   ');
     await flow.send();
     expect(bridge.quickAsk.send).not.toHaveBeenCalled();
@@ -42,11 +42,11 @@ describe('quick ask', () => {
 
   it('keeps the text when a send fails', async () => {
     const bridge = fakeBridge();
-    bridge.quickAsk.send.mockRejectedValueOnce(new Error('Sign in to OpenBot first.'));
+    bridge.quickAsk.send.mockRejectedValueOnce(new Error('Sign in to OpenBots first.'));
     const flow = createQuickAskFlow(bridge, memory());
     await flow.start();
     flow.setText('Hello');
     await flow.send();
-    expect(flow.store.get()).toMatchObject({ text: 'Hello', error: 'Sign in to OpenBot first.' });
+    expect(flow.store.get()).toMatchObject({ text: 'Hello', error: 'Sign in to OpenBots first.' });
   });
 });

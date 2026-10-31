@@ -70,11 +70,11 @@ describe('the welcome screen', () => {
   it('shows a failed pull with its output behind "Show details"', async () => {
     const bridge = fakeBridge({ status: { ...running, services: [] } });
     bridge.stack.start.mockRejectedValueOnce(
-      new Error('Pulling the OpenBot images failed.\nmanifest unknown'),
+      new Error('Pulling the OpenBots images failed.\nmanifest unknown'),
     );
     await show(bridge, 'welcome=1');
     await click('#local-go');
-    expect($('#local-progress')?.textContent).toBe('Pulling the OpenBot images failed.');
+    expect($('#local-progress')?.textContent).toBe('Pulling the OpenBots images failed.');
     expect($('#local-details')?.tagName).toBe('DETAILS');
     expect($('#local-detail')?.textContent).toBe('manifest unknown');
     expect($('#local-check')).not.toBeNull();

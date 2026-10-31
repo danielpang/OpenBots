@@ -214,7 +214,7 @@ describe('tray menu', () => {
     });
     expect(menu[0]).toEqual({ label: 'No pending approvals', enabled: false });
     expect(menu.find((i) => i.label === 'Quick Ask…')?.enabled).toBe(false);
-    expect(menu.some((i) => i.label === 'Open OpenBot (This Mac)')).toBe(true);
+    expect(menu.some((i) => i.label === 'Open OpenBots (This Mac)')).toBe(true);
   });
 
   it('offers a quick Approve per pending approval', () => {

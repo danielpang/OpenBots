@@ -440,7 +440,7 @@ describe('createStackManager', () => {
       serverVersion: '0.4.0',
     });
     await expect(manager.start()).rejects.toMatchObject({
-      message: 'Could not download OpenBot 0.4.0.',
+      message: 'Could not download OpenBots 0.4.0.',
       detail: 'connection reset by peer',
     });
     expect(files.data.get(paths.envFile)).toBe(older);
@@ -863,7 +863,7 @@ describe('pulling the images', () => {
   it('keeps other pull failures as they were, and the copy has no dashes', () => {
     expect(imagesUnavailable('dial tcp: i/o timeout')).toBe(false);
     expect(pullFailureMessage('dial tcp: i/o timeout', null)).toBe(
-      'Pulling the OpenBot images failed.',
+      'Pulling the OpenBots images failed.',
     );
     expect(pullFailureMessage('denied', { from: '0.3.0', to: '0.4.0' })).toBe(
       'OpenBots 0.4.0 is not published yet, or its images are not public. This Mac keeps running 0.3.0.',
@@ -872,7 +872,7 @@ describe('pulling the images', () => {
       portTakenMessage(3000),
     );
     expect(upFailureMessage('network sandbox not found', 3000)).toBe(
-      'The OpenBot stack did not start.',
+      'The OpenBots stack did not start.',
     );
     for (const text of [IMAGES_UNAVAILABLE, portTakenMessage(3000)]) {
       expect(text).not.toMatch(/[–—]| - /);
@@ -1086,7 +1086,7 @@ describe('the GitHub Release fallback', () => {
       releaseImages,
     });
     await expect(manager.start()).rejects.toMatchObject({
-      message: 'Pulling the OpenBot images failed.',
+      message: 'Pulling the OpenBots images failed.',
     });
     expect(releaseImages).not.toHaveBeenCalled();
   });
@@ -1100,7 +1100,7 @@ describe('the GitHub Release fallback', () => {
       exec,
       serverVersion: '0.4.0',
       releaseImages: async () => {
-        throw new Error('There is no OpenBot 0.4.0 release with image archives.');
+        throw new Error('There is no OpenBots 0.4.0 release with image archives.');
       },
     });
     const error = await manager.start().catch((e: unknown) => e);
@@ -1110,7 +1110,7 @@ describe('the GitHub Release fallback', () => {
         'OpenBots 0.4.0 is not published yet, or its images are not public. This Mac keeps running 0.3.0.',
     });
     expect((error as StackError).detail).toBe(
-      `Pulling openbot\n${DENIED}\n\nThe images could not be downloaded from the GitHub Release either: There is no OpenBot 0.4.0 release with image archives.`,
+      `Pulling openbot\n${DENIED}\n\nThe images could not be downloaded from the GitHub Release either: There is no OpenBots 0.4.0 release with image archives.`,
     );
     expect(files.data.get(paths.envFile)).toBe(older);
     expect(verbs(exec)).not.toContain('up');

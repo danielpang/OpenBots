@@ -12,8 +12,8 @@ import {
 } from './compose.js';
 
 const paths: StackPaths = bundledStackPaths(
-  '/Applications/OpenBot.app/Contents/Resources',
-  '/Users/ada/Library/Application Support/OpenBot',
+  '/Applications/OpenBots.app/Contents/Resources',
+  '/Users/ada/Library/Application Support/OpenBots',
 );
 
 const BASE = [
@@ -21,25 +21,25 @@ const BASE = [
   '--project-name',
   'openbot-app',
   '--project-directory',
-  '/Users/ada/Library/Application Support/OpenBot/stack',
+  '/Users/ada/Library/Application Support/OpenBots/stack',
   '--env-file',
-  '/Users/ada/Library/Application Support/OpenBot/stack/.env',
+  '/Users/ada/Library/Application Support/OpenBots/stack/.env',
   '--file',
-  '/Applications/OpenBot.app/Contents/Resources/stack/docker-compose.yml',
+  '/Applications/OpenBots.app/Contents/Resources/stack/docker-compose.yml',
   '--file',
-  '/Applications/OpenBot.app/Contents/Resources/stack/docker-compose.tunnels.yml',
+  '/Applications/OpenBots.app/Contents/Resources/stack/docker-compose.tunnels.yml',
 ];
 
 describe('bundledStackPaths', () => {
   it('reads compose files from the bundle and keeps state in userData', () => {
     expect(paths).toEqual({
       composeFiles: [
-        '/Applications/OpenBot.app/Contents/Resources/stack/docker-compose.yml',
-        '/Applications/OpenBot.app/Contents/Resources/stack/docker-compose.tunnels.yml',
+        '/Applications/OpenBots.app/Contents/Resources/stack/docker-compose.yml',
+        '/Applications/OpenBots.app/Contents/Resources/stack/docker-compose.tunnels.yml',
       ],
-      projectDir: '/Users/ada/Library/Application Support/OpenBot/stack',
-      envFile: '/Users/ada/Library/Application Support/OpenBot/stack/.env',
-      envTemplate: '/Applications/OpenBot.app/Contents/Resources/stack/env.example',
+      projectDir: '/Users/ada/Library/Application Support/OpenBots/stack',
+      envFile: '/Users/ada/Library/Application Support/OpenBots/stack/.env',
+      envTemplate: '/Applications/OpenBots.app/Contents/Resources/stack/env.example',
     });
   });
 });
@@ -91,7 +91,7 @@ describe('composeArgs', () => {
 
   it('passes paths with spaces as single arguments', () => {
     const args = composeArgs(paths, { kind: 'up' });
-    expect(args[4]).toBe('/Users/ada/Library/Application Support/OpenBot/stack');
+    expect(args[4]).toBe('/Users/ada/Library/Application Support/OpenBots/stack');
   });
 });
 
