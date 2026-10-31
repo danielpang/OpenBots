@@ -68,7 +68,8 @@ export function useSaveSettings() {
   });
 }
 
-export function LimitFields({ limits }: { limits: Limits }) {
+/** The limit inputs; `ceilings` caps each (the managed service's, plan 21.6). */
+export function LimitFields({ limits, ceilings }: { limits: Limits; ceilings?: Limits | null }) {
   const localAuth = useLocalAuth();
   return (
     <fieldset className="grid grid-cols-2 gap-4">
@@ -76,7 +77,15 @@ export function LimitFields({ limits }: { limits: Limits }) {
       {(Object.keys(LIMIT_LABELS) as (keyof Limits)[]).map((key) => (
         <label key={key} className="flex flex-col gap-1.5 text-sm">
           {limitLabel(key, localAuth)}
-          <Input name={key} type="number" min={1} step={1} defaultValue={limits[key]} required />
+          <Input
+            name={key}
+            type="number"
+            min={1}
+            max={ceilings?.[key]}
+            step={1}
+            defaultValue={limits[key]}
+            required
+          />
         </label>
       ))}
     </fieldset>
