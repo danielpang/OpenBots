@@ -25,11 +25,11 @@ describe('loadRunPolicy', () => {
   });
 
   it('decides connector tools from cached annotations and the Bot’s override', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const [user] = await db.select().from(schema.users);
     const [member] = await db.select().from(schema.workspaceMembers);
     const owner = { id: user!.id, workspaceId: member!.workspaceId };
-    const { bot } = await createBot(t.deps, owner, {
+    const { bot } = await createBot(t.ownerDeps, owner, {
       name: 'Coder',
       toolPolicy: { tools: { github__close_issue: 'auto' } },
     });
@@ -68,11 +68,11 @@ describe('loadRunPolicy', () => {
       .insert(schema.botConnectors)
       .values({ workspaceId: owner.workspaceId, botId: bot.id, connectorId: github!.id })
       .returning();
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: null, trigger: 'message' });
+    const run = await enqueueRun(t.ownerDeps, { botId: bot.id, chatId: null, trigger: 'message' });
     const policyRun = { id: run.id, botId: bot.id, chatId: null, trigger: 'message' };
 
     const decide = async (tool: string) => {
-      const policy = await loadRunPolicy(t.deps, run, bot, new Map());
+      const policy = await loadRunPolicy(t.ownerDeps, run, bot, new Map());
       return asEvaluation(await policy.evaluate(policyRun, tool, {}));
     };
     const setConnector = (values: { catalogId?: string | null; trusted?: boolean }) =>
@@ -83,7 +83,7 @@ describe('loadRunPolicy', () => {
       trace: [{ rule: 'annotations', decision: 'ask' }],
     });
     // An admin can vouch for it.
-    await setConnectorTrusted(t.deps, owner, github!.id, true);
+    await setConnectorTrusted(t.ownerDeps, owner, github!.id, true);
     expect((await decide('github__list_issues')).decision).toBe('auto');
     // A catalog connector's hints are believed.
     await setConnector({ trusted: false, catalogId: 'github' });
@@ -122,20 +122,23 @@ describe('loadRunPolicy', () => {
   ] as const)(
     'asks before tools that change something in a run another Bot started (%s)',
     async (trigger, mentioned, reason) => {
-      const { db } = t.deps;
+      const { db } = t;
       const [user] = await db.select().from(schema.users);
       const [member] = await db.select().from(schema.workspaceMembers);
       const owner = { id: user!.id, workspaceId: member!.workspaceId };
       const toolPolicy = { tools: { bash: 'auto' as const, send_email: 'auto' as const } };
-      const { bot: sender } = await createBot(t.deps, owner, { name: `Sender ${trigger}` });
-      const { bot } = await createBot(t.deps, owner, { name: `Receiver ${trigger}`, toolPolicy });
-      const run = await enqueueRun(t.deps, {
+      const { bot: sender } = await createBot(t.ownerDeps, owner, { name: `Sender ${trigger}` });
+      const { bot } = await createBot(t.ownerDeps, owner, {
+        name: `Receiver ${trigger}`,
+        toolPolicy,
+      });
+      const run = await enqueueRun(t.ownerDeps, {
         botId: bot.id,
         chatId: null,
         trigger,
         ...(mentioned ? { input: { fromBotId: sender.id } } : {}),
       });
-      const policy = await loadRunPolicy(t.deps, run, bot, new Map());
+      const policy = await loadRunPolicy(t.ownerDeps, run, bot, new Map());
       const policyRun = { id: run.id, botId: bot.id, chatId: null, trigger };
       const decide = async (tool: string, args: unknown = {}) =>
         asEvaluation(await policy.evaluate(policyRun, tool, args));
@@ -147,46 +150,54 @@ describe('loadRunPolicy', () => {
       expect((await decide('web_search', { query: 'x' })).decision).toBe('auto');
 
       // A run of the same trigger the owner started keeps the Bot's settings.
-      const ownRun = await enqueueRun(t.deps, { botId: bot.id, chatId: null, trigger: 'mention' });
-      const own = await loadRunPolicy(t.deps, ownRun, bot, new Map());
+      const ownRun = await enqueueRun(t.ownerDeps, {
+        botId: bot.id,
+        chatId: null,
+        trigger: 'mention',
+      });
+      const own = await loadRunPolicy(t.ownerDeps, ownRun, bot, new Map());
       const ownCall = { ...policyRun, id: ownRun.id, trigger: 'mention' };
       expect(asEvaluation(await own.evaluate(ownCall, 'bash', {})).decision).toBe('auto');
     },
   );
 
   it("keeps the Bot's settings in a bot_message run, the owner's own group message", async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const [user] = await db.select().from(schema.users);
     const [member] = await db.select().from(schema.workspaceMembers);
     const owner = { id: user!.id, workspaceId: member!.workspaceId };
-    const { bot } = await createBot(t.deps, owner, {
+    const { bot } = await createBot(t.ownerDeps, owner, {
       name: 'Grouped',
       toolPolicy: { tools: { bash: 'auto' } },
     });
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: null, trigger: 'bot_message' });
+    const run = await enqueueRun(t.ownerDeps, {
+      botId: bot.id,
+      chatId: null,
+      trigger: 'bot_message',
+    });
     expect(runSource(run)).toBe('owner');
-    const policy = await loadRunPolicy(t.deps, run, bot, new Map());
+    const policy = await loadRunPolicy(t.ownerDeps, run, bot, new Map());
     const policyRun = { id: run.id, botId: bot.id, chatId: null, trigger: 'bot_message' };
     expect(asEvaluation(await policy.evaluate(policyRun, 'bash', {})).decision).toBe('auto');
   });
 
   it('asks before a GET fetch off the allowlist in a Routine run a webhook started', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const [user] = await db.select().from(schema.users);
     const [member] = await db.select().from(schema.workspaceMembers);
     const owner = { id: user!.id, workspaceId: member!.workspaceId };
-    const { bot } = await createBot(t.deps, owner, {
+    const { bot } = await createBot(t.ownerDeps, owner, {
       name: 'Fetcher',
       toolPolicy: { httpAllowlist: ['api.github.com'] },
     });
     // No endpoint row: only the webhook trigger rules apply.
-    const run = await enqueueRun(t.deps, {
+    const run = await enqueueRun(t.ownerDeps, {
       botId: bot.id,
       chatId: null,
       trigger: 'routine',
       input: { webhook: { endpointId: randomUUID(), deliveryId: randomUUID() } },
     });
-    const policy = await loadRunPolicy(t.deps, run, bot, new Map());
+    const policy = await loadRunPolicy(t.ownerDeps, run, bot, new Map());
     const policyRun = { id: run.id, botId: bot.id, chatId: null, trigger: 'routine' };
     const fetch = async (url: string) =>
       asEvaluation(await policy.evaluate(policyRun, 'web_fetch', { url }));

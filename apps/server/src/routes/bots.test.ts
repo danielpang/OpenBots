@@ -34,9 +34,9 @@ describe('/api/v1/bots', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
-    const users = await t.deps.db.select().from(schema.users);
+    const users = await t.db.select().from(schema.users);
     aliceId = users.find((u) => u.email === 'alice@example.com')!.id;
-    workspaceId = (await ensureWorkspace(t.deps.db)).id;
+    workspaceId = (await ensureWorkspace(t.db)).id;
     providerId = await t.providerId();
     await t.addModels(providerId, ['gpt-x', 'm']);
   });
@@ -59,7 +59,7 @@ describe('/api/v1/bots', () => {
   };
 
   const audits = (action: string, targetId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.auditLog)
       .where(and(eq(schema.auditLog.action, action), eq(schema.auditLog.targetId, targetId)));
@@ -88,7 +88,7 @@ describe('/api/v1/bots', () => {
     // A random one of the Bot shapes, Moon, Box or Egg, pinned.
     expect(['bean', 'rounded', 'blob']).toContain(bot.avatar.shape);
 
-    const chats = await t.deps.db.select().from(schema.chats).where(eq(schema.chats.botId, bot.id));
+    const chats = await t.db.select().from(schema.chats).where(eq(schema.chats.botId, bot.id));
     expect(chats).toMatchObject([{ id: bot.chatId, type: 'bot_dm', ownerId: aliceId }]);
     expect(await audits('bot.create', bot.id)).toHaveLength(1);
 
@@ -118,9 +118,7 @@ describe('/api/v1/bots', () => {
         parts: [{ type: 'text', text: "Hi, I'm Scout. What would you like me to work on?" }],
       }),
     ]);
-    expect(await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id))).toEqual(
-      [],
-    );
+    expect(await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id))).toEqual([]);
     // Published like any Bot message, to the chat's and the Bot's subscribers.
     expect(events).toContainEqual(
       expect.objectContaining({
@@ -132,7 +130,7 @@ describe('/api/v1/bots', () => {
     );
     // Profile and memory start empty: the owner's answer is how it learns its job.
     expect(
-      await t.deps.db.select().from(schema.botMemories).where(eq(schema.botMemories.botId, bot.id)),
+      await t.db.select().from(schema.botMemories).where(eq(schema.botMemories.botId, bot.id)),
     ).toEqual([]);
   });
 
@@ -221,7 +219,7 @@ describe('/api/v1/bots', () => {
     await t.addModels(providerId, ['retired']);
     const keeper = await create(alice, { name: 'Keeper', modelConfig: config('retired') });
     const other = await create(alice, { name: 'Mover', modelConfig: config('m') });
-    await t.deps.db
+    await t.db
       .update(schema.providerModels)
       .set({ enabled: false })
       .where(eq(schema.providerModels.modelId, 'retired'));
@@ -318,7 +316,7 @@ describe('/api/v1/bots', () => {
 
     // The database refuses a second one, whatever the caller.
     await expect(
-      t.deps.db.update(schema.bots).set({ isMain: true }).where(eq(schema.bots.id, first.id)),
+      t.db.update(schema.bots).set({ isMain: true }).where(eq(schema.bots.id, first.id)),
     ).rejects.toThrow();
 
     // Two at once still leave one.
@@ -351,7 +349,7 @@ describe('/api/v1/bots', () => {
   });
 
   it('duplicates profile, settings, enabled Skills and Routines, not history or memory', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const source = await create(alice, {
       name: 'Original',
       label: 'Lead',
@@ -451,7 +449,7 @@ describe('/api/v1/bots', () => {
   });
 
   it('deletes a Bot with its transcript, messages, Routines, memories and state', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const bot = await create(alice, { name: 'Doomed' });
     await db.transaction(async (tx) => {
       await tx.insert(schema.messages).values({
@@ -529,7 +527,7 @@ describe('/api/v1/bots', () => {
       usage: value,
       createdAt: new Date(Date.now() - ago * day),
     });
-    await t.deps.db.insert(schema.runs).values([
+    await t.db.insert(schema.runs).values([
       run('gpt-x', usage(1000, 2, 0.01)),
       run('gpt-x', usage(500, 1, 0.005)),
       run('m', usage(300, 1, null), 3),
@@ -681,8 +679,8 @@ describe('Bot limit (B8)', () => {
   });
 
   it('follows the workspace override', async () => {
-    const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, { limits: { botsPerAccount: 3 } });
+    const workspace = await ensureWorkspace(t.db);
+    await updateSettings(t.db, workspace, { limits: { botsPerAccount: 3 } });
     expect((await post('/bots', { name: 'Three' })).status).toBe(201);
     expect((await post('/bots', { name: 'Four' })).status).toBe(409);
   });

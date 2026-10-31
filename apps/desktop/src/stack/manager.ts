@@ -286,6 +286,16 @@ export function withLocalToken(env: string, generate: () => string): string {
 }
 
 /**
+ * The password of openbot_app, the database role the server works as under
+ * row-level security (OPENBOT_DB_APP_PASSWORD). An existing one is kept; a
+ * `.env` without one, new or from before, gets one.
+ */
+export function withAppDbPassword(env: string, generate: () => string): string {
+  if (envValue(env, 'OPENBOT_DB_APP_PASSWORD')?.trim()) return env;
+  return setEnvValue(env, 'OPENBOT_DB_APP_PASSWORD', generate());
+}
+
+/**
  * The address the stack's web port is published on (OPENBOT_HTTP_BIND in
  * docker/docker-compose.yml): this Mac's loopback, so other machines on the
  * network cannot reach a server that signs its owner in without a password.
@@ -369,6 +379,8 @@ export function renderEnv(
     databasePassword: string;
     /** OPENBOT_LOCAL_TOKEN; left as the template has it when omitted. */
     localToken?: string;
+    /** OPENBOT_DB_APP_PASSWORD; left as the template has it when omitted. */
+    appDbPassword?: string;
     serverVersion?: string;
     /** The free port the stack publishes, with the matching OPENBOT_PUBLIC_URL. */
     port?: number;
@@ -381,6 +393,7 @@ export function renderEnv(
 ): string {
   let env = setEnvValue(template, 'OPENBOT_MASTER_KEY', values.masterKey);
   env = withDatabasePassword(env, () => values.databasePassword);
+  if (values.appDbPassword != null) env = withAppDbPassword(env, () => values.appDbPassword!);
   if (values.localToken != null) {
     env = withLocalToken(env, () => values.localToken!);
     env = withLoopbackPort(env);
@@ -685,6 +698,7 @@ export function createStackManager(options: StackManagerOptions): StackManager {
       const current = await files.readFile(paths.envFile);
       let fixed = withDatabasePassword(current, generateDatabasePassword);
       fixed = withLocalToken(fixed, generateLocalToken);
+      fixed = withAppDbPassword(fixed, generateDatabasePassword);
       fixed = withLoopbackPort(fixed);
       if (envValue(fixed, 'COMPOSE_PROJECT_NAME')?.trim() !== name) {
         fixed = setEnvValue(fixed, 'COMPOSE_PROJECT_NAME', name);
@@ -699,6 +713,7 @@ export function createStackManager(options: StackManagerOptions): StackManager {
     const created = renderEnv(template, {
       masterKey: randomBytes(32).toString('base64'),
       databasePassword: generateDatabasePassword(),
+      appDbPassword: generateDatabasePassword(),
       localToken: generateLocalToken(),
       serverVersion: options.serverVersion,
       port: await freePort(),

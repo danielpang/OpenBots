@@ -26,6 +26,7 @@ import {
   tokenMatches,
   verifySignature,
 } from './verify.js';
+import { inWorkspace, webhookWorkspaces } from '../db/scope.js';
 
 // Webhook ingress (plan 11, H1 to H4), outside the authenticated API:
 //
@@ -102,6 +103,20 @@ function route(rest: string[]): [slug: string, token: string | undefined] {
 }
 
 const BOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The organization of the endpoint a path names, from a SECURITY DEFINER
+ * function: this request has no organization until then.
+ */
+async function endpointWorkspace(c: Context<AppEnv>, bot: string, slug: string) {
+  const { db, config } = c.var.deps;
+  const byId = BOT_ID.test(bot);
+  if (!byId && config.deployment === 'managed') throw notFound('No such webhook endpoint');
+  const found = await webhookWorkspaces(db, bot, slug, byId);
+  // Two Bots with one handle (left from a managed install): neither is guessed.
+  if (found.length !== 1) throw notFound('No such webhook endpoint');
+  return found[0]!;
+}
 
 /**
  * The endpoint a path names (plan 21.3), and through it the organization the
@@ -197,6 +212,19 @@ async function ingress(c: Context<AppEnv>, rest: string[]) {
       'from this address',
     );
   }
+  // The endpoint's organization first, then everything else in it (db/scope.ts).
+  const workspaceId = await endpointWorkspace(c, bot, slug);
+  return inWorkspace(workspaceId, () => deliver(c, bot, slug, pathToken, remoteIp));
+}
+
+async function deliver(
+  c: Context<AppEnv>,
+  bot: string,
+  slug: string,
+  pathToken: string | undefined,
+  remoteIp: string | null,
+) {
+  const { deps } = c.var;
   const endpoint = await findEndpoint(c, bot, slug);
   const { limits } = await organizationSettings(deps, endpoint.workspaceId);
   const body =

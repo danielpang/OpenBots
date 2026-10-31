@@ -36,9 +36,9 @@ describe('Artifacts API', () => {
     alice = a.cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
     bot = (await (await call(alice, 'POST', '/bots', { name: 'Writer' })).json()) as typeof bot;
-    const [row] = await t.deps.db.select().from(schema.bots);
+    const [row] = await t.db.select().from(schema.bots);
     owner = { id: row!.ownerId, workspaceId: row!.workspaceId };
-    const [run] = await t.deps.db
+    const [run] = await t.db
       .insert(schema.runs)
       .values({
         workspaceId: owner.workspaceId,
@@ -63,7 +63,7 @@ describe('Artifacts API', () => {
 
   const botWrite = (title = 'Q3 summary', content = Q3_V1) =>
     createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       { title, kind: 'document', content, botId: bot.id, chatId: bot.chatId },
       { runId },
@@ -80,7 +80,7 @@ describe('Artifacts API', () => {
     expect(created.version).toMatchObject({ version: 1, summary: '+4 −0', mime: 'text/markdown' });
 
     const second = await writeArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       id,
       { content: `${Q3_V1}Outlook: up.\n` },
@@ -119,14 +119,14 @@ describe('Artifacts API', () => {
     const { artifact } = await botWrite();
     const patch =
       '@@ -3,2 +3,3 @@\n-Revenue grew.\n+Revenue grew 12%.\n+Margin improved.\n Costs fell.\n';
-    const written = await writeArtifact(t.deps, owner, artifact.id, { patch }, { runId });
+    const written = await writeArtifact(t.ownerDeps, owner, artifact.id, { patch }, { runId });
     expect(written).toMatchObject({ added: 2, removed: 1, version: { summary: '+2 −1' } });
     const content = await call(alice, 'GET', `/artifacts/${artifact.id}/versions/2/content`);
     expect(await content.text()).toBe(
       '# Q3 summary\n\nRevenue grew 12%.\nMargin improved.\nCosts fell.\n',
     );
 
-    const stale = writeArtifact(t.deps, owner, artifact.id, { patch }, { runId });
+    const stale = writeArtifact(t.ownerDeps, owner, artifact.id, { patch }, { runId });
     await expect(stale).rejects.toMatchObject({ status: 400, code: 'INVALID_PATCH' });
     expect((await versions(artifact.id)).map((v) => v.version)).toEqual([2, 1]);
   });
@@ -172,7 +172,13 @@ describe('Artifacts API', () => {
 
   it('downloads the current version or one by number', async () => {
     const { artifact } = await botWrite('Q3 summary');
-    await writeArtifact(t.deps, owner, artifact.id, { content: '# Q3 summary\n\nv2\n' }, { runId });
+    await writeArtifact(
+      t.ownerDeps,
+      owner,
+      artifact.id,
+      { content: '# Q3 summary\n\nv2\n' },
+      { runId },
+    );
 
     const current = await call(alice, 'GET', `/artifacts/${artifact.id}/download`);
     expect(current.status).toBe(200);
@@ -199,7 +205,7 @@ describe('Artifacts API', () => {
 
     const older = await botWrite('Older');
     const newer = await botWrite('Newer');
-    await writeArtifact(t.deps, owner, older.artifact.id, { content: 'touched\n' }, { runId });
+    await writeArtifact(t.ownerDeps, owner, older.artifact.id, { content: 'touched\n' }, { runId });
     const res = await call(alice, 'GET', `/bots/${bot.id}/artifacts`);
     expect(res.status).toBe(200);
     const items = ((await res.json()) as { items: { id: string; currentVersion: Version }[] })
@@ -227,7 +233,7 @@ describe('Artifacts API', () => {
   });
   const binaryWrite = (title: string, kind: 'design' | 'file', bytes: Uint8Array) =>
     createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       { title, kind, bytes, botId: bot.id, chatId: bot.chatId },
       { runId },
@@ -260,7 +266,7 @@ describe('Artifacts API', () => {
     const fake = await binaryWrite('photo.png', 'file', Uint8Array.from([1, 0, 2]));
     expect(fake.version.mime).toBe('application/octet-stream');
     const next = await writeArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       fake.artifact.id,
       { bytes: TINY_PNG },
@@ -271,7 +277,7 @@ describe('Artifacts API', () => {
 
   it('keeps SVG an attachment under a sandbox, viewed through <img>', async () => {
     const svg = await createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       {
         title: 'Mark',
@@ -290,23 +296,34 @@ describe('Artifacts API', () => {
 
   it('keeps bytes out of the text kinds and patches off binary versions', async () => {
     await expect(
-      createArtifact(t.deps, owner, { title: 'x.md', kind: 'document', bytes: PDF }, { runId }),
+      createArtifact(
+        t.ownerDeps,
+        owner,
+        { title: 'x.md', kind: 'document', bytes: PDF },
+        { runId },
+      ),
     ).rejects.toMatchObject({ status: 409, code: 'NOT_TEXT' });
     const { artifact } = await botWrite();
     await expect(
-      writeArtifact(t.deps, owner, artifact.id, { bytes: TINY_PNG }, { runId }),
+      writeArtifact(t.ownerDeps, owner, artifact.id, { bytes: TINY_PNG }, { runId }),
     ).rejects.toMatchObject({ status: 409, code: 'NOT_TEXT' });
 
     const png = await binaryWrite('chart.png', 'design', TINY_PNG);
     await expect(
-      writeArtifact(t.deps, owner, png.artifact.id, { patch: '@@ -1 +1 @@\n-a\n+b\n' }, { runId }),
+      writeArtifact(
+        t.ownerDeps,
+        owner,
+        png.artifact.id,
+        { patch: '@@ -1 +1 @@\n-a\n+b\n' },
+        { runId },
+      ),
     ).rejects.toMatchObject({ status: 400, code: 'INVALID_PATCH' });
   });
 
   it('lets the owner edit only document, code and data', async () => {
     const png = await binaryWrite('Logo.png', 'design', TINY_PNG);
     const svg = await createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       { title: 'Mark', kind: 'design', content: '<svg></svg>' },
       { runId },
@@ -322,7 +339,7 @@ describe('Artifacts API', () => {
       expect((await versions(id)).length).toBe(1);
     }
     const code = await createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       { title: 'main.py', kind: 'code', content: 'print(1)\n' },
       { runId },
@@ -334,8 +351,8 @@ describe('Artifacts API', () => {
   });
 
   it('caps every version at the upload limit', async () => {
-    const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, { limits: { uploadBytes: 32 } });
+    const workspace = await ensureWorkspace(t.db);
+    await updateSettings(t.db, workspace, { limits: { uploadBytes: 32 } });
     try {
       await expect(binaryWrite('big.png', 'design', new Uint8Array(33))).rejects.toMatchObject({
         status: 413,
@@ -347,7 +364,7 @@ describe('Artifacts API', () => {
       });
       expect(res.status).toBe(413);
     } finally {
-      await updateSettings(t.deps.db, await ensureWorkspace(t.deps.db), {
+      await updateSettings(t.db, await ensureWorkspace(t.db), {
         limits: { uploadBytes: DEFAULT_LIMITS.uploadBytes },
       });
     }
@@ -355,7 +372,7 @@ describe('Artifacts API', () => {
 
   it('gives the tools text, or bytes and a note for a binary version', async () => {
     const services = artifactServices(
-      t.deps,
+      t.ownerDeps,
       { id: runId, chatId: bot.chatId },
       { id: bot.id, ownerId: owner.id, workspaceId: owner.workspaceId },
     );

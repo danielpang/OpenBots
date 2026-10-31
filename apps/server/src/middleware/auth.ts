@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import type { Account, AppDeps, AppEnv, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
+import { asDirectory, inWorkspace } from '../db/scope.js';
 import { DomainError, forbidden, notFound, unauthorized } from '../errors.js';
 import { ensureWorkspace, isOrgAdmin, type Role } from '../workspace.js';
 
@@ -20,14 +21,21 @@ import { ensureWorkspace, isOrgAdmin, type Role } from '../workspace.js';
 // On a self-hosted install only the owner gets in: accounts left from a
 // managed install are refused, since nobody there can manage them.
 
+// Behind these, the request's database work runs in its organization
+// (db/scope.ts): Postgres then keeps every other organization's rows out of
+// reach, whatever a query forgets to filter.
+
 export const requireAccount = createMiddleware<AppEnv>(async (c, next) => {
-  c.set('account', await authenticateAccount(c.var.deps, c.req.raw.headers));
-  await next();
+  const account = await authenticateAccount(c.var.deps, c.req.raw.headers);
+  c.set('account', account);
+  const workspaceId = account.membership?.workspaceId;
+  await (workspaceId ? inWorkspace(workspaceId, next) : next());
 });
 
 export const requireUser = createMiddleware<AppEnv>(async (c, next) => {
-  c.set('user', await authenticate(c));
-  await next();
+  const user = await authenticate(c);
+  c.set('user', user);
+  await inWorkspace(user.workspaceId, next);
 });
 
 /** Owners and admins of the active organization. */
@@ -35,7 +43,7 @@ export const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
   const user = await authenticate(c);
   if (!isOrgAdmin(user.role)) throw forbidden('Only an admin can do this');
   c.set('user', user);
-  await next();
+  await inWorkspace(user.workspaceId, next);
 });
 
 /**
@@ -107,10 +115,13 @@ export async function authenticateAccount(deps: AuthDeps, headers: Headers): Pro
     if (!result.valid || !result.key) throw unauthorized('Invalid API key');
     userId = result.key.referenceId;
     via = 'api_key';
-    const [row] = await db
-      .select({ workspaceId: schema.apikeys.workspaceId })
-      .from(schema.apikeys)
-      .where(eq(schema.apikeys.id, result.key.id));
+    // The key's organization is the directory's to say.
+    const [row] = await asDirectory(() =>
+      db
+        .select({ workspaceId: schema.apikeys.workspaceId })
+        .from(schema.apikeys)
+        .where(eq(schema.apikeys.id, result.key!.id)),
+    );
     organizationId = row?.workspaceId ?? null;
   } else {
     const session = await auth.api.getSession({ headers });
@@ -152,18 +163,20 @@ export async function membershipOf(
   userId: string,
   workspaceId: string,
 ): Promise<Account['membership']> {
-  const [member] = await db
-    .select({
-      role: schema.workspaceMembers.role,
-      suspendedAt: schema.workspaceMembers.suspendedAt,
-    })
-    .from(schema.workspaceMembers)
-    .where(
-      and(
-        eq(schema.workspaceMembers.userId, userId),
-        eq(schema.workspaceMembers.workspaceId, workspaceId),
+  const [member] = await inWorkspace(workspaceId, () =>
+    db
+      .select({
+        role: schema.workspaceMembers.role,
+        suspendedAt: schema.workspaceMembers.suspendedAt,
+      })
+      .from(schema.workspaceMembers)
+      .where(
+        and(
+          eq(schema.workspaceMembers.userId, userId),
+          eq(schema.workspaceMembers.workspaceId, workspaceId),
+        ),
       ),
-    );
+  );
   if (!member) return null;
   return { workspaceId, role: member.role as Role, suspended: member.suspendedAt !== null };
 }

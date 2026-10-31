@@ -207,7 +207,7 @@ describe('Skill import from GitHub', () => {
     call(cookie, 'POST', '/skills/import/preview', { url });
   const json = async <T>(res: Response) => (await res.json()) as T;
   const limit = async (skillsPerAccount: number) =>
-    updateSettings(t.deps.db, await ensureWorkspace(t.deps.db), { limits: { skillsPerAccount } });
+    updateSettings(t.db, await ensureWorkspace(t.db), { limits: { skillsPerAccount } });
 
   it('lists the Skills in a public repository without a token', async () => {
     const res = await preview(alice, 'https://github.com/anthropics/skills');
@@ -541,8 +541,8 @@ describe('Skill import from GitHub', () => {
     expect(found.status).toBe(200);
     expect(await json<Preview>(found)).toMatchObject({ authenticated: true });
 
-    const workspace = await ensureWorkspace(t.deps.db);
-    await t.deps.db.insert(schema.connectorPolicy).values({
+    const workspace = await ensureWorkspace(t.db);
+    await t.db.insert(schema.connectorPolicy).values({
       workspaceId: workspace.id,
       catalogId: 'github',
     });
@@ -550,7 +550,7 @@ describe('Skill import from GitHub', () => {
       clearGithubCache();
       expect((await preview(dave, 'https://github.com/acme/private-skills')).status).toBe(404);
     } finally {
-      await t.deps.db
+      await t.db
         .delete(schema.connectorPolicy)
         .where(eq(schema.connectorPolicy.workspaceId, workspace.id));
     }

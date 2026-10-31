@@ -69,7 +69,7 @@ describe('form widget', () => {
   }
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -93,7 +93,7 @@ describe('form widget', () => {
     await settled(bot.id, 1);
 
     const [posted] = (
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.messages)
         .where(and(eq(schema.messages.chatId, bot.chatId), eq(schema.messages.authorType, 'bot')))
@@ -115,7 +115,7 @@ describe('form widget', () => {
     });
     const wrongShape = await action({ action: { type: 'submit' } });
     expect(wrongShape.status).toBe(400);
-    expect(await t.deps.db.select().from(schema.widgetStates)).toEqual([]);
+    expect(await t.db.select().from(schema.widgetStates)).toEqual([]);
 
     const res = await action({
       action: { type: 'submit', values: { city: ' Oslo ', nights: 3, breakfast: true } },
@@ -129,7 +129,7 @@ describe('form widget', () => {
     });
     expect(result.startedRunId).toBeTruthy();
 
-    const [stored] = await t.deps.db
+    const [stored] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, posted!.id));

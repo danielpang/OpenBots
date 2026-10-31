@@ -69,6 +69,8 @@ export const TERMINAL_STATUSES: RunStatus[] = ['completed', 'failed', 'cancelled
 
 export interface RunJob {
   runId: string;
+  /** Its organization, where it runs (infra/index.ts). */
+  workspaceId?: string;
 }
 
 export interface RunControl {
@@ -172,7 +174,11 @@ export async function scheduleRun(
 ) {
   await deps.infra
     .queue<RunJob>(RUNS_QUEUE)
-    .enqueue(name, { runId: row.id }, { priority: row.priority, groupKey: row.botId });
+    .enqueue(
+      name,
+      { runId: row.id, workspaceId: row.workspaceId },
+      { priority: row.priority, groupKey: row.botId },
+    );
   await publishRunStatus(deps, row);
 }
 

@@ -172,7 +172,7 @@ describe('/api/v1/setup', () => {
 
   describe('the sandbox image pull', () => {
     it('is not configured without Docker', async () => {
-      setComputerProvider(t.deps, null);
+      setComputerProvider(t.ownerDeps, null);
       const res = await call(admin, 'POST', '/setup/sandbox-image');
       expect(res.status).toBe(202);
       expect(await res.json()).toEqual({
@@ -183,7 +183,7 @@ describe('/api/v1/setup', () => {
     });
 
     it('pulls in the background with Docker and reports when it is ready', async () => {
-      const deps = { ...t.deps };
+      const deps = { ...t.ownerDeps };
       const app = createApp(deps, { webDist: '' });
       const computer = await useTestComputer(deps);
       try {

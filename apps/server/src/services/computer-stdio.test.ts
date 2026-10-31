@@ -12,6 +12,7 @@ import { createTestApp, type TestApp } from '../test-app.js';
 import { setComputerProvider, sweepIdleComputers } from './computer.js';
 import { NO_COMPUTER, STDIO_TOUCH_MS } from './computer-stdio.js';
 import { closeMcpManager, mcpManager } from './connectors.js';
+import { inEveryOrganization } from '../workers.js';
 
 // Stdio connectors in their owner's computer (OPENBOT_STDIO_RUNNER=computer,
 // the managed default). Every computer here is the docker provider over a
@@ -75,7 +76,7 @@ describe('stdio connectors in the computer (managed)', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
-    computers = useComputers(t.deps);
+    computers = useComputers(t.ownerDeps);
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
     carol = (await t.signUp('carol@example.com')).cookie!;
@@ -84,7 +85,7 @@ describe('stdio connectors in the computer (managed)', () => {
     await t.addMember(await t.userId('alice@example.com'), orgB, 'owner');
   });
   afterAll(async () => {
-    await closeMcpManager(t.deps);
+    await closeMcpManager(t.ownerDeps);
     await computers.close();
     await t.close();
   });
@@ -112,7 +113,7 @@ describe('stdio connectors in the computer (managed)', () => {
   };
 
   const computerOf = async (email: string, workspaceId: string) => {
-    const [row] = await t.deps.db
+    const [row] = await t.db
       .select()
       .from(schema.computers)
       .where(
@@ -157,7 +158,11 @@ describe('stdio connectors in the computer (managed)', () => {
     ]);
     // The agent created the root under the computer's home.
     expect(statSync(join(agent.home, 'notes')).isDirectory()).toBe(true);
-    const echo = await mcpManager(t.deps).callTool(aliceFs.id, 'echo', { text: 'in the computer' });
+    const echo = await t.inOrganization(() =>
+      mcpManager(t.ownerDeps).callTool(aliceFs.id, 'echo', {
+        text: 'in the computer',
+      }),
+    );
     expect(textOf(echo)).toBe('in the computer');
   });
 
@@ -177,7 +182,11 @@ describe('stdio connectors in the computer (managed)', () => {
       args: ['postgresql://ro@203.0.113.7:5432/app'],
       env: { PGPASSWORD: 'sekrit-pg-pass' },
     });
-    const who = JSON.parse(textOf(await mcpManager(t.deps).callTool(bobPg.id, 'whoami', {}))) as {
+    const who = JSON.parse(
+      textOf(
+        await t.inOrganization(() => mcpManager(t.ownerDeps).callTool(bobPg.id, 'whoami', {})),
+      ),
+    ) as {
       env: string[];
     };
     expect(who.env).toContain('PGPASSWORD');
@@ -197,7 +206,7 @@ describe('stdio connectors in the computer (managed)', () => {
     expect((await agentOf('alice@example.com', orgA)).mcpStdio).toHaveLength(1);
     // Three connectors, three computers, three processes: none shared.
     expect(computers.agents.size).toBe(3);
-    const manager = mcpManager(t.deps);
+    const manager = mcpManager(t.ownerDeps);
     for (const id of [aliceFs.id, bobPg.id, aliceFsB.id]) expect(manager.running(id)).toBe(true);
     await t.switchOrganization(alice, orgA);
   });
@@ -207,17 +216,21 @@ describe('stdio connectors in the computer (managed)', () => {
     try {
       const computer = (await computerOf('alice@example.com', orgA))!;
       const longAgo = new Date(Date.now() - 2 * 60 * 60_000);
-      await t.deps.db
+      await t.db
         .update(schema.computers)
         .set({ lastUsedAt: longAgo })
         .where(eq(schema.computers.id, computer.id));
       vi.setSystemTime(Date.now() + STDIO_TOUCH_MS + 1_000);
-      await mcpManager(t.deps).callTool(aliceFs.id, 'echo', { text: 'still here' });
+      await t.inOrganization(() =>
+        mcpManager(t.ownerDeps).callTool(aliceFs.id, 'echo', { text: 'still here' }),
+      );
       await vi.waitFor(async () => {
         const row = await computerOf('alice@example.com', orgA);
         expect(row!.lastUsedAt!.getTime()).toBeGreaterThan(longAgo.getTime());
       });
-      expect(await sweepIdleComputers(t.deps, new Date())).toBe(0);
+      expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps, new Date()))).toBe(
+        0,
+      );
       expect((await computerOf('alice@example.com', orgA))!.status).toBe('running');
     } finally {
       vi.useRealTimers();
@@ -227,7 +240,7 @@ describe('stdio connectors in the computer (managed)', () => {
   it('stops the servers with their computer, and only those', async () => {
     const res = await call(alice, 'POST', '/computer/stop');
     expect(res.status, await res.clone().text()).toBe(200);
-    const manager = mcpManager(t.deps);
+    const manager = mcpManager(t.ownerDeps);
     await vi.waitFor(() => expect(manager.running(aliceFs.id)).toBe(false));
     // Not restarted while the computer is off; the others run on.
     await new Promise((r) => setTimeout(r, 100));
@@ -236,7 +249,9 @@ describe('stdio connectors in the computer (managed)', () => {
     expect(manager.running(bobPg.id)).toBe(true);
     expect(manager.running(aliceFsB.id)).toBe(true);
     // The next use starts the computer, and the server, again.
-    const echo = await mcpManager(t.deps).callTool(aliceFs.id, 'echo', { text: 'back' });
+    const echo = await t.inOrganization(() =>
+      mcpManager(t.ownerDeps).callTool(aliceFs.id, 'echo', { text: 'back' }),
+    );
     expect(textOf(echo)).toBe('back');
     expect((await computerOf('alice@example.com', orgA))!.status).toBe('running');
   });
@@ -248,26 +263,26 @@ describe('stdio connectors in the computer (managed)', () => {
         throw new Error('no capacity left');
       },
     };
-    setComputerProvider(t.deps, failing);
+    setComputerProvider(t.ownerDeps, failing);
     try {
       const fs = await create(carol, { catalogId: 'filesystem', params: { root: '' } });
       const { connector } = await test(carol, fs.id);
       expect(connector.status).toBe('error');
       expect(connector.lastError).toBe('The computer did not start: no capacity left');
     } finally {
-      setComputerProvider(t.deps, computers.provider);
+      setComputerProvider(t.ownerDeps, computers.provider);
     }
   });
 
   it('reports a clear error when there is no computer, never running it on the server', async () => {
-    setComputerProvider(t.deps, null);
+    setComputerProvider(t.ownerDeps, null);
     try {
       const fs = await create(carol, { catalogId: 'filesystem', params: { root: 'docs' } });
       const { connector } = await test(carol, fs.id);
       expect(connector).toMatchObject({ status: 'error', lastError: NO_COMPUTER });
-      expect(mcpManager(t.deps).running(fs.id)).toBe(false);
+      expect(mcpManager(t.ownerDeps).running(fs.id)).toBe(false);
     } finally {
-      setComputerProvider(t.deps, computers.provider);
+      setComputerProvider(t.ownerDeps, computers.provider);
     }
   });
 });
@@ -285,10 +300,10 @@ describe('stdio connectors on a self-hosted install', () => {
     writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${TEST_STDIO_SERVER}"\n`);
     chmodSync(bin, 0o755);
     t = await createTestApp({ OPENBOT_MCP_DIR: mcpDir });
-    computers = useComputers(t.deps);
+    computers = useComputers(t.ownerDeps);
   });
   afterAll(async () => {
-    await closeMcpManager(t.deps);
+    await closeMcpManager(t.ownerDeps);
     await computers.close();
     await t.close();
     rmSync(mcpDir, { recursive: true, force: true });
@@ -314,6 +329,6 @@ describe('stdio connectors on a self-hosted install', () => {
     });
     // No computer was made, let alone asked to run it.
     expect(computers.agents.size).toBe(0);
-    expect(await t.deps.db.select().from(schema.computers)).toEqual([]);
+    expect(await t.db.select().from(schema.computers)).toEqual([]);
   });
 });

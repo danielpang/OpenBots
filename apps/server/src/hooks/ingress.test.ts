@@ -189,7 +189,7 @@ describe('webhook ingress', () => {
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 5_000, interval: 10 });
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -197,7 +197,7 @@ describe('webhook ingress', () => {
 
   /** The deliveries an endpoint accepted; `refusalsOf` has the ones that failed verification. */
   const deliveriesOf = (endpointId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.webhookDeliveries)
       .where(
@@ -208,7 +208,7 @@ describe('webhook ingress', () => {
       );
 
   const refusalsOf = (endpointId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.webhookDeliveries)
       .where(
@@ -219,7 +219,7 @@ describe('webhook ingress', () => {
       );
 
   const messagesOf = (chatId: string, authorType?: 'webhook' | 'bot' | 'routine') =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(
@@ -432,7 +432,7 @@ describe('webhook ingress', () => {
       });
       return res.status;
     };
-    const { config } = t.deps;
+    const { config } = t.ownerDeps;
     config.trustedProxies = ['172.16.0.0/12'];
     try {
       // The tunnel appended the client's real address; the left hop is forged.
@@ -493,11 +493,11 @@ describe('webhook ingress', () => {
     const { bot } = await newBot('Tuned');
     const { token } = await newEndpoint(bot.id, { slug: 'tuned' });
     const url = `/hooks/${bot.id}/tuned`;
-    const { config } = t.deps;
+    const { config } = t.ownerDeps;
     const limits = config.limits;
     config.limits = { ...limits, webhookEndpointRatePerMin: 1, webhookIpRatePerMin: 3 };
-    const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, { limits: { webhookFailedAuthPerMin: 2 } });
+    const workspace = await ensureWorkspace(t.db);
+    await updateSettings(t.db, workspace, { limits: { webhookFailedAuthPerMin: 2 } });
     try {
       // An endpoint without its own rate limit gets webhookEndpointRatePerMin.
       expect((await hook(url, { body: '{"t":1}', headers: bearer(token) })).status).toBe(202);
@@ -513,7 +513,7 @@ describe('webhook ingress', () => {
       expect((await hook('/hooks/nobody', stranger)).status).toBe(429);
     } finally {
       config.limits = limits;
-      await t.deps.db
+      await t.db
         .update(schema.workspaces)
         .set({ settings: workspace.settings })
         .where(eq(schema.workspaces.id, workspace.id));
@@ -669,14 +669,14 @@ describe('webhook ingress', () => {
     expect(await waitOf({ responseMode: 'sync', syncTimeoutS: null })).toBe(60);
     expect(await waitOf({ syncTimeoutS: 15 })).toBe(15);
     // The admin's sync webhook wait caps every endpoint's.
-    const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, { limits: { syncWebhookWaitSeconds: 10 } });
+    const workspace = await ensureWorkspace(t.db);
+    await updateSettings(t.db, workspace, { limits: { syncWebhookWaitSeconds: 10 } });
     try {
       expect(await waitOf({ syncTimeoutS: null })).toBe(10);
       const listed = await call('GET', `/bots/${bot.id}/endpoints`);
       expect(await listed.json()).toMatchObject({ items: [{ syncWaitS: 10 }] });
     } finally {
-      await t.deps.db
+      await t.db
         .update(schema.workspaces)
         .set({ settings: workspace.settings })
         .where(eq(schema.workspaces.id, workspace.id));
@@ -769,7 +769,7 @@ describe('webhook ingress', () => {
       token: string;
     };
     expect((await hook(url, { body: '{"n":2}', headers: bearer(token) })).status).toBe(202);
-    const [audited] = await t.deps.db
+    const [audited] = await t.db
       .select()
       .from(schema.auditLog)
       .where(
@@ -857,11 +857,11 @@ describe('webhook ingress', () => {
     const edit = async (body: unknown) =>
       expect((await call('PATCH', `/routines/${routine.id}`, body)).status).toBe(200);
     const stored = async () => {
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.webhookEndpoints)
         .where(eq(schema.webhookEndpoints.id, endpoint.id));
-      const [r] = await t.deps.db
+      const [r] = await t.db
         .select()
         .from(schema.routines)
         .where(eq(schema.routines.id, routine.id));
@@ -890,7 +890,7 @@ describe('webhook ingress', () => {
     expect(paused.status).toBe(200);
     expect(await paused.json()).toMatchObject({ run_id: null, matched: false });
     await edit({ enabled: true, trigger: daily });
-    await t.deps.db
+    await t.db
       .update(schema.webhookEndpoints)
       .set({ enabled: true })
       .where(eq(schema.webhookEndpoints.id, endpoint.id));
@@ -921,7 +921,7 @@ describe('webhook ingress', () => {
     const states = async () =>
       Object.fromEntries(
         (
-          await t.deps.db
+          await t.db
             .select()
             .from(schema.webhookEndpoints)
             .where(eq(schema.webhookEndpoints.routineId, routine.id))
@@ -936,7 +936,7 @@ describe('webhook ingress', () => {
     expect(await states()).toEqual({ a: [false, 'owner'], b: [false, 'trigger_switch'] });
     await edit(`/routines/${routine.id}`, { trigger: event });
     expect(await states()).toEqual({ a: [false, 'owner'], b: [true, null] });
-    const [linked] = await t.deps.db
+    const [linked] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.id, routine.id));
@@ -965,7 +965,7 @@ describe('webhook ingress', () => {
     expect(await states()).toEqual({ a: [true, null], b: [false, 'trigger_switch'] });
 
     // Each automatic change is audited as the owner's, with the reason.
-    const switches = await t.deps.db
+    const switches = await t.db
       .select({ targetId: schema.auditLog.targetId, metadata: schema.auditLog.metadata })
       .from(schema.auditLog)
       .where(eq(schema.auditLog.action, 'webhook.update'));
@@ -1006,7 +1006,7 @@ describe('webhook ingress', () => {
       info: null,
       providerOptions: {},
     });
-    const [copied] = await t.deps.db
+    const [copied] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.botId, copy.id));
@@ -1075,7 +1075,7 @@ describe('webhook ingress', () => {
     });
     expect(endpoint.slug).toBe(routine.slug);
     // The Routine's trigger now points at its endpoint.
-    const [stored] = await t.deps.db
+    const [stored] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.id, routine.id));
@@ -1119,7 +1119,7 @@ describe('webhook ingress', () => {
     const { run_id } = (await res.json()) as { run_id: string };
     const [run] = await runsOf(bot.id);
     expect(run).toMatchObject({ id: run_id, trigger: 'routine', priority: 3 });
-    const [record] = await t.deps.db
+    const [record] = await t.db
       .select()
       .from(schema.routineRuns)
       .where(eq(schema.routineRuns.routineId, routine.id));
@@ -1130,7 +1130,7 @@ describe('webhook ingress', () => {
     expect(prompt).toContain('PR #42 "Add retries" opened in acme/api');
     expect(prompt).toContain('Review the pull request and comment on risky changes.');
     await until(async () => {
-      const [done] = await t.deps.db
+      const [done] = await t.db
         .select()
         .from(schema.routineRuns)
         .where(eq(schema.routineRuns.id, record!.id));
@@ -1157,12 +1157,12 @@ describe('webhook ingress', () => {
     expect(routineRes.status).toBe(201);
     const routine = (await routineRes.json()) as { id: string; slug: string };
     const { endpoint, token } = await newEndpoint(bot.id, { routineId: routine.id });
-    const [stored] = await t.deps.db
+    const [stored] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.id, routine.id));
     const setMatch = (match: unknown) =>
-      t.deps.db
+      t.db
         .update(schema.routines)
         .set({ trigger: { ...(stored!.trigger as object), match } })
         .where(eq(schema.routines.id, routine.id));
@@ -1291,9 +1291,7 @@ describe('webhook ingress', () => {
     expect(copied.id).not.toBe(inbox.id);
 
     // A Bot from before inboxes came with it gets one when its endpoints are listed.
-    await t.deps.db
-      .delete(schema.webhookEndpoints)
-      .where(eq(schema.webhookEndpoints.botId, copy.id));
+    await t.db.delete(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.botId, copy.id));
     expect(await inboxOf(copy.id)).toMatchObject({ hasToken: false });
   });
 
@@ -1366,7 +1364,7 @@ describe('webhook ingress', () => {
     ).toBe(404);
     const actions = async (id: string) =>
       (
-        await t.deps.db
+        await t.db
           .select({ action: schema.auditLog.action })
           .from(schema.auditLog)
           .where(eq(schema.auditLog.targetId, id))

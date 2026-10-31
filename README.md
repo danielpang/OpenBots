@@ -56,12 +56,14 @@ cd OpenBot
 (umask 077 && cp .env.example .env)
 openssl rand -base64 32   # the master key
 openssl rand -hex 24      # the database password
+openssl rand -hex 24      # the app's database password
 ```
 
 In `.env`, set `OPENBOT_MASTER_KEY=` to the key and `POSTGRES_PASSWORD=` to the password, and put
 the same password in `DATABASE_URL` in place of `change-me`
 (`DATABASE_URL=postgres://openbot:<password>@postgres:5432/openbot`). Postgres does not start
-without it. Keep a copy of the key somewhere safe: every stored secret is encrypted with it. From
+without it. Set `OPENBOT_DB_APP_PASSWORD=` to the second password: the server works as a database
+role with it that is held to row-level security between organizations. Keep a copy of the key somewhere safe: every stored secret is encrypted with it. From
 a fork, also set `OPENBOT_IMAGE_PREFIX=ghcr.io/<owner in lower case>/openbot`. Optionally add a
 model provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...); you can also add providers later
 in Settings > Models. Then:

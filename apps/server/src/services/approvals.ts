@@ -31,6 +31,8 @@ type ApprovalStatus = ApprovalRow['status'];
 
 export interface ExpireJob {
   approvalId: string;
+  /** Its organization, where it runs (infra/index.ts). */
+  workspaceId?: string;
 }
 
 const iso = (date: Date | null) => (date ? new Date(date).toISOString() : null);
@@ -123,7 +125,11 @@ export async function announceApproval(deps: ApprovalsDeps, row: ApprovalRow) {
     : approvalTtlMs(deps.config);
   await deps.infra
     .queue<ExpireJob>(APPROVALS_QUEUE)
-    .enqueue('expire', { approvalId: row.id }, { delayMs, priority: PRIORITY.background });
+    .enqueue(
+      'expire',
+      { approvalId: row.id, workspaceId: row.workspaceId },
+      { delayMs, priority: PRIORITY.background },
+    );
 }
 
 /**

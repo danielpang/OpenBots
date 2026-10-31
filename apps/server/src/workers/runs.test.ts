@@ -37,6 +37,7 @@ import {
   type RunModel,
   type RunWorkerOptions,
 } from './runs.js';
+import { inEveryOrganization } from '../workers.js';
 
 // The run worker end to end on a test database, with a recorded-provider
 // double in place of the model (plan 18.2 "recorded-provider double").
@@ -81,8 +82,8 @@ describe('run worker', () => {
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
     cookie = (await t.signUp('dana@example.com')).cookie!;
-    const [user] = await t.deps.db.select().from(schema.users);
-    const [member] = await t.deps.db.select().from(schema.workspaceMembers);
+    const [user] = await t.db.select().from(schema.users);
+    const [member] = await t.db.select().from(schema.workspaceMembers);
     owner = { id: user!.id, workspaceId: member!.workspaceId };
     unhook = registerRunHooks();
     await t.deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
@@ -123,7 +124,7 @@ describe('run worker', () => {
   };
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -133,7 +134,7 @@ describe('run worker', () => {
 
   const botMessages = async (chatId: string) =>
     (
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.messages)
         .where(eq(schema.messages.chatId, chatId))
@@ -156,7 +157,7 @@ describe('run worker', () => {
     });
 
   const stepsOf = (runId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, runId))
@@ -272,7 +273,7 @@ describe('run worker', () => {
       ['tool_call', "Remembered 'Prefers tabs'"],
       ['llm', 'Thought briefly'],
     ]);
-    const memories = await t.deps.db
+    const memories = await t.db
       .select()
       .from(schema.botMemories)
       .where(eq(schema.botMemories.botId, bot.id));
@@ -315,7 +316,7 @@ describe('run worker', () => {
     const parts = asked.parts as MessagePart[];
     expect(parts[2]).toMatchObject({ type: 'widget', kind: 'question' });
     expect(statesOf(bot.id).at(-1)).toBe('waiting:Waiting for your answer');
-    const [widget] = await t.deps.db
+    const [widget] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, asked.id));
@@ -370,7 +371,7 @@ describe('run worker', () => {
 
     // A "new process": fresh queues and bus, a fresh worker, nothing in memory.
     const infra = createInfra(t.deps.config);
-    const deps2: AppDeps = { ...t.deps, infra };
+    const deps2: AppDeps = { ...t.ownerDeps, infra };
     const app2 = createApp(deps2, { webDist: '' });
     const seen: WsEvent[] = [];
     await infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => seen.push(e));
@@ -415,7 +416,7 @@ describe('run worker', () => {
       // While the remember tool runs, the owner sends another message.
       if (posted || !botRef || texts[0] !== 'Uses red') return;
       posted = true;
-      await postUserMessage(t.deps, owner, botRef.chatId, { text: 'actually, use blue' });
+      await postUserMessage(t.ownerDeps, owner, botRef.chatId, { text: 'actually, use blue' });
     });
     try {
       await say(bot, 'paint it red');
@@ -473,23 +474,23 @@ describe('run worker', () => {
     let release: () => void = () => {};
     blockers.set(bot.id, new Promise<void>((resolve) => (release = resolve)));
     const at = started.length;
-    const first = await enqueueRun(t.deps, {
+    const first = await enqueueRun(t.ownerDeps, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'message',
     });
     await until(() => expect(started.slice(at)).toEqual([bot.id]));
-    const routine = await enqueueRun(t.deps, {
+    const routine = await enqueueRun(t.ownerDeps, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'routine',
     });
-    const webhook = await enqueueRun(t.deps, {
+    const webhook = await enqueueRun(t.ownerDeps, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'webhook',
     });
-    const message = await enqueueRun(t.deps, {
+    const message = await enqueueRun(t.ownerDeps, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'message',
@@ -517,7 +518,7 @@ describe('run worker', () => {
     );
     await say(bot, 'keep answers under three lines');
     await until(async () => {
-      const rows = await t.deps.db
+      const rows = await t.db
         .select()
         .from(schema.botMemories)
         .where(eq(schema.botMemories.botId, bot.id));
@@ -598,10 +599,10 @@ describe('run worker', () => {
 
     const warn = vi.spyOn(t.deps.logger, 'warn');
     const infra = createInfra(t.deps.config);
-    const deps2: AppDeps = { ...t.deps, infra };
+    const deps2: AppDeps = { ...t.ownerDeps, infra };
     try {
       await infra.queue<RunJob>(RUNS_QUEUE).process(createRunWorker(deps2, optionsFor()));
-      expect(await recoverInterruptedRuns(deps2)).toBe(1);
+      expect(await inEveryOrganization(deps2, () => recoverInterruptedRuns(deps2))).toBe(1);
       await until(async () => expect((await runsOf(bot.id))[0]!.status).toBe('completed'));
 
       // The model is told the call's outcome is unknown; the call did not run again.
@@ -639,12 +640,11 @@ describe('run worker', () => {
     const { bot } = await newBot('Queued', [[{ text: 'Back after the restart.' }]]);
     // Queued, but its in-memory job went away with the process that queued it.
     const chatId = bot.chatId;
-    const [run] = await t.deps.db
+    const [run] = await t.db
       .insert(schema.runs)
       .values({
-        workspaceId: (
-          await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id))
-        )[0]!.workspaceId,
+        workspaceId: (await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id)))[0]!
+          .workspaceId,
         botId: bot.id,
         chatId,
         trigger: 'message',
@@ -654,10 +654,12 @@ describe('run worker', () => {
     expect(run!.status).toBe('queued');
 
     const infra = createInfra(t.deps.config);
-    const deps2: AppDeps = { ...t.deps, infra };
+    const deps2: AppDeps = { ...t.ownerDeps, infra };
     try {
       await infra.queue<RunJob>(RUNS_QUEUE).process(createRunWorker(deps2, optionsFor()));
-      expect(await recoverInterruptedRuns(deps2)).toBeGreaterThanOrEqual(1);
+      expect(
+        await inEveryOrganization(deps2, () => recoverInterruptedRuns(deps2)),
+      ).toBeGreaterThanOrEqual(1);
       await until(async () => expect((await runsOf(bot.id))[0]!.status).toBe('completed'));
       expect((await botMessages(chatId)).at(-1)!.parts).toEqual([
         { type: 'text', text: 'Back after the restart.' },
@@ -679,21 +681,21 @@ describe('run worker', () => {
 
     const warn = vi.spyOn(t.deps.logger, 'warn');
     const infra = createInfra(t.deps.config);
-    const deps2: AppDeps = { ...t.deps, infra };
+    const deps2: AppDeps = { ...t.ownerDeps, infra };
     try {
       await infra.queue<RunJob>(RUNS_QUEUE).process(createRunWorker(deps2, optionsFor()));
-      await recoverInterruptedRuns(deps2);
+      await inEveryOrganization(deps2, () => recoverInterruptedRuns(deps2));
       await until(async () => expect((await runsOf(bot.id))[0]!.status).toBe('completed'));
       expect((await botMessages(bot.chatId)).at(-1)!.parts).toEqual([
         { type: 'text', text: 'Hello again.' },
       ]);
 
       // A run already taken over MAX_TAKEOVERS times fails instead.
-      await t.deps.db
+      await t.db
         .update(schema.runs)
         .set({ status: 'running', state: { takeovers: MAX_TAKEOVERS } })
         .where(eq(schema.runs.id, run!.id));
-      await recoverInterruptedRuns(deps2);
+      await inEveryOrganization(deps2, () => recoverInterruptedRuns(deps2));
       await until(async () => expect((await runsOf(bot.id))[0]!.status).toBe('failed'));
       expect((await runsOf(bot.id))[0]!.error).toBe('The run was interrupted by a server restart');
 

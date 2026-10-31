@@ -24,7 +24,8 @@ import {
 import { registerRoutineHooks } from './services/routines.js';
 import { registerRunHooks } from './services/runs.js';
 import { registerSkillHooks } from './services/skills.js';
-import { startWorkers } from './workers.js';
+import { inEveryOrganization, startWorkers } from './workers.js';
+import { openAppDb } from './db/app-role.js';
 import { attachComputerProxies, isComputerSocketPath } from './ws/computer.js';
 import { attachGateway } from './ws/gateway.js';
 import type { ServerExtensions } from './extensions.js';
@@ -58,15 +59,21 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
   // Files this process makes are its own; stdio servers run as another user (S-1).
   process.umask(0o077);
   protectFilesDir(config.filesDir);
-  const db = createDb(config.databaseUrl);
-
-  await migrate(db);
+  // Migrations as the tables' owner; then the app works under row-level
+  // security, as openbot_app (db/app-role.ts, db/scope.ts).
+  const owner = createDb(config.databaseUrl);
+  await migrate(owner);
+  const db = await openAppDb(owner, config, logger);
   // A self-hosted install is one implicit organization (plan 21.2).
   if (config.deployment === 'self_hosted') await ensureWorkspace(db);
   await seedProvidersFromEnv({ db, config, logger });
-  await sealPlaintextConnectorValues({ db, config, logger });
-  await sealPlaintextProviderHeaders({ db, config });
-  await backfillProviderKeyHints({ db, config });
+  // Upkeep of each organization's rows, in its scope.
+  await inEveryOrganization({ db }, async () => {
+    await sealPlaintextConnectorValues({ db, config, logger });
+    await sealPlaintextProviderHeaders({ db, config });
+    await backfillProviderKeyHints({ db, config });
+    return 0;
+  });
   await encryptStoredOAuthTokens({ db, config });
   logger.info({ role: config.role }, 'migrations applied');
 

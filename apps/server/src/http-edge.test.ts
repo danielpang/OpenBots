@@ -184,7 +184,7 @@ describe('auth rate limit', { timeout: 20_000 }, () => {
     // Nor does sending the internal header directly.
     expect((await signIn(ip(3), { 'x-openbot-client-ip': '203.0.113.98' })).status).toBe(429);
 
-    const { config } = t.deps;
+    const { config } = t.ownerDeps;
     config.trustedProxies = ['172.16.0.0/12'];
     try {
       // Behind the tunnel each client, by its right-most untrusted hop, is counted apart.

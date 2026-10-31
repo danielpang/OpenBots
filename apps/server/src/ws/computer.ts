@@ -20,6 +20,7 @@ import {
 } from '../services/computer.js';
 import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 import { reject, toHeaders, type UpgradeSource } from './gateway.js';
+import { inWorkspace } from '../db/scope.js';
 
 // WebSocket proxies to the computer's control agent (plan 9.3, 9.4, 14.1):
 // `/api/v1/computer/pty` is the Computer page's terminal (xterm.js to the
@@ -102,7 +103,8 @@ export async function attachComputerProxies(
     let target: Upstream;
     try {
       const user = await authenticateHeaders(deps, toHeaders(req.headers));
-      target = await upstreamFor(user, url);
+      // The socket's work is its organization's (db/scope.ts).
+      target = await inWorkspace(user.workspaceId, () => upstreamFor(user, url));
     } catch (error) {
       if (error instanceof DomainError && error.code === COMPUTER_OFF) {
         return closeAtOnce(req, socket, head, COMPUTER_OFF_CLOSE_CODE, COMPUTER_OFF);
@@ -182,8 +184,9 @@ export async function attachComputerProxies(
     const timer = setTimeout(() => {
       graces.delete(timer);
       if (controlling(user.id, botId)) return;
-      void handBack(user, botId, closedAt).catch((error: unknown) =>
-        deps.logger.warn({ err: error, botId }, 'handing back a left takeover failed'),
+      void inWorkspace(user.workspaceId, () => handBack(user, botId, closedAt)).catch(
+        (error: unknown) =>
+          deps.logger.warn({ err: error, botId }, 'handing back a left takeover failed'),
       );
     }, graceMs);
     timer.unref();
@@ -213,8 +216,8 @@ export async function attachComputerProxies(
     const used = () => {
       if (Date.now() - touched < SOCKET_TOUCH_MS) return;
       touched = Date.now();
-      touchComputer(deps, target.computerId).catch((error: unknown) =>
-        deps.logger.warn({ err: error }, 'marking the computer used failed'),
+      inWorkspace(target.user.workspaceId, () => touchComputer(deps, target.computerId)).catch(
+        (error: unknown) => deps.logger.warn({ err: error }, 'marking the computer used failed'),
       );
     };
     client.on('message', (data, isBinary) => {
@@ -247,19 +250,21 @@ export async function attachComputerProxies(
         open.delete(client);
         client.close(1008, 'membership ended');
       }
-      await releaseScreens(
-        deps,
-        SYSTEM_ACTOR,
-        and(
-          eq(schema.botScreens.controlledByUserId, userId),
-          inArray(
-            schema.botScreens.botId,
-            deps.db
-              .select({ id: schema.bots.id })
-              .from(schema.bots)
-              .where(eq(schema.bots.workspaceId, workspaceId)),
-          ),
-        )!,
+      await inWorkspace(workspaceId, () =>
+        releaseScreens(
+          deps,
+          SYSTEM_ACTOR,
+          and(
+            eq(schema.botScreens.controlledByUserId, userId),
+            inArray(
+              schema.botScreens.botId,
+              deps.db
+                .select({ id: schema.bots.id })
+                .from(schema.bots)
+                .where(eq(schema.bots.workspaceId, workspaceId)),
+            ),
+          )!,
+        ),
       ).catch((error: unknown) =>
         deps.logger.warn(
           { err: error, userId },

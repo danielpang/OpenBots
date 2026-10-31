@@ -9,7 +9,8 @@ import { loadConfig, type Config } from './config.js';
 import type { AppDeps } from './context.js';
 import { createTestDb, type TestDb } from './db/test-db.js';
 import { createInfra } from './infra/index.js';
-import { schema } from './db/client.js';
+import { schema, type Db } from './db/client.js';
+import { inWorkspace, scopedDb } from './db/scope.js';
 import type { ServerExtensions } from './extensions.js';
 import { createLogger } from './logger.js';
 import { generateMasterKey } from './secrets.js';
@@ -36,6 +37,21 @@ export interface TestApp {
   app: App;
   deps: AppDeps;
   testDb: TestDb;
+  /**
+   * The database owner's handle, with no row-level security: for setting up
+   * and checking rows. The app's own is `deps.db` (db/scope.ts).
+   */
+  db: Db;
+  /**
+   * `deps` with the owner's handle as `db`: for tests that call a service
+   * directly, outside any request, job or organization scope.
+   */
+  ownerDeps: AppDeps;
+  /**
+   * Runs `fn` in an organization's scope (db/scope.ts), the default one
+   * unless named: for a service called directly, as a request or job would.
+   */
+  inOrganization<T>(fn: () => T | PromiseLike<T>, workspaceId?: string): Promise<T>;
   /** Closes the app and its database; calling it again waits for the first close. */
   close(): Promise<void>;
   /** Signs up through better-auth and returns the response and the session cookie. */
@@ -96,7 +112,10 @@ export async function createTestApp(
     ...env,
   });
   const logger = createLogger('silent');
-  const db = testDb.db;
+  // The app works under row-level security (db/scope.ts); tests set up and
+  // check rows with `t.db`, the database owner's handle, which has none.
+  const owner = testDb.db;
+  const db = scopedDb(owner);
   const infra = createInfra(config);
   const auth = createAuth({
     config,
@@ -110,20 +129,20 @@ export async function createTestApp(
   const app = createApp(deps, { webDist: '' });
   let provider: Promise<string> | undefined;
   let closed: Promise<void> | undefined;
-  const defaultOrganization = async () => (await ensureWorkspace(db)).id;
+  const defaultOrganization = async () => (await ensureWorkspace(owner)).id;
   const addMember = async (userId: string, workspaceId: string, role: Role = 'member') => {
-    await db.insert(schema.workspaceMembers).values({ workspaceId, userId, role });
+    await owner.insert(schema.workspaceMembers).values({ workspaceId, userId, role });
   };
   const switchOrganization = async (cookie: string, workspaceId: string | null) => {
     const token = decodeURIComponent(cookie.split('=').slice(1).join('=')).split('.')[0]!;
-    await db
+    await owner
       .update(schema.sessions)
       .set({ activeOrganizationId: workspaceId })
       .where(eq(schema.sessions.token, token));
   };
   const addModels = async (providerId: string, modelIds: string[]) => {
-    const workspace = await ensureWorkspace(db);
-    await db
+    const workspace = await ensureWorkspace(owner);
+    await owner
       .insert(schema.providerModels)
       .values(
         modelIds.map((modelId) => ({
@@ -141,6 +160,15 @@ export async function createTestApp(
   return {
     app,
     deps,
+    db: owner,
+    // A live view of `deps` (tests set `net` and the like on it later), with the owner's db.
+    ownerDeps: new Proxy(deps, {
+      get: (target, key) => (key === 'db' ? owner : Reflect.get(target, key)),
+      set: (target, key, value) => Reflect.set(target, key, value),
+    }),
+    async inOrganization(fn, workspaceId) {
+      return inWorkspace(workspaceId ?? (await defaultOrganization()), fn);
+    },
     testDb,
     close() {
       closed ??= (async () => {
@@ -151,8 +179,8 @@ export async function createTestApp(
       return closed;
     },
     providerId() {
-      provider ??= ensureWorkspace(db).then(async (workspace) => {
-        const [row] = await db
+      provider ??= ensureWorkspace(owner).then(async (workspace) => {
+        const [row] = await owner
           .insert(schema.providers)
           .values({
             workspaceId: workspace.id,
@@ -171,7 +199,7 @@ export async function createTestApp(
     addModels,
     defaultOrganization,
     async createOrganization(name) {
-      const [row] = await db
+      const [row] = await owner
         .insert(schema.workspaces)
         .values({ name, slug: organizationSlug(name) })
         .returning({ id: schema.workspaces.id });
@@ -180,7 +208,7 @@ export async function createTestApp(
     addMember,
     switchOrganization,
     async userId(email) {
-      const [row] = await db
+      const [row] = await owner
         .select({ id: schema.users.id })
         .from(schema.users)
         .where(eq(schema.users.email, email.toLowerCase()));
@@ -203,7 +231,7 @@ export async function createTestApp(
         // As if invited to the default organization: the first user owns it.
         const { user } = (await res.clone().json()) as { user: { id: string } };
         const workspaceId = await defaultOrganization();
-        const [owner] = await db
+        const [first] = await owner
           .select({ id: schema.workspaceMembers.id })
           .from(schema.workspaceMembers)
           .where(
@@ -213,7 +241,7 @@ export async function createTestApp(
             ),
           )
           .limit(1);
-        await addMember(user.id, workspaceId, owner ? 'member' : 'owner');
+        await addMember(user.id, workspaceId, first ? 'member' : 'owner');
         if (cookie) await switchOrganization(cookie, workspaceId);
       }
       return { res, cookie };

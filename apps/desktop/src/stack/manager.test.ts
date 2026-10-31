@@ -25,6 +25,7 @@ import {
   StackError,
   upFailureMessage,
   withDatabasePassword,
+  withAppDbPassword,
   withLocalToken,
   withLoopbackPort,
   withPort,
@@ -107,9 +108,9 @@ const projects = (exec: ReturnType<typeof composeExec>) =>
 
 const allFree = async () => true;
 
-/** The project, the sandbox network, the local token and the loopback port this version of the app records in `.env`. */
+/** The project, the sandbox network, the local token, the app's database password and the loopback port this version of the app records in `.env`. */
 const RECORDED =
-  'COMPOSE_PROJECT_NAME=openbot-app\nOPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
+  'COMPOSE_PROJECT_NAME=openbot-app\nOPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_DB_APP_PASSWORD=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
 /** The project alone, as an install from before the app named its network has it. */
 const PROJECT_ONLY = 'COMPOSE_PROJECT_NAME=openbot-app\n';
 /** `compose config --images` and `image inspect` replies for images this Mac has. */
@@ -161,6 +162,18 @@ describe('the local owner token (OPENBOT_LOCAL_TOKEN)', () => {
     );
     const kept = 'OPENBOT_LOCAL_TOKEN=old\nA=1\n';
     expect(withLocalToken(kept, () => 'new')).toBe(kept);
+  });
+
+  it("fills in openbot_app's database password and keeps one that is there", () => {
+    expect(withAppDbPassword('A=1\n', () => 'new')).toBe('A=1\nOPENBOT_DB_APP_PASSWORD=new\n');
+    const kept = 'OPENBOT_DB_APP_PASSWORD=old\nA=1\n';
+    expect(withAppDbPassword(kept, () => 'new')).toBe(kept);
+    const env = renderEnv(TEMPLATE, {
+      masterKey: 'KEY',
+      databasePassword: 'p',
+      appDbPassword: 'q',
+    });
+    expect(envValue(env, 'OPENBOT_DB_APP_PASSWORD')).toBe('q');
   });
 
   it('goes into a new .env, with the web port on loopback only', () => {
@@ -228,7 +241,11 @@ describe('the local owner token (OPENBOT_LOCAL_TOKEN)', () => {
     const env = files.data.get(paths.envFile)!;
     const token = envValue(env, 'OPENBOT_LOCAL_TOKEN')!;
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(env).toBe(`${existing}OPENBOT_LOCAL_TOKEN=${token}\nOPENBOT_HTTP_BIND=127.0.0.1:\n`);
+    const appPassword = envValue(env, 'OPENBOT_DB_APP_PASSWORD')!;
+    expect(appPassword).toMatch(/^[0-9a-f]{48}$/);
+    expect(env).toBe(
+      `${existing}OPENBOT_LOCAL_TOKEN=${token}\nOPENBOT_DB_APP_PASSWORD=${appPassword}\nOPENBOT_HTTP_BIND=127.0.0.1:\n`,
+    );
     expect(await manager.localToken()).toBe(token);
   });
 });
@@ -635,7 +652,7 @@ describe('createStackManager', () => {
 describe('the Compose project', () => {
   const legacy = (stdout: string) => ({ 'container ls': { code: 0, stdout, stderr: '' } });
   const older =
-    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
+    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_DB_APP_PASSWORD=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
 
   it('runs a new install as openbot-app, never the openbot of a source checkout', async () => {
     // The owner's checkout runs project openbot from another directory.
@@ -1140,7 +1157,7 @@ describe('the sandbox network', () => {
     ['openbot-sandbox', '172.30.255.0/24'],
   ];
   const older =
-    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
+    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_DB_APP_PASSWORD=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
   const sandboxOf = (env: string) =>
     Object.fromEntries(
       [

@@ -7,9 +7,9 @@ import { schema } from '../db/client.js';
 import {
   claimRoutineRun,
   registerRoutineHooks,
-  startRoutineScheduler,
-  tickRoutines,
   ROUTINE_TICK_MS,
+  startRoutineScheduler,
+  tickDueRoutines,
 } from '../services/routines.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { createTestApp, type TestApp } from '../test-app.js';
@@ -97,7 +97,7 @@ describe('routines', () => {
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 5_000, interval: 10 });
 
   const messagesOf = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, chatId))
@@ -111,7 +111,7 @@ describe('routines', () => {
     );
 
   const recordsOf = (routineId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.routineRuns)
       .where(eq(schema.routineRuns.routineId, routineId))
@@ -300,10 +300,7 @@ describe('routines', () => {
       return rows;
     });
     expect(record).toMatchObject({ reason: 'schedule', slot: new Date('2026-10-19T07:00:00Z') });
-    const [run] = await t.deps.db
-      .select()
-      .from(schema.runs)
-      .where(eq(schema.runs.id, record!.runId!));
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.id, record!.runId!));
     expect(run).toMatchObject({ trigger: 'routine', priority: 3, chatId: bot.chatId });
 
     // The Bot was told what to do, and its reply and the "Routine ran" widget are in the transcript.
@@ -344,7 +341,7 @@ describe('routines', () => {
       nextRunAt: '2026-10-20T07:00:00.000Z',
       lastRun: { status: 'completed' },
     });
-    await tickRoutines(t.deps);
+    await tickDueRoutines(t.deps);
   });
 
   it('enqueues each slot exactly once when two workers tick at the same time', async () => {
@@ -355,39 +352,36 @@ describe('routines', () => {
     // A tick claims every due Routine in the database, and earlier tests leave
     // theirs due on the slots of their faked clocks (the Phase 6 one at
     // 2026-10-20 08:00 London), so only this test's four are scheduled here.
-    await t.deps.db.update(schema.routines).set({ nextRunAt: null });
+    await t.db.update(schema.routines).set({ nextRunAt: null });
     const ids: string[] = [];
     for (const name of ['A', 'B', 'C', 'D']) {
       ids.push((await newRoutine(bot.id, { name, prompt: 'p', trigger: weekdays })).id);
     }
     const slot = new Date(Date.now() - 60_000);
     for (const id of ids) {
-      await t.deps.db
-        .update(schema.routines)
-        .set({ nextRunAt: slot })
-        .where(eq(schema.routines.id, id));
+      await t.db.update(schema.routines).set({ nextRunAt: slot }).where(eq(schema.routines.id, id));
     }
     // Two worker processes: separate deps over the same database.
-    const other = { ...t.deps };
+    const other = { ...t.ownerDeps };
     const started = await Promise.all([
-      tickRoutines(t.deps),
-      tickRoutines(other),
-      tickRoutines(t.deps),
-      tickRoutines(other),
+      tickDueRoutines(t.deps),
+      tickDueRoutines(other),
+      tickDueRoutines(t.deps),
+      tickDueRoutines(other),
     ]);
     expect(started.reduce((a, b) => a + b, 0)).toBe(4);
     for (const id of ids) expect(await recordsOf(id)).toHaveLength(1);
 
     // A worker that read the Routine before the slot moved on still cannot claim it again.
-    const [routine] = await t.deps.db
+    const [routine] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.id, ids[0]!));
-    const again = await t.deps.db.transaction((tx) =>
-      claimRoutineRun(t.deps, tx, routine!, { reason: 'schedule', slot }),
+    const again = await t.db.transaction((tx) =>
+      claimRoutineRun(t.ownerDeps, tx, routine!, { reason: 'schedule', slot }),
     );
     expect(again).toBeNull();
-    const runs = await t.deps.db
+    const runs = await t.db
       .select()
       .from(schema.runs)
       .where(and(eq(schema.runs.botId, bot.id), eq(schema.runs.trigger, 'routine')));
@@ -400,7 +394,7 @@ describe('routines', () => {
       Array.from({ length: 4 }, () => [{ text: 'ok' }]),
     );
     // Only this test's Routine is due (see the test above).
-    await t.deps.db.update(schema.routines).set({ nextRunAt: null });
+    await t.db.update(schema.routines).set({ nextRunAt: null });
     vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-16T10:00:20Z') });
     const routine = await newRoutine(bot.id, {
       name: 'Poll',
@@ -416,15 +410,15 @@ describe('routines', () => {
     expect(routine.trigger).not.toHaveProperty('cron');
 
     // On time: the next slot is 7 minutes on.
-    expect(await tickRoutines(t.deps, new Date('2026-10-16T10:07:10Z'))).toBe(1);
+    expect(await tickDueRoutines(t.deps, new Date('2026-10-16T10:07:10Z'))).toBe(1);
     const next = async () =>
       (await (await call('GET', `/routines/${routine.id}`)).json()) as RoutineView;
     expect((await next()).nextRunAt).toBe('2026-10-16T10:14:00.000Z');
     // Down for half an hour: one run, and the rhythm from the last slot is kept.
-    expect(await tickRoutines(t.deps, new Date('2026-10-16T10:45:00Z'))).toBe(1);
+    expect(await tickDueRoutines(t.deps, new Date('2026-10-16T10:45:00Z'))).toBe(1);
     expect((await next()).nextRunAt).toBe('2026-10-16T10:49:00.000Z');
     // The same slot is never claimed twice.
-    expect(await tickRoutines(t.deps, new Date('2026-10-16T10:45:30Z'))).toBe(0);
+    expect(await tickDueRoutines(t.deps, new Date('2026-10-16T10:45:30Z'))).toBe(0);
     expect((await recordsOf(routine.id)).map((r) => r.slot?.toISOString())).toEqual([
       '2026-10-16T10:07:00.000Z',
       '2026-10-16T10:14:00.000Z',
@@ -434,7 +428,7 @@ describe('routines', () => {
   it('keeps the 20 most recent run records per Routine (R4)', async () => {
     const { bot } = await newBot('Keeper');
     const view = await newRoutine(bot.id, { name: 'Often', prompt: 'p', trigger: weekdays });
-    const [routine] = await t.deps.db
+    const [routine] = await t.db
       .select()
       .from(schema.routines)
       .where(eq(schema.routines.id, view.id));
@@ -442,8 +436,8 @@ describe('routines', () => {
     const claimed: string[] = [];
     for (let i = 0; i < 23; i++) {
       vi.setSystemTime(new Date(Date.UTC(2026, 9, 1, 0, i)));
-      const run = await t.deps.db.transaction((tx) =>
-        claimRoutineRun(t.deps, tx, routine!, { reason: 'run_now' }),
+      const run = await t.db.transaction((tx) =>
+        claimRoutineRun(t.ownerDeps, tx, routine!, { reason: 'run_now' }),
       );
       claimed.push(run!.routineRun.id);
     }
@@ -556,14 +550,14 @@ describe('routines', () => {
     // The Skill is turned off: due slots record a failure, start no run and post one event row.
     await call('PUT', `/bots/${bot.id}/skills`, { skillIds: [] });
     const due = () =>
-      t.deps.db
+      t.db
         .update(schema.routines)
         .set({ nextRunAt: new Date(Date.now() - 1_000) })
         .where(eq(schema.routines.id, routine.id));
     await due();
-    await tickRoutines(t.deps);
+    await tickDueRoutines(t.deps);
     await due();
-    await tickRoutines(t.deps);
+    await tickDueRoutines(t.deps);
     const records = await recordsOf(routine.id);
     expect(records).toHaveLength(2);
     for (const record of records) {
@@ -616,7 +610,7 @@ describe('routines', () => {
     const [proposal] = await until(async () => {
       const found = await widgetsOf(bot.chatId, 'routine_proposal');
       expect(found).toHaveLength(1);
-      const [run] = await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+      const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
       expect(run?.status).toBe('waiting');
       return found;
     });
@@ -654,7 +648,7 @@ describe('routines', () => {
       props: { routine_id: routine!.id, name: 'Standup notes', timezone: 'Europe/Berlin' },
     });
     await until(async () => {
-      const [run] = await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+      const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
       expect(run?.status).toBe('completed');
     });
     // The resumed run was told the Routine exists.

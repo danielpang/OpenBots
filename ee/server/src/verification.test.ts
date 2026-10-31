@@ -41,10 +41,10 @@ function managedApp(email = {}, env: Record<string, string> = {}) {
 }
 
 const userRows = (t: TestApp, email: string) =>
-  t.deps.db.select().from(schema.users).where(eq(schema.users.email, email));
+  t.db.select().from(schema.users).where(eq(schema.users.email, email));
 
 const pendingRows = (t: TestApp) =>
-  t.deps.db
+  t.db
     .select()
     .from(schema.verifications)
     .where(like(schema.verifications.identifier, 'sign-up:%'));
@@ -127,7 +127,7 @@ describe('email sign-up', () => {
       ...(await userRows(t, 'old@example.com')),
       ...(await userRows(t, 'kept@example.com')),
     ];
-    const credentials = await t.deps.db.select().from(schema.accounts);
+    const credentials = await t.db.select().from(schema.accounts);
     for (const address of ['old@example.com', 'kept@example.com']) {
       expect((await startSignUp(t, address)).res.status).toBe(200);
     }
@@ -136,7 +136,7 @@ describe('email sign-up', () => {
       ...(await userRows(t, 'kept@example.com')),
     ];
     expect(after).toEqual(before);
-    expect(await t.deps.db.select().from(schema.accounts)).toEqual(credentials);
+    expect(await t.db.select().from(schema.accounts)).toEqual(credentials);
   });
 
   it('deletes a leftover unconfirmed account with everything tied to it, once the code is in', async () => {
@@ -146,17 +146,17 @@ describe('email sign-up', () => {
     // membership and an invitation they sent.
     const org = await t.createOrganization('Squat Co');
     await t.addMember(old!.id, org);
-    await t.deps.db.insert(schema.accounts).values({
+    await t.db.insert(schema.accounts).values({
       userId: old!.id,
       providerId: 'github',
       accountId: 'gh-squatter',
     });
-    await t.deps.db.insert(schema.sessions).values({
+    await t.db.insert(schema.sessions).values({
       userId: old!.id,
       token: randomUUID(),
       expiresAt: new Date(Date.now() + 86_400_000),
     });
-    await t.deps.db.insert(schema.invites).values({
+    await t.db.insert(schema.invites).values({
       workspaceId: org,
       email: 'friend@example.com',
       inviterId: old!.id,
@@ -177,16 +177,16 @@ describe('email sign-up', () => {
     expect(now).toMatchObject({ name: 'Lee', emailVerified: true });
     expect(now!.id).not.toBe(old!.id);
     for (const table of [schema.accounts, schema.sessions] as const) {
-      expect(await t.deps.db.select().from(table).where(eq(table.userId, old!.id))).toEqual([]);
+      expect(await t.db.select().from(table).where(eq(table.userId, old!.id))).toEqual([]);
     }
     expect(
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.workspaceMembers)
         .where(eq(schema.workspaceMembers.userId, old!.id)),
     ).toEqual([]);
     expect(
-      await t.deps.db.select().from(schema.invites).where(eq(schema.invites.inviterId, old!.id)),
+      await t.db.select().from(schema.invites).where(eq(schema.invites.inviterId, old!.id)),
     ).toEqual([]);
     expect((await signIn(t, 'legacy@example.com', 'squatter pass')).status).toBe(401);
     expect((await signIn(t, 'legacy@example.com')).status).toBe(200);
@@ -212,7 +212,7 @@ describe('email sign-up', () => {
 
   it('expires a code after 10 minutes', async () => {
     const start = await startSignUp(t, 'exp@example.com');
-    await t.deps.db
+    await t.db
       .update(schema.verifications)
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(like(schema.verifications.identifier, 'sign-up:%'));
@@ -289,7 +289,7 @@ describe('email sign-up', () => {
     expect(locked.status).toBe(429);
     expect(await locked.json()).toMatchObject({ code: 'TOO_MANY_FAILURES' });
     expect(Number(locked.headers.get('x-retry-after'))).toBeGreaterThan(3000);
-    await t.deps.db
+    await t.db
       .update(schema.verifications)
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(like(schema.verifications.identifier, 'sign-up-fail:%'));
@@ -318,6 +318,7 @@ describe('email sign-up', () => {
     }
   });
 
+  // About 70 sign-up requests: slow on a busy machine.
   it('limits sign-ups and tries per IP', async () => {
     const app = await managedApp(emailTo(mail));
     try {
@@ -371,7 +372,7 @@ describe('email sign-up', () => {
     } finally {
       await app.close();
     }
-  });
+  }, 60_000);
 
   it("serves none of better-auth's own email sign-up or verification links", async () => {
     for (const [path, body] of [
@@ -427,7 +428,7 @@ describe('sign-up codes in the logs', () => {
       const code = sentBodies.join('').match(/\b(\d{6})\b/)?.[1];
       expect(code).toBeDefined();
       await createAccount(app, 'owner@example.com');
-      await app.deps.db
+      await app.db
         .update(schema.users)
         .set({ emailVerified: true })
         .where(eq(schema.users.email, 'owner@example.com'));
@@ -491,7 +492,7 @@ describe('a GitHub sign-up from an invite link', () => {
       return realFetch(input, init);
     });
     await createAccount(t, 'owner@example.com');
-    await t.deps.db
+    await t.db
       .update(schema.users)
       .set({ emailVerified: true })
       .where(eq(schema.users.email, 'owner@example.com'));
@@ -549,16 +550,16 @@ describe('a GitHub sign-up from an invite link', () => {
     expect(done.status).toBe(302);
     // The invite never rides in the OAuth state.
     expect(done.headers.get('location') ?? '').not.toContain(id);
-    const [user] = await t.deps.db
+    const [user] = await t.db
       .select()
       .from(schema.users)
       .where(eq(schema.users.email, 'gina@example.com'));
-    const members = await t.deps.db
+    const members = await t.db
       .select()
       .from(schema.workspaceMembers)
       .where(eq(schema.workspaceMembers.userId, user!.id));
     expect(members.map((m) => [m.workspaceId, m.role])).toEqual([[workspaceId, 'member']]);
-    const [row] = await t.deps.db.select().from(schema.invites).where(eq(schema.invites.id, id));
+    const [row] = await t.db.select().from(schema.invites).where(eq(schema.invites.id, id));
     expect(row!.status).toBe('accepted');
     // The session works there now.
     const me = await t.app.request('/api/v1/me', { headers: { cookie: sessionOf(done)! } });
@@ -578,7 +579,7 @@ describe('a GitHub sign-up from an invite link', () => {
     ]) {
       github = account;
       await githubSignUp(cookie);
-      const users = await t.deps.db
+      const users = await t.db
         .select()
         .from(schema.users)
         .where(eq(schema.users.email, account.email));
@@ -587,9 +588,9 @@ describe('a GitHub sign-up from an invite link', () => {
     github = { email: 'hal@example.com', verified: true };
     await githubSignUp();
     expect(
-      await t.deps.db.select().from(schema.users).where(eq(schema.users.email, 'hal@example.com')),
+      await t.db.select().from(schema.users).where(eq(schema.users.email, 'hal@example.com')),
     ).toEqual([]);
-    const [row] = await t.deps.db.select().from(schema.invites).where(eq(schema.invites.id, id));
+    const [row] = await t.db.select().from(schema.invites).where(eq(schema.invites.id, id));
     expect(row!.status).toBe('pending');
   });
 

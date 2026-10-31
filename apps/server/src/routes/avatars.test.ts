@@ -50,7 +50,7 @@ describe('GET /api/v1/bots/{id}/avatar.png', () => {
   });
 
   it('redirects an uploaded avatar to its file', async () => {
-    await t.deps.db
+    await t.db
       .update(schema.bots)
       .set({ avatar: { kind: 'upload', file_id: FILE } })
       .where(eq(schema.bots.id, botId));

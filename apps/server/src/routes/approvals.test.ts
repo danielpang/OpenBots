@@ -50,7 +50,7 @@ describe('approvals API', () => {
       chatId: string;
       workspaceId: string;
     };
-    const { db } = t.deps;
+    const { db } = t;
     const run = await insertRun(db, { botId: bot.id, chatId: bot.chatId, trigger: 'message' });
     const [message] = await db.transaction(async (tx) =>
       tx

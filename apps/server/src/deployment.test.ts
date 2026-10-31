@@ -58,7 +58,7 @@ describe('a self-hosted install', () => {
 
   it('makes the setup account the owner of its one organization', async () => {
     const res = await call(t, 'GET', '/api/v1/me', owner);
-    const workspace = await ensureWorkspace(t.deps.db);
+    const workspace = await ensureWorkspace(t.db);
     expect(await res.json()).toMatchObject({
       role: 'owner',
       workspace: { id: workspace.id, suspended: false },
@@ -69,7 +69,7 @@ describe('a self-hosted install', () => {
     const first = await t.signUp('bob@example.com');
     expect(first.res.status).toBe(403);
     expect(await first.res.json()).toMatchObject({ code: 'SIGNUP_CLOSED' });
-    expect(await t.deps.db.select().from(schema.users)).toHaveLength(1);
+    expect(await t.db.select().from(schema.users)).toHaveLength(1);
   });
 
   it('works in the implicit organization whatever a session names', async () => {
@@ -77,7 +77,7 @@ describe('a self-hosted install', () => {
     await t.switchOrganization(owner, other);
     const res = await call(t, 'GET', '/api/v1/me', owner);
     expect(await res.json()).toMatchObject({
-      workspace: { id: (await ensureWorkspace(t.deps.db)).id },
+      workspace: { id: (await ensureWorkspace(t.db)).id },
     });
     await t.switchOrganization(owner, null);
     expect((await call(t, 'GET', '/api/v1/bots', owner)).status).toBe(200);
@@ -105,13 +105,13 @@ describe('a self-hosted install', () => {
   });
 
   it('still records audit rows', async () => {
-    const rows = await t.deps.db.select().from(schema.auditLog);
+    const rows = await t.db.select().from(schema.auditLog);
     expect(rows.map((r) => r.action)).toContain('auth.sign_in');
   });
 
   it('keeps the limits and custom stdio for the owner, and the rest at defaults', async () => {
-    const workspace = await ensureWorkspace(t.deps.db);
-    await updateSettings(t.deps.db, workspace, { auditRetentionDays: 7 });
+    const workspace = await ensureWorkspace(t.db);
+    await updateSettings(t.db, workspace, { auditRetentionDays: 7 });
     // The owner is the operator: no ceiling, and any limit up or down.
     const raised = await call(t, 'PATCH', '/api/v1/settings', owner, {
       limits: { botsPerAccount: 500 },
@@ -169,7 +169,7 @@ describe('the single owner', () => {
         ['ada@example.com', 'bob@example.com'].map((email) => t.signUp(email)),
       );
       expect(results.map((r) => r.res.status).sort()).toEqual([200, 403]);
-      expect(await t.deps.db.select().from(schema.users)).toHaveLength(1);
+      expect(await t.db.select().from(schema.users)).toHaveLength(1);
     } finally {
       await t.close();
     }

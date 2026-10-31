@@ -138,10 +138,7 @@ describe('sessions and API keys on the managed service', () => {
       eq(schema.workspaceMembers.userId, samId),
       eq(schema.workspaceMembers.workspaceId, home),
     );
-    await t.deps.db
-      .update(schema.workspaceMembers)
-      .set({ suspendedAt: new Date() })
-      .where(membership);
+    await t.db.update(schema.workspaceMembers).set({ suspendedAt: new Date() }).where(membership);
     const both: Record<string, string>[] = [
       { authorization: `Bearer ${key}` },
       { cookie: cookie! },
@@ -155,7 +152,7 @@ describe('sessions and API keys on the managed service', () => {
     expect(await (await me({ cookie: cookie! })).json()).toMatchObject({
       workspace: { suspended: true },
     });
-    await t.deps.db.delete(schema.workspaceMembers).where(membership);
+    await t.db.delete(schema.workspaceMembers).where(membership);
     const res = await me({ authorization: `Bearer ${key}` });
     expect(await res.json()).toMatchObject({ workspace: null });
     expect(
@@ -216,11 +213,11 @@ describe('sign-in provider tokens (S-9)', () => {
 
   it('encrypts tokens stored in plain text and still hands them out', async () => {
     const { cookie } = await t.signUp('octo@example.com');
-    const [user] = await t.deps.db
+    const [user] = await t.db
       .select()
       .from(schema.users)
       .where(eq(schema.users.email, 'octo@example.com'));
-    const [account] = await t.deps.db
+    const [account] = await t.db
       .insert(schema.accounts)
       .values({
         accountId: '583231',
@@ -232,14 +229,14 @@ describe('sign-in provider tokens (S-9)', () => {
       })
       .returning();
 
-    expect(await encryptStoredOAuthTokens(t.deps)).toBe(1);
-    const [row] = await t.deps.db
+    expect(await encryptStoredOAuthTokens(t.ownerDeps)).toBe(1);
+    const [row] = await t.db
       .select()
       .from(schema.accounts)
       .where(eq(schema.accounts.id, account!.id));
     expect(row!.accessToken).not.toContain('plaintext');
     expect(row!.refreshToken).not.toContain('plaintext');
-    expect(await encryptStoredOAuthTokens(t.deps)).toBe(0);
+    expect(await encryptStoredOAuthTokens(t.ownerDeps)).toBe(0);
 
     const res = await t.app.request('/api/auth/get-access-token', {
       method: 'POST',
@@ -338,7 +335,7 @@ describe('settings', () => {
     const me = await t.app.request('/api/v1/me', { headers: { cookie } });
     expect(await me.json()).toMatchObject({ limits: { botsPerAccount: 20, botsPerGroup: 6 } });
     const { organizationSettings } = await import('./workspace.js');
-    expect((await organizationSettings(t.deps, home)).limits.botsPerAccount).toBe(20);
+    expect((await organizationSettings(t.ownerDeps, home)).limits.botsPerAccount).toBe(20);
     await t.testDb.db
       .update(schema.workspaces)
       .set({ settings: { limits: { botsPerGroup: 4 } } })
@@ -348,7 +345,7 @@ describe('settings', () => {
   it("caps limits at a ceiling the managed build sets per organization (its plan's)", async () => {
     const home = await t.defaultOrganization();
     const deps = {
-      ...t.deps,
+      ...t.ownerDeps,
       extensions: {
         limitsCeiling: () => ({ ...t.deps.config.limits, botsPerAccount: 3 }),
       },

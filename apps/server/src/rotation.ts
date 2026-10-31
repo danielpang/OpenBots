@@ -5,6 +5,7 @@ import { authSecret, isEncrypted } from './auth.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
 import { keyringFromConfig, resealSecret } from './secrets.js';
+import { forEachWorkspace } from './db/scope.js';
 
 // Master key rotation (plan 4.9). After OPENBOT_MASTER_KEY is replaced and the
 // old key moved to OPENBOT_MASTER_KEY_PREVIOUS, this re-seals every stored
@@ -118,36 +119,47 @@ export async function rotateMasterKey({
 
   for (const sealed of SEALED_COLUMNS) {
     const progress: RotationProgress = { column: sealed.name, checked: 0, resealed: 0 };
-    await inBatches(db, sealed.table, sealed.id, isNotNull(sealed.column), batchSize, {
-      select: { value: sealed.column },
-      each: async (id, row) => {
-        const value = row.value as Buffer;
-        progress.checked++;
-        let next: Buffer | null;
-        try {
-          next = resealSecret(value, keyring);
-        } catch (err) {
-          report.failed.push({ column: sealed.name, id, error: (err as Error).message });
-          return;
-        }
-        if (!next) {
-          report.current++;
-          return;
-        }
-        const set: Record<string, unknown> = { [sealed.key]: next };
-        if (sealed.updatedAt) set.updatedAt = sql`${sealed.updatedAt}`;
-        const updated = await db
-          .update(sealed.table)
-          .set(set as never)
-          .where(and(eq(sealed.id, id), eq(sealed.column, value)))
-          .returning({ id: sealed.id });
-        if (updated.length) {
-          report.resealed++;
-          progress.resealed++;
-        }
-      },
-      batch: () => onProgress?.({ ...progress }),
-    });
+    // Every sealed column is an organization's: each one's rows in its scope (db/scope.ts).
+    const workspaceColumn = (sealed.table as unknown as { workspaceId: PgColumn }).workspaceId;
+    await forEachWorkspace(db, (workspaceId) =>
+      inBatches(
+        db,
+        sealed.table,
+        sealed.id,
+        and(isNotNull(sealed.column), eq(workspaceColumn, workspaceId))!,
+        batchSize,
+        {
+          select: { value: sealed.column },
+          each: async (id, row) => {
+            const value = row.value as Buffer;
+            progress.checked++;
+            let next: Buffer | null;
+            try {
+              next = resealSecret(value, keyring);
+            } catch (err) {
+              report.failed.push({ column: sealed.name, id, error: (err as Error).message });
+              return;
+            }
+            if (!next) {
+              report.current++;
+              return;
+            }
+            const set: Record<string, unknown> = { [sealed.key]: next };
+            if (sealed.updatedAt) set.updatedAt = sql`${sealed.updatedAt}`;
+            const updated = await db
+              .update(sealed.table)
+              .set(set as never)
+              .where(and(eq(sealed.id, id), eq(sealed.column, value)))
+              .returning({ id: sealed.id });
+            if (updated.length) {
+              report.resealed++;
+              progress.resealed++;
+            }
+          },
+          batch: () => onProgress?.({ ...progress }),
+        },
+      ),
+    );
   }
 
   // The sign-in providers' tokens, sealed by better-auth with the secret derived from a key.

@@ -67,7 +67,7 @@ describe('outbound event subscriptions', () => {
   });
   beforeEach(async () => {
     // Each test hears only its own subscriptions.
-    await t.deps.db.update(schema.eventSubscriptions).set({ enabled: false });
+    await t.db.update(schema.eventSubscriptions).set({ enabled: false });
     received.length = 0;
     replies = [];
   });
@@ -101,7 +101,7 @@ describe('outbound event subscriptions', () => {
       secret: string;
     };
     const local = to.startsWith('http://127.0.0.1');
-    await t.deps.db
+    await t.db
       .update(schema.eventSubscriptions)
       .set({ url: to, local })
       .where(eq(schema.eventSubscriptions.id, created.subscription.id));
@@ -124,7 +124,7 @@ describe('outbound event subscriptions', () => {
     );
 
   const deliveriesOf = (subscriptionId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.eventDeliveries)
       .where(eq(schema.eventDeliveries.subscriptionId, subscriptionId));
@@ -133,10 +133,12 @@ describe('outbound event subscriptions', () => {
     const { subscription, secret } = await subscribe(['message.created', 'run.completed']);
     expect(secret).toMatch(/^obs_/);
     const bot = await newBot('Speaker');
-    const message = await postMessage(t.deps, bot.chatId, {
-      authorType: 'system',
-      parts: [{ type: 'text', text: 'hello out there' }],
-    });
+    const message = await t.inOrganization(() =>
+      postMessage(t.ownerDeps, bot.chatId, {
+        authorType: 'system',
+        parts: [{ type: 'text', text: 'hello out there' }],
+      }),
+    );
     await until(() => expect(about(message.id)).toHaveLength(1));
     const [request] = about(message.id);
     const body = JSON.parse(request!.body) as Record<string, unknown>;
@@ -170,24 +172,25 @@ describe('outbound event subscriptions', () => {
     const bot = await newBot('Hooked');
     const listed = await call('GET', `/bots/${bot.id}/endpoints`);
     const [inbox] = ((await listed.json()) as { items: { id: string }[] }).items;
-    const [delivery] = await t.deps.db
+    const [delivery] = await t.db
       .insert(schema.webhookDeliveries)
       .values({
-        workspaceId: (
-          await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id))
-        )[0]!.workspaceId,
+        workspaceId: (await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id)))[0]!
+          .workspaceId,
         endpointId: inbox!.id,
         status: 'queued',
         verified: true,
       })
       .returning();
     // As acceptDelivery posts it: the message takes the delivery's id.
-    const message = await postMessage(t.deps, bot.chatId, {
-      id: delivery!.id,
-      authorType: 'webhook',
-      authorId: inbox!.id,
-      parts: [{ type: 'text', text: '<webhook_event>{"card":"4242 secret"}</webhook_event>' }],
-    });
+    const message = await t.inOrganization(() =>
+      postMessage(t.ownerDeps, bot.chatId, {
+        id: delivery!.id,
+        authorType: 'webhook',
+        authorId: inbox!.id,
+        parts: [{ type: 'text', text: '<webhook_event>{"card":"4242 secret"}</webhook_event>' }],
+      }),
+    );
     await until(() => expect(about(message.id)).toHaveLength(1));
     const { body } = about(message.id)[0]!;
     expect(body).not.toContain('4242 secret');
@@ -210,23 +213,20 @@ describe('outbound event subscriptions', () => {
   it('maps run status to run.completed, run.failed and routine.ran, each once', async () => {
     const { subscription } = await subscribe(['run.completed', 'run.failed']);
     const bot = await newBot('Runner');
-    const run = await insertRun(t.deps.db, {
+    const run = await insertRun(t.db, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'message',
     });
-    await t.deps.db
-      .update(schema.runs)
-      .set({ status: 'completed' })
-      .where(eq(schema.runs.id, run.id));
+    await t.db.update(schema.runs).set({ status: 'completed' }).where(eq(schema.runs.id, run.id));
     const event = wsEvent(
       'run.status',
       { runId: run.id, status: 'completed', error: null },
       { bot_id: bot.id },
     );
     // Published twice (two workers both hear it): sent once.
-    await fanOut(t.deps, event);
-    await fanOut(t.deps, event);
+    await fanOut(t.ownerDeps, event);
+    await fanOut(t.ownerDeps, event);
     await until(() => expect(received).toHaveLength(1));
     expect(JSON.parse(received[0]!.body)).toMatchObject({
       type: 'run.completed',
@@ -236,7 +236,7 @@ describe('outbound event subscriptions', () => {
     // Queued and running are not outbound events.
     expect(
       await fanOut(
-        t.deps,
+        t.ownerDeps,
         wsEvent('run.status', { runId: run.id, status: 'running' }, { bot_id: bot.id }),
       ),
     ).toEqual([]);
@@ -248,7 +248,7 @@ describe('outbound event subscriptions', () => {
     const approvalId = randomUUID();
     replies = [500];
     const [row] = await fanOut(
-      t.deps,
+      t.ownerDeps,
       wsEvent(
         'approval.requested',
         {
@@ -277,19 +277,19 @@ describe('outbound event subscriptions', () => {
     expect(retryDelayMs(2)).toBe(3 * retryDelayMs(1));
 
     // The retry (here run by hand rather than after 10 s) goes through.
-    const retried = await deliverEvent(t.deps, row!.id, net);
+    const retried = await deliverEvent(t.ownerDeps, row!.id, net);
     expect(retried).toMatchObject({ status: 'delivered', attempts: 2, lastError: null });
     expect(received.map((r) => JSON.parse(r.body).data.approval.id)).toEqual([
       approvalId,
       approvalId,
     ]);
     // A delivered row is not sent again.
-    await deliverEvent(t.deps, row!.id, net);
+    await deliverEvent(t.ownerDeps, row!.id, net);
     expect(received).toHaveLength(2);
 
     // A receiver that always fails: failed after MAX_ATTEMPTS, nothing further queued.
     const [doomed] = await fanOut(
-      t.deps,
+      t.ownerDeps,
       wsEvent(
         'approval.requested',
         { approval: { id: randomUUID(), runId: randomUUID(), status: 'pending' } as never },
@@ -298,14 +298,14 @@ describe('outbound event subscriptions', () => {
     );
     replies = Array<number>(MAX_ATTEMPTS + 1).fill(503);
     await until(async () => {
-      const [current] = await t.deps.db
+      const [current] = await t.db
         .select()
         .from(schema.eventDeliveries)
         .where(eq(schema.eventDeliveries.id, doomed!.id));
       expect(current!.attempts).toBe(1);
     });
     let last;
-    for (let i = 1; i < MAX_ATTEMPTS; i++) last = await deliverEvent(t.deps, doomed!.id, net);
+    for (let i = 1; i < MAX_ATTEMPTS; i++) last = await deliverEvent(t.ownerDeps, doomed!.id, net);
     expect(last).toMatchObject({
       status: 'failed',
       attempts: MAX_ATTEMPTS,
@@ -320,13 +320,22 @@ describe('outbound event subscriptions', () => {
     const theirs = await subscribe(['message.created'], other, 'https://203.0.113.10/events');
     const mine = await subscribe(['artifact.created']);
     const bot = await newBot('Quiet');
-    await postMessage(t.deps, bot.chatId, {
-      authorType: 'system',
-      parts: [{ type: 'text', text: 'x' }],
-    });
-    await publishEvent(
-      t.deps.infra.bus,
-      wsEvent('artifact.created', { artifactId: randomUUID(), title: 'Plan' }, { bot_id: bot.id }),
+    await t.inOrganization(() =>
+      postMessage(t.ownerDeps, bot.chatId, {
+        authorType: 'system',
+        parts: [{ type: 'text', text: 'x' }],
+      }),
+    );
+    // Published in the Bot's organization, as the artifact service would.
+    await t.inOrganization(() =>
+      publishEvent(
+        t.deps.infra.bus,
+        wsEvent(
+          'artifact.created',
+          { artifactId: randomUUID(), title: 'Plan' },
+          { bot_id: bot.id },
+        ),
+      ),
     );
     await until(async () => expect(await deliveriesOf(mine.subscription.id)).toHaveLength(1));
     expect(await deliveriesOf(theirs.subscription.id)).toHaveLength(0);
@@ -384,28 +393,28 @@ describe('outbound event subscriptions', () => {
 
     // Delivery: the worker here is exempt, so each send below is made by hand with no exemption.
     const bot = await newBot('Local');
-    const run = await insertRun(t.deps.db, {
+    const run = await insertRun(t.db, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'message',
     });
     const [row] = await fanOut(
-      t.deps,
+      t.ownerDeps,
       wsEvent('run.status', { runId: run.id, status: 'failed', error: 'x' }, { bot_id: bot.id }),
     );
     await until(async () =>
       expect((await deliveriesOf(subscription.id))[0]).toMatchObject({ status: 'delivered' }),
     );
     const resend = async (local: boolean) => {
-      await t.deps.db
+      await t.db
         .update(schema.eventSubscriptions)
         .set({ local })
         .where(eq(schema.eventSubscriptions.id, subscription.id));
-      await t.deps.db
+      await t.db
         .update(schema.eventDeliveries)
         .set({ status: 'pending', attempts: 0 })
         .where(eq(schema.eventDeliveries.id, row!.id));
-      return deliverEvent(t.deps, row!.id, {});
+      return deliverEvent(t.ownerDeps, row!.id, {});
     };
     // Marked local, the guard lets the delivery reach 127.0.0.1.
     expect(await resend(true)).toMatchObject({ status: 'delivered', lastError: null });

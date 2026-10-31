@@ -26,9 +26,9 @@ describe('seedProvidersFromEnv', () => {
   });
   afterAll(() => t.close());
 
-  const providers = () => t.deps.db.select().from(schema.providers);
+  const providers = () => t.db.select().from(schema.providers);
   const models = (providerId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.providerModels)
       .where(eq(schema.providerModels.providerId, providerId));
@@ -36,7 +36,7 @@ describe('seedProvidersFromEnv', () => {
   const keyring = () => keyringFromConfig(t.deps.config);
 
   it('creates an instance-level provider per key with sealed secrets and catalog models', async () => {
-    await seedProvidersFromEnv(t.deps);
+    await seedProvidersFromEnv(t.ownerDeps);
     const rows = await providers();
     expect(rows.map((r) => r.slug).sort()).toEqual(['anthropic', 'google', 'ollama']);
     for (const row of rows) expect(row.ownerId).toBeNull();
@@ -67,7 +67,7 @@ describe('seedProvidersFromEnv', () => {
 
   it('is idempotent and keeps user edits', async () => {
     const anthropic = await bySlug('anthropic');
-    const [opus] = await t.deps.db
+    const [opus] = await t.db
       .select()
       .from(schema.providerModels)
       .where(
@@ -77,23 +77,23 @@ describe('seedProvidersFromEnv', () => {
         ),
       );
     // An admin renames the provider, edits a model and removes another.
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ name: 'Claude (team)' })
       .where(eq(schema.providers.id, anthropic.id));
-    await t.deps.db
+    await t.db
       .update(schema.providerModels)
       .set({ displayName: 'Opus', enabled: false, pricing: { input: 1, output: 1 } })
       .where(eq(schema.providerModels.id, opus!.id));
     const before = (await models(anthropic.id)).length;
 
-    await seedProvidersFromEnv(t.deps);
-    await seedProvidersFromEnv(t.deps);
+    await seedProvidersFromEnv(t.ownerDeps);
+    await seedProvidersFromEnv(t.ownerDeps);
 
     expect(await providers()).toHaveLength(3);
     expect((await bySlug('anthropic')).name).toBe('Claude (team)');
     expect(await models(anthropic.id)).toHaveLength(before);
-    const [after] = await t.deps.db
+    const [after] = await t.db
       .select()
       .from(schema.providerModels)
       .where(eq(schema.providerModels.id, opus!.id));
@@ -107,21 +107,21 @@ describe('seedProvidersFromEnv', () => {
   it('keeps a key set in Settings over a different one in .env', async () => {
     const google = await bySlug('google');
     const { encryptSecret } = await import('../secrets.js');
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ secrets: encryptSecret('g-settings', keyring()) })
       .where(eq(schema.providers.id, google.id));
-    await seedProvidersFromEnv(t.deps);
+    await seedProvidersFromEnv(t.ownerDeps);
     expect(decryptSecretString((await bySlug('google')).secrets!, keyring())).toBe('g-settings');
   });
 
   it('fills in a key removed in Settings when .env still has one', async () => {
     const google = await bySlug('google');
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ secrets: null })
       .where(eq(schema.providers.id, google.id));
-    await seedProvidersFromEnv(t.deps);
+    await seedProvidersFromEnv(t.ownerDeps);
     expect(decryptSecretString((await bySlug('google')).secrets!, keyring())).toBe('g-env');
     // Too short to show any of it.
     expect((await bySlug('google')).keyHint).toBeNull();
@@ -131,12 +131,12 @@ describe('seedProvidersFromEnv', () => {
     const key = 'sk-ant-api03-backfill-0123456789';
     const google = await bySlug('google');
     const anthropic = await bySlug('anthropic');
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ secrets: encryptSecret(key, keyring()), keyHint: null })
       .where(eq(schema.providers.id, google.id));
     // A hint in the first format, the key's leading characters, is recomputed.
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ keyHint: 'sk-an…' })
       .where(eq(schema.providers.id, anthropic.id));
@@ -150,12 +150,12 @@ describe('seedProvidersFromEnv', () => {
     const logger = pino({ level: 'trace' }, sink);
 
     // Start-up order, as in main.ts: the seed sees a different key, then the backfill runs.
-    await seedProvidersFromEnv({ ...t.deps, logger });
-    expect(await backfillProviderKeyHints(t.deps)).toBe(2);
+    await seedProvidersFromEnv({ ...t.ownerDeps, logger });
+    expect(await backfillProviderKeyHints(t.ownerDeps)).toBe(2);
     expect((await bySlug('google')).keyHint).toBe('sk-ant-…6789');
     expect((await bySlug('anthropic')).keyHint).toBe('…nv');
     // Once stored, the next start leaves it alone.
-    expect(await backfillProviderKeyHints(t.deps)).toBe(0);
+    expect(await backfillProviderKeyHints(t.ownerDeps)).toBe(0);
     // Ollama has no key, so no hint.
     expect((await bySlug('ollama')).keyHint).toBeNull();
 
@@ -168,7 +168,7 @@ describe('seedProvidersFromEnv', () => {
 
   it('resolves a seeded provider through the registry and picks a small model', async () => {
     const anthropic = await bySlug('anthropic');
-    const resolved = await providerRegistry(t.deps).resolve({
+    const resolved = await providerRegistry(t.ownerDeps).resolve({
       provider_id: anthropic.id,
       model_id: 'claude-sonnet-5-5',
       reasoning: true,
@@ -177,17 +177,17 @@ describe('seedProvidersFromEnv', () => {
     expect(resolved.info?.capabilities.tools).toBe(true);
     expect(resolved.providerOptions).toEqual({ anthropic: { thinking: { type: 'adaptive' } } });
     expect((resolved.model as { modelId: string }).modelId).toBe('claude-sonnet-5-5');
-    expect((await smallModelFor(t.deps, anthropic.id))?.modelId).toBe('claude-haiku-4-5');
+    expect((await smallModelFor(t.ownerDeps, anthropic.id))?.modelId).toBe('claude-haiku-4-5');
   });
 
   it('keeps the catalog small model when no model has pricing', async () => {
     const anthropic = await bySlug('anthropic');
-    await t.deps.db
+    await t.db
       .update(schema.providerModels)
       .set({ pricing: null })
       .where(eq(schema.providerModels.providerId, anthropic.id));
     // Display-name order alone would pick Claude Fable 5.1.
-    expect((await smallModelFor(t.deps, anthropic.id))?.modelId).toBe('claude-haiku-4-5');
+    expect((await smallModelFor(t.ownerDeps, anthropic.id))?.modelId).toBe('claude-haiku-4-5');
   });
 });
 

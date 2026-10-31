@@ -94,7 +94,7 @@ describe('/api/v1/connectors', () => {
   const bodies: string[] = [];
 
   const userId = async (email: string) =>
-    (await t.deps.db.select().from(schema.users).where(eq(schema.users.email, email)))[0]!.id;
+    (await t.db.select().from(schema.users).where(eq(schema.users.email, email)))[0]!.id;
 
   beforeAll(async () => {
     filesDir = mkdtempSync(join(tmpdir(), 'openbot-connectors-'));
@@ -118,13 +118,13 @@ describe('/api/v1/connectors', () => {
     admin = (await t.signUp('admin@example.com')).cookie!;
     member = (await t.signUp('member@example.com')).cookie!;
     ops = (await t.signUp('ops@example.com')).cookie!;
-    await t.deps.db
+    await t.db
       .update(schema.workspaceMembers)
       .set({ role: 'admin' })
       .where(eq(schema.workspaceMembers.userId, await userId('ops@example.com')));
   });
   afterAll(async () => {
-    await closeMcpManager(t.deps);
+    await closeMcpManager(t.ownerDeps);
     await t.close();
     rmSync(filesDir, { recursive: true, force: true });
     rmSync(mcpDir, { recursive: true, force: true });
@@ -313,10 +313,7 @@ describe('/api/v1/connectors', () => {
     const res = await call(ops, 'GET', `/connectors/${c.id}/tools`);
     expect(((await res.json()) as { items: Tool[] }).items).toHaveLength(3);
 
-    const [row] = await t.deps.db
-      .select()
-      .from(schema.connectors)
-      .where(eq(schema.connectors.id, c.id));
+    const [row] = await t.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id));
     expect(row!.config).toMatchObject({
       discovered: {
         server: { name: 'openbot-test-stdio' },
@@ -352,10 +349,7 @@ describe('/api/v1/connectors', () => {
     });
     expect(c.env).toEqual(['TEST_SECRET']);
     expect(c.secrets).toEqual([{ name: 'TEST_SECRET', label: null, required: false, set: true }]);
-    const [row] = await t.deps.db
-      .select()
-      .from(schema.connectors)
-      .where(eq(schema.connectors.id, c.id));
+    const [row] = await t.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id));
     expect(JSON.stringify(row!.config)).not.toContain(SECRETS.env);
     expect(row!.config).toMatchObject({ env: {} });
     expect(Buffer.from(row!.secrets!).toString('utf8')).not.toContain(SECRETS.env);
@@ -363,7 +357,9 @@ describe('/api/v1/connectors', () => {
     // Round trip: the sealed value is what the server process sees.
     expect((await test(ops, c.id)).connector.status).toBe('ok');
     const botId = await newBot(ops, 'Env reader');
-    const who = await callToolForBot(t.deps, botId, 'env-stdio', 'whoami', {});
+    const who = await t.inOrganization(() =>
+      callToolForBot(t.ownerDeps, botId, 'env-stdio', 'whoami', {}),
+    );
     const text = (who.content as { text: string }[])[0]!.text;
     expect(JSON.parse(text)).toMatchObject({ secret: SECRETS.env });
 
@@ -401,7 +397,7 @@ describe('/api/v1/connectors', () => {
       expect(c.secrets).toEqual([
         { name: 'HEADER_AUTHORIZATION', label: null, required: false, set: true },
       ]);
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.connectors)
         .where(eq(schema.connectors.id, c.id));
@@ -420,13 +416,13 @@ describe('/api/v1/connectors', () => {
       expect(c.status).toBe('untested');
       const botId = await newBot(member, 'Discoverer');
       const names = async () =>
-        (await connectorToolsFor(t.deps, botId)).entries
+        (await t.inOrganization(() => connectorToolsFor(t.ownerDeps, botId))).entries
           .filter((e) => e.connectorId === c.id)
           .map((e) => e.tool);
       // A refused start is recorded, and the run goes on without the connector.
       expect(await names()).toEqual([]);
       const status = async () =>
-        (await t.deps.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id)))[0]!
+        (await t.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id)))[0]!
           .status;
       expect(await status()).toMatch(/needs_auth|error/);
 
@@ -441,8 +437,8 @@ describe('/api/v1/connectors', () => {
     });
 
     it('stops a session in every process when its connector is blocked or deleted (T3)', async () => {
-      // A worker: its own manager on the same bus.
-      const worker = { ...t.deps };
+      // A worker: its own manager (one per process, keyed by its config) on the same bus.
+      const worker = { ...t.ownerDeps, config: { ...t.deps.config } };
       const started = async (name: string) => {
         const c = await create(member, {
           name,
@@ -559,7 +555,7 @@ describe('/api/v1/connectors', () => {
       tested = await test(ops, c.id);
       expect(tested.connector.status).toBe('ok');
       expect(tested.tools.map((x) => x.name)).toEqual(['add', 'delete_everything']);
-      const [entry] = await t.deps.db
+      const [entry] = await t.db
         .select()
         .from(schema.auditLog)
         .where(eq(schema.auditLog.action, 'connector.local'));
@@ -1047,7 +1043,7 @@ describe('/api/v1/connectors', () => {
 
   describe('confined catalog servers (S-3)', () => {
     const rowOf = async (id: string) =>
-      (await t.deps.db.select().from(schema.connectors).where(eq(schema.connectors.id, id)))[0]!;
+      (await t.db.select().from(schema.connectors).where(eq(schema.connectors.id, id)))[0]!;
 
     it('roots the filesystem server in a folder of the owner directory', async () => {
       for (const root of ['/etc', '../ops', 'a/../../b']) {
@@ -1062,7 +1058,7 @@ describe('/api/v1/connectors', () => {
         catalogId: 'filesystem',
         params: { root: 'projects/site' },
       });
-      const spec = await stdioSpawnFor(t.deps, await rowOf(c.id));
+      const spec = await stdioSpawnFor(t.ownerDeps, await rowOf(c.id));
       const base = userDirectory(t.deps.config, {
         id: await userId('member@example.com'),
         workspaceId: await t.defaultOrganization(),
@@ -1073,18 +1069,22 @@ describe('/api/v1/connectors', () => {
       expect(existsSync(spec.args.at(-1)!)).toBe(true);
 
       // Rows from before, or a symlink out of the directory, do not start.
-      await t.deps.db
+      await t.db
         .update(schema.connectors)
         .set({ config: { ...((await rowOf(c.id)).config as object), params: { root: '/etc' } } })
         .where(eq(schema.connectors.id, c.id));
-      await expect(stdioSpawnFor(t.deps, await rowOf(c.id))).rejects.toThrow(/inside your own/);
+      await expect(stdioSpawnFor(t.ownerDeps, await rowOf(c.id))).rejects.toThrow(
+        /inside your own/,
+      );
       mkdirSync(base, { recursive: true });
       symlinkSync(tmpdir(), join(base, 'escape'));
-      await t.deps.db
+      await t.db
         .update(schema.connectors)
         .set({ config: { ...((await rowOf(c.id)).config as object), params: { root: 'escape' } } })
         .where(eq(schema.connectors.id, c.id));
-      await expect(stdioSpawnFor(t.deps, await rowOf(c.id))).rejects.toThrow(/inside your own/);
+      await expect(stdioSpawnFor(t.ownerDeps, await rowOf(c.id))).rejects.toThrow(
+        /inside your own/,
+      );
     });
 
     it('refuses private and internal Postgres hosts and keeps the password out of argv (S-9)', async () => {
@@ -1106,7 +1106,7 @@ describe('/api/v1/connectors', () => {
         slug: 'pg-public',
         secrets: { POSTGRES_URL: SECRETS.postgres },
       });
-      const spec = await stdioSpawnFor(t.deps, await rowOf(c.id));
+      const spec = await stdioSpawnFor(t.ownerDeps, await rowOf(c.id));
       expect(spec.command).toBe(join(mcpDir, 'node_modules', '.bin', 'mcp-server-postgres'));
       expect(spec.args.join(' ')).not.toContain('sekrit-pg-pass');
       expect(spec.args).toEqual(['postgresql://ro@203.0.113.7:5432/app']);
@@ -1169,7 +1169,7 @@ describe('/api/v1/connectors', () => {
 
       // A row stored before the check keeps its extra value, which never reaches the child.
       const keyring = keyringFromConfig(t.deps.config);
-      await t.deps.db
+      await t.db
         .update(schema.connectors)
         .set({
           secrets: encryptSecret(
@@ -1178,16 +1178,16 @@ describe('/api/v1/connectors', () => {
           ),
         })
         .where(eq(schema.connectors.id, c.id));
-      const spec = await stdioSpawnFor(t.deps, await rowOf(c.id));
+      const spec = await stdioSpawnFor(t.ownerDeps, await rowOf(c.id));
       expect(Object.keys(spec.env).sort()).toEqual(['PGPASSWORD', 'POSTGRES_URL']);
     });
   });
 
   it('seals env and header values stored before S-9 (data migration)', async () => {
     const owner = await userId('ops@example.com');
-    const workspace = await ensureWorkspace(t.deps.db);
+    const workspace = await ensureWorkspace(t.db);
     const keyring = keyringFromConfig(t.deps.config);
-    const [stdio, http] = await t.deps.db
+    const [stdio, http] = await t.db
       .insert(schema.connectors)
       .values([
         {
@@ -1224,20 +1224,20 @@ describe('/api/v1/connectors', () => {
         },
       ])
       .returning();
-    expect(await sealPlaintextConnectorValues(t.deps)).toBe(2);
-    expect(await sealPlaintextConnectorValues(t.deps)).toBe(0);
+    expect(await sealPlaintextConnectorValues(t.ownerDeps)).toBe(2);
+    expect(await sealPlaintextConnectorValues(t.ownerDeps)).toBe(0);
 
-    const rows = await t.deps.db.select().from(schema.connectors);
+    const rows = await t.db.select().from(schema.connectors);
     const after = (id: string) => rows.find((r) => r.id === id)!;
     for (const id of [stdio!.id, http!.id]) {
       expect(JSON.stringify(after(id).config)).not.toMatch(/sekrit/);
     }
     // A secret stored under the same name keeps winning, as it did at start.
-    expect(openSecrets(t.deps, after(stdio!.id)).values).toEqual({
+    expect(openSecrets(t.ownerDeps, after(stdio!.id)).values).toEqual({
       LEGACY: SECRETS.legacyEnv,
       TEST_SECRET: SECRETS.stdio,
     });
-    expect(openSecrets(t.deps, after(http!.id)).values).toEqual({
+    expect(openSecrets(t.ownerDeps, after(http!.id)).values).toEqual({
       HEADER_X_API_KEY: SECRETS.legacyHeader,
     });
     expect(after(http!.id).config).toMatchObject({
@@ -1288,9 +1288,10 @@ describe('/api/v1/connectors', () => {
         },
       });
 
-      const names = async () => (await listToolsForBot(t.deps, botId)).map((x) => x.tool);
+      const names = async () =>
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).map((x) => x.tool);
       expect(await names()).toEqual(['echo', 'grow', 'whoami']);
-      const [first] = await listToolsForBot(t.deps, botId);
+      const [first] = await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId));
       expect(first).toMatchObject({
         connectorSlug: 'tools',
         connectorName: 'Test stdio',
@@ -1311,20 +1312,26 @@ describe('/api/v1/connectors', () => {
       ]);
       expect(res.status).toBe(200);
       expect(await names()).toEqual(['echo', 'grow']);
-      expect((await listToolsForBot(t.deps, botId))[0]!.approvalOverride).toBe('ask');
+      expect(
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId)))[0]!.approvalOverride,
+      ).toBe('ask');
 
-      await expect(callToolForBot(t.deps, botId, 'tools', 'whoami', {})).rejects.toMatchObject({
+      await expect(
+        t.inOrganization(() => callToolForBot(t.ownerDeps, botId, 'tools', 'whoami', {})),
+      ).rejects.toMatchObject({
         code: 'TOOL_NOT_PERMITTED',
       });
       const checkedAt = async () =>
-        (await t.deps.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id)))[0]!
+        (await t.db.select().from(schema.connectors).where(eq(schema.connectors.id, c.id)))[0]!
           .lastCheckedAt;
       const started = await checkedAt();
-      const echoed = await callToolForBot(t.deps, botId, 'tools', 'echo', { text: 'via bot' });
+      const echoed = await t.inOrganization(() =>
+        callToolForBot(t.ownerDeps, botId, 'tools', 'echo', { text: 'via bot' }),
+      );
       expect(echoed.content).toEqual([{ type: 'text', text: 'via bot' }]);
       // One session: storing what it discovered does not count as a config change.
       expect(await checkedAt()).toEqual(started);
-      expect(mcpManager(t.deps).running(c.id)).toBe(true);
+      expect(mcpManager(t.ownerDeps).running(c.id)).toBe(true);
 
       await put([
         {
@@ -1353,7 +1360,9 @@ describe('/api/v1/connectors', () => {
       expect(foreign.status).toBe(404);
       // A Bot only sees its own owner's connectors.
       expect(
-        (await listToolsForBot(t.deps, memberBot)).every((x) => x.connectorSlug !== 'tools'),
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, memberBot))).every(
+          (x) => x.connectorSlug !== 'tools',
+        ),
       ).toBe(true);
     });
   });
@@ -1410,11 +1419,11 @@ describe('/api/v1/connectors', () => {
         slug: 'wiki-defaults',
         url: 'https://mcp.wiki.example/mcp',
       });
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.connectors)
         .where(eq(schema.connectors.id, c.id));
-      await t.deps.db.insert(schema.connectorTools).values([
+      await t.db.insert(schema.connectorTools).values([
         {
           workspaceId: row!.workspaceId,
           connectorId: c.id,
@@ -1440,7 +1449,7 @@ describe('/api/v1/connectors', () => {
         why: 'wiki-defaults__wipe is marked destructive',
       });
       // As an admin's trust would; the trust API and its audit entry are covered below.
-      await t.deps.db
+      await t.db
         .update(schema.connectors)
         .set({ trusted: true })
         .where(eq(schema.connectors.id, c.id));
@@ -1477,9 +1486,11 @@ describe('/api/v1/connectors', () => {
         items: Connector[];
       };
       const stdio = local.items.find((c) => c.slug === 'local')!;
-      expect((await listToolsForBot(t.deps, botId)).some((x) => x.connectorSlug === 'local')).toBe(
-        true,
-      );
+      expect(
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).some(
+          (x) => x.connectorSlug === 'local',
+        ),
+      ).toBe(true);
 
       let res = await call(admin, 'PUT', '/connector-policy', {
         catalogIds: ['postgres'],
@@ -1538,16 +1549,22 @@ describe('/api/v1/connectors', () => {
       expect(opsAfter.items.find((c) => c.id === stdio.id)!.disabledByAdmin).toBe(true);
       expect(after.items.find((c) => c.catalogId === 'filesystem')!.disabledByAdmin).toBe(false);
       expect((await call(ops, 'POST', `/connectors/${stdio.id}/test`)).status).toBe(403);
-      expect((await listToolsForBot(t.deps, botId)).some((x) => x.connectorSlug === 'local')).toBe(
-        false,
-      );
-      await expect(callToolForBot(t.deps, botId, 'local', 'echo', { text: 'x' })).rejects.toThrow();
+      expect(
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).some(
+          (x) => x.connectorSlug === 'local',
+        ),
+      ).toBe(false);
+      await expect(
+        t.inOrganization(() => callToolForBot(t.ownerDeps, botId, 'local', 'echo', { text: 'x' })),
+      ).rejects.toThrow();
 
       res = await call(admin, 'PUT', '/connector-policy', { catalogIds: [], urlPatterns: [] });
       expect(await res.json()).toEqual({ catalogIds: [], urlPatterns: [], allowedCatalogIds: [] });
-      expect((await listToolsForBot(t.deps, botId)).some((x) => x.connectorSlug === 'local')).toBe(
-        true,
-      );
+      expect(
+        (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).some(
+          (x) => x.connectorSlug === 'local',
+        ),
+      ).toBe(true);
     });
   });
 
@@ -1649,7 +1666,7 @@ describe('/api/v1/connectors', () => {
       items: Connector[];
     };
     expect(list.items.find((i) => i.id === c.id)?.trusted).toBe(true);
-    const [entry] = await t.deps.db
+    const [entry] = await t.db
       .select()
       .from(schema.auditLog)
       .where(eq(schema.auditLog.action, 'connector.trust'));
@@ -1673,10 +1690,10 @@ describe('/api/v1/connectors', () => {
   });
 
   it('stops idle MCP sessions after OPENBOT_MCP_IDLE_STOP_MINUTES (10 by default)', async () => {
-    expect(mcpManager(t.deps).idleMs).toBe(10 * 60_000);
-    const { config } = t.deps;
+    expect(mcpManager(t.ownerDeps).idleMs).toBe(10 * 60_000);
+    const { config } = t.ownerDeps;
     const deps = {
-      ...t.deps,
+      ...t.ownerDeps,
       config: { ...config, processLimits: { ...config.processLimits, mcpIdleStopMinutes: 3 } },
     };
     try {
@@ -1690,7 +1707,7 @@ describe('/api/v1/connectors', () => {
     const c = await stdioConnector(ops, 'gone');
     await test(ops, c.id);
     expect((await call(ops, 'DELETE', `/connectors/${c.id}`)).status).toBe(204);
-    const rows = await t.deps.db.select().from(schema.connectorTools);
+    const rows = await t.db.select().from(schema.connectorTools);
     expect(rows.some((r) => r.connectorId === c.id)).toBe(false);
   });
 
@@ -1698,21 +1715,25 @@ describe('/api/v1/connectors', () => {
     const c = await stdioConnector(ops, 'switched');
     expect((await test(ops, c.id)).connector.status).toBe('ok');
     const botId = await newBot(ops, 'Switched');
-    expect((await listToolsForBot(t.deps, botId)).some((x) => x.connectorSlug === 'switched')).toBe(
-      true,
-    );
-    expect(mcpManager(t.deps).running(c.id)).toBe(true);
+    expect(
+      (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).some(
+        (x) => x.connectorSlug === 'switched',
+      ),
+    ).toBe(true);
+    expect(mcpManager(t.ownerDeps).running(c.id)).toBe(true);
     await call(admin, 'PATCH', '/settings', { customStdioEnabled: false });
     // The running child stops at once, not at the idle sweep.
-    await vi.waitFor(() => expect(mcpManager(t.deps).running(c.id)).toBe(false));
+    await vi.waitFor(() => expect(mcpManager(t.ownerDeps).running(c.id)).toBe(false));
     const listed = (await (await call(ops, 'GET', '/connectors')).json()) as { items: Connector[] };
     expect(listed.items.find((x) => x.id === c.id)!.disabledByAdmin).toBe(true);
     const res = await call(ops, 'POST', `/connectors/${c.id}/test`);
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({ code: 'CUSTOM_STDIO_DISABLED' });
-    expect((await listToolsForBot(t.deps, botId)).some((x) => x.connectorSlug === 'switched')).toBe(
-      false,
-    );
+    expect(
+      (await t.inOrganization(() => listToolsForBot(t.ownerDeps, botId))).some(
+        (x) => x.connectorSlug === 'switched',
+      ),
+    ).toBe(false);
     // Catalog stdio servers are unaffected.
     const fs = (await (await call(member, 'GET', '/connectors')).json()) as { items: Connector[] };
     expect(fs.items.find((x) => x.catalogId === 'filesystem')!.disabledByAdmin).toBe(false);
@@ -1750,7 +1771,7 @@ describe('the OAuth callback on a self-hosted install', () => {
   afterAll(async () => {
     await server.close();
     await as.close();
-    await closeMcpManager(t.deps);
+    await closeMcpManager(t.ownerDeps);
     await t.close();
   });
 

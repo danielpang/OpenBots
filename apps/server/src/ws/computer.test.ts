@@ -32,7 +32,7 @@ describe('computer socket proxies', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
-    computer = await useTestComputer(t.deps);
+    computer = await useTestComputer(t.ownerDeps);
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: t.app.fetch, port: 0, hostname: '127.0.0.1' }, () => resolve(s));
     });
@@ -80,7 +80,7 @@ describe('computer socket proxies', () => {
     expect(computer.docker.calls.some((c) => c.op === 'createContainer' || c.op === 'start')).toBe(
       false,
     );
-    expect(await t.deps.db.select().from(schema.computers)).toEqual([]);
+    expect(await t.db.select().from(schema.computers)).toEqual([]);
 
     // Stopped is off too.
     await startedByOwner();
@@ -104,10 +104,10 @@ describe('computer socket proxies', () => {
 
   it('keeps the computer used while frames flow, at most once a minute (plan 9.5)', async () => {
     const lastUsed = async () =>
-      (await t.deps.db.select().from(schema.computers))[0]!.lastUsedAt!.getTime();
+      (await t.db.select().from(schema.computers))[0]!.lastUsedAt!.getTime();
     const socket = await opened(`${base}/api/v1/computer/pty?cols=80&rows=24`, dana);
     try {
-      await t.deps.db.update(schema.computers).set({ lastUsedAt: new Date(0) });
+      await t.db.update(schema.computers).set({ lastUsedAt: new Date(0) });
       // Within the minute since it opened: nothing is written.
       await echo(socket, 'pwd');
       expect(await lastUsed()).toBe(0);
@@ -130,7 +130,7 @@ describe('computer socket proxies', () => {
     expect(res.status).toBe(200);
   }
   const holder = async () =>
-    (await t.deps.db.select().from(schema.botScreens).where(eq(schema.botScreens.botId, botId)))[0]!
+    (await t.db.select().from(schema.botScreens).where(eq(schema.botScreens.botId, botId)))[0]!
       .controlledByUserId;
   const closing = (ws: WebSocket) =>
     new Promise<{ code: number; reason: string }>((resolve) =>
@@ -166,7 +166,7 @@ describe('computer socket proxies', () => {
       },
       { timeout: 5_000 },
     );
-    const [audit] = await t.deps.db
+    const [audit] = await t.db
       .select()
       .from(schema.auditLog)
       .where(eq(schema.auditLog.action, 'computer.release'));
@@ -198,7 +198,7 @@ describe('computer socket proxies', () => {
     expect(await refused(vnc, { origin: ORIGIN })).toBe(401);
     expect(await refused(vnc, { cookie: eve, origin: ORIGIN })).toBe(404);
     // Refused before anything starts: Eve has no computer (S-18 G4).
-    const computers = await t.deps.db
+    const computers = await t.db
       .select({ ownerId: schema.computers.ownerId, email: schema.users.email })
       .from(schema.computers)
       .innerJoin(schema.users, eq(schema.users.id, schema.computers.ownerId));

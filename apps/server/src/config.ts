@@ -88,6 +88,9 @@ const envSchema = z.object({
   OPENBOT_MASTER_KEY: masterKey,
   OPENBOT_MASTER_KEY_PREVIOUS: withDefault(masterKeyList, ''),
   DATABASE_URL: z.string().min(1),
+  OPENBOT_DB_APP_PASSWORD: optional(
+    z.string().regex(/^[A-Za-z0-9_-]{16,128}$/, 'use 16 to 128 letters, digits, - or _'),
+  ),
   REDIS_URL: optional(z.string()),
   DOCKER_HOST: optional(z.string()),
   OPENBOT_SANDBOX_IMAGE: withDefault(z.string(), DEFAULT_SANDBOX_IMAGE),
@@ -155,6 +158,13 @@ export interface Config {
   /** Secrets given in the plain environment rather than as NAME_FILE (S-1); main.ts warns. */
   secretsFromEnvironment: string[];
   databaseUrl: string;
+  /**
+   * OPENBOT_DB_APP_PASSWORD: the app connects as openbot_app with it, a role
+   * that owns nothing and does not bypass row-level security (db/app-role.ts).
+   * Without it the app connects as DATABASE_URL's user and switches to that
+   * role in every transaction.
+   */
+  dbAppPassword?: string;
   redisUrl?: string;
   dockerHost?: string;
   sandboxImage: string;
@@ -304,6 +314,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     previousMasterKeys: e.OPENBOT_MASTER_KEY_PREVIOUS,
     secretsFromEnvironment: secrets.fromEnvironment,
     databaseUrl: e.DATABASE_URL,
+    ...(e.OPENBOT_DB_APP_PASSWORD ? { dbAppPassword: e.OPENBOT_DB_APP_PASSWORD } : {}),
     redisUrl: e.REDIS_URL,
     dockerHost: e.DOCKER_HOST,
     sandboxImage: e.OPENBOT_SANDBOX_IMAGE,

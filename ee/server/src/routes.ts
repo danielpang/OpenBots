@@ -40,6 +40,7 @@ import {
   type MemberView,
   type OrganizationsDeps,
 } from './organizations.js';
+import { asDirectory } from '@openbot/server/db/scope';
 
 // The managed service's organization routes (plan 21.5), under /api/v1:
 //
@@ -554,16 +555,19 @@ export function organizationRoutes(email: EmailOptions) {
       async (c) => {
         const { db, config } = c.var.deps;
         const invite = c.req.valid('param').id;
-        const [row] = await db
-          .select({ id: schema.invites.id })
-          .from(schema.invites)
-          .where(
-            and(
-              eq(schema.invites.id, invite),
-              eq(schema.invites.status, 'pending'),
-              gt(schema.invites.expiresAt, new Date()),
+        // No account or organization yet: the directory's to say (db/scope.ts).
+        const [row] = await asDirectory(() =>
+          db
+            .select({ id: schema.invites.id })
+            .from(schema.invites)
+            .where(
+              and(
+                eq(schema.invites.id, invite),
+                eq(schema.invites.status, 'pending'),
+                gt(schema.invites.expiresAt, new Date()),
+              ),
             ),
-          );
+        );
         if (!row) throw notFound('No such invitation');
         setCookie(c, INVITE_COOKIE, signInviteCookie(config, invite), {
           httpOnly: true,

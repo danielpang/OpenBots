@@ -81,7 +81,7 @@ describe('threads, reactions and chat summaries', () => {
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 5_000, interval: 10 });
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -95,14 +95,14 @@ describe('threads, reactions and chat summaries', () => {
   };
 
   const messagesOf = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, chatId))
       .orderBy(asc(schema.messages.seq));
 
   const chatOf = async (chatId: string) =>
-    (await t.deps.db.select().from(schema.chats).where(eq(schema.chats.id, chatId)))[0]!;
+    (await t.db.select().from(schema.chats).where(eq(schema.chats.id, chatId)))[0]!;
 
   it('answers a thread reply in the thread, reading the root, its replies and the summary', async () => {
     const { bot, model } = await newBot('Drafter', [
@@ -114,7 +114,7 @@ describe('threads, reactions and chat summaries', () => {
     await until(() => allDone(bot.id, 1));
     await say(bot, 'Unrelated: what time is it?');
     await until(() => allDone(bot.id, 2));
-    await t.deps.db
+    await t.db
       .update(schema.chats)
       .set({ summary: 'Dana is collecting drafts for the launch.', summaryThroughSeq: 0 })
       .where(eq(schema.chats.id, bot.chatId));
@@ -183,7 +183,7 @@ describe('threads, reactions and chat summaries', () => {
     const { bot } = await newBot('Reactor', [[{ tool: 'react', args: { emoji: '👍' } }], []]);
     const asked = await say(bot, 'Deployed the fix, no reply needed');
     await until(() => allDone(bot.id, 1));
-    const rows = await t.deps.db
+    const rows = await t.db
       .select()
       .from(schema.reactions)
       .where(eq(schema.reactions.messageId, asked.id));
@@ -197,7 +197,7 @@ describe('threads, reactions and chat summaries', () => {
       bot_id: bot.id,
       payload: { emoji: '👍', reactorType: 'bot', reactorId: bot.id },
     });
-    const steps = await t.deps.db
+    const steps = await t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, (await runsOf(bot.id))[0]!.id));
@@ -219,7 +219,7 @@ describe('threads, reactions and chat summaries', () => {
     };
     smallModels.set(bot.id, scriptedModel(Array.from({ length: 10 }, () => small)));
     // Without the Bot's greeting, so the window holds just this exchange.
-    await t.deps.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
+    await t.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
 
     await say(bot, 'count one');
     await until(() => allDone(bot.id, 1));

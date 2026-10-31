@@ -4,6 +4,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
+import { asDirectory } from './db/scope.js';
 import type { ServerExtensions } from './extensions.js';
 import { notFound } from './errors.js';
 
@@ -93,7 +94,12 @@ export function organizationSlug(name: string): string {
  * (plan 21.2). The managed service never uses it for a request: there the
  * organization comes from the session or the API key.
  */
-export async function ensureWorkspace(db: Db): Promise<Workspace> {
+export function ensureWorkspace(db: Db): Promise<Workspace> {
+  // Which organizations exist is the directory's to say (db/scope.ts).
+  return asDirectory(() => findOrMakeWorkspace(db));
+}
+
+async function findOrMakeWorkspace(db: Db): Promise<Workspace> {
   const existing = await firstWorkspace(db);
   if (existing) return existing;
   return db.transaction(async (tx) => {

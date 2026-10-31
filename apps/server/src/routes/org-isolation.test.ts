@@ -227,20 +227,20 @@ describe('organizations are isolated (plan 21.3)', () => {
       201,
     );
 
-    const [botRow] = await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
+    const [botRow] = await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
     const owner = { id: userId, workspaceId: botRow!.workspaceId };
     const { artifact } = await createArtifact(
-      t.deps,
+      t.ownerDeps,
       owner,
       { title: `${marker} Artifact`, kind: 'document', botId: bot.id, content: `${marker} doc` },
       { userId },
     );
-    const run = await insertRun(t.deps.db, {
+    const run = await insertRun(t.db, {
       botId: bot.id,
       chatId: bot.chatId,
       trigger: 'message',
     });
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .insert(schema.approvals)
       .values({
         workspaceId: owner.workspaceId,
@@ -249,7 +249,7 @@ describe('organizations are isolated (plan 21.3)', () => {
         args: { to: `${marker}@example.com` },
       })
       .returning();
-    const [delivery] = await t.deps.db
+    const [delivery] = await t.db
       .insert(schema.webhookDeliveries)
       .values({
         workspaceId: owner.workspaceId,
@@ -327,9 +327,7 @@ describe('organizations are isolated (plan 21.3)', () => {
     orgB = await t.createOrganization('Org B');
     // Bob works only in B, as its owner; Carol is a member of both.
     const bobId = await t.userId('bob@example.com');
-    await t.deps.db
-      .delete(schema.workspaceMembers)
-      .where(eq(schema.workspaceMembers.userId, bobId));
+    await t.db.delete(schema.workspaceMembers).where(eq(schema.workspaceMembers.userId, bobId));
     await t.addMember(bobId, orgB, 'owner');
     await t.switchOrganization(bob, orgB);
     await t.addMember(await t.userId('carol@example.com'), orgB, 'member');
@@ -476,29 +474,28 @@ describe('organizations are isolated (plan 21.3)', () => {
   it("keeps a worker's view of a Bot inside its organization", async () => {
     const { ids } = owned.carol;
     const carolId = await t.userId('carol@example.com');
-    const [inB] = await t.deps.db
-      .select()
-      .from(schema.bots)
-      .where(eq(schema.bots.name, 'Carol B Bot'));
+    const [inB] = await t.db.select().from(schema.bots).where(eq(schema.bots.name, 'Carol B Bot'));
     // A cached tool on her connector in A: her Bot in A sees it, her Bot in B does not.
-    await t.deps.db.insert(schema.connectorTools).values({
+    await t.db.insert(schema.connectorTools).values({
       workspaceId: orgA,
       connectorId: ids.connector!,
       name: 'lookup',
       description: 'Looks things up',
       inputSchema: { type: 'object' },
     });
-    await t.deps.db
+    await t.db
       .update(schema.connectors)
       .set({ status: 'ok' })
       .where(eq(schema.connectors.id, ids.connector!));
-    expect((await listToolsForBot(t.deps, ids.bot!)).map((tool) => tool.tool)).toContain('lookup');
-    expect(await listToolsForBot(t.deps, inB!.id)).toEqual([]);
+    expect((await listToolsForBot(t.ownerDeps, ids.bot!)).map((tool) => tool.tool)).toContain(
+      'lookup',
+    );
+    expect(await listToolsForBot(t.ownerDeps, inB!.id)).toEqual([]);
     // Her provider in A is not one her Bot in B may run on.
-    expect(await canUseProvider(t.deps.db, { id: carolId, workspaceId: orgA }, ids.provider!)).toBe(
+    expect(await canUseProvider(t.db, { id: carolId, workspaceId: orgA }, ids.provider!)).toBe(
       true,
     );
-    expect(await canUseProvider(t.deps.db, { id: carolId, workspaceId: orgB }, ids.provider!)).toBe(
+    expect(await canUseProvider(t.db, { id: carolId, workspaceId: orgB }, ids.provider!)).toBe(
       false,
     );
   });
@@ -513,7 +510,7 @@ describe('organizations are isolated (plan 21.3)', () => {
       201,
     );
     const rows = await fanOut(
-      t.deps,
+      t.ownerDeps,
       wsEvent('artifact.created', { artifactId: ids.artifact!, title: 'x' }, { bot_id: ids.bot }),
     );
     const subscriptions = rows.map((r) => r.subscriptionId);

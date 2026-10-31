@@ -150,6 +150,9 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://openbot:openbot@localhost:5432/openbot
+      # Migrations as openbot (the owner), then the server as openbot_app,
+      # under row-level security between organizations.
+      OPENBOT_DB_APP_PASSWORD: ci-openbot-app-password
       REDIS_URL: redis://localhost:6379
       OPENBOT_PUBLIC_URL: http://localhost:3000
       OPENBOT_DEPLOYMENT: ${{ matrix.deployment || 'managed' }}

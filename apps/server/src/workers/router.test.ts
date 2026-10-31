@@ -141,7 +141,7 @@ describe('router', () => {
     expect(res.status).toBe(201);
     const chat = (await res.json()) as Chat;
     if (settings) {
-      await t.deps.db.update(schema.chats).set({ settings }).where(eq(schema.chats.id, chat.id));
+      await t.db.update(schema.chats).set({ settings }).where(eq(schema.chats.id, chat.id));
     }
     return chat;
   }
@@ -156,14 +156,14 @@ describe('router', () => {
   };
 
   const runsIn = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.chatId, chatId))
       .orderBy(asc(schema.runs.createdAt));
 
   const messagesIn = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, chatId))
@@ -172,7 +172,7 @@ describe('router', () => {
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 10_000, interval: 10 });
 
   const stepsOf = (runId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, runId))
@@ -189,7 +189,7 @@ describe('router', () => {
   /** Waits until every run in the chats has finished and no run job is still going. */
   async function settled(...chatIds: string[]) {
     await until(async () => {
-      const runs = await t.deps.db
+      const runs = await t.db
         .select()
         .from(schema.runs)
         .where(inArray(schema.runs.chatId, chatIds));
@@ -484,7 +484,7 @@ describe('router', () => {
       expect(asked).toEqual([]);
       const [run] = await runsIn(chat.id);
       expect((await runsIn(chat.id)).map((r) => r.status)).toEqual(['waiting']);
-      const [approval] = await t.deps.db
+      const [approval] = await t.db
         .select()
         .from(schema.approvals)
         .where(eq(schema.approvals.runId, run!.id));
@@ -521,7 +521,7 @@ describe('router', () => {
       expect(asked).toEqual([b.id]);
       expect(await runsIn(chat.id)).toHaveLength(1);
       expect(promptText(model.calls[1]!)).toContain('"text":"website please"');
-      const [widget] = await t.deps.db
+      const [widget] = await t.db
         .select()
         .from(schema.widgetStates)
         .where(eq(schema.widgetStates.messageId, asking.id));
@@ -569,7 +569,7 @@ describe('router', () => {
     it("asks in runs a Bot's @mention starts, never in runs the owner's group message starts", async () => {
       const { bot: lead } = await newBot('Releaser', [[{ text: '@deployer please deploy it.' }]]);
       const { bot: runner } = await newBot('Deployer', [[{ text: 'On it.' }]]);
-      await t.deps.db
+      await t.db
         .update(schema.bots)
         .set({ toolPolicy: { tools: { bash: 'auto' } } })
         .where(inArray(schema.bots.id, [lead.id, runner.id]));
@@ -584,13 +584,13 @@ describe('router', () => {
       expect(runSource(ownerRun!)).toBe('owner');
       expect(runSource(botRun!)).toBe('bot');
 
-      const bots = await t.deps.db
+      const bots = await t.db
         .select()
         .from(schema.bots)
         .where(inArray(schema.bots.id, [lead.id, runner.id]));
       const decide = async (run: typeof ownerRun) => {
         const bot = bots.find((b) => b.id === run!.botId)!;
-        const policy = await loadRunPolicy(t.deps, run!, bot, new Map());
+        const policy = await loadRunPolicy(t.ownerDeps, run!, bot, new Map());
         const policyRun = { id: run!.id, botId: bot.id, chatId: chat.id, trigger: run!.trigger };
         return asEvaluation(await policy.evaluate(policyRun, 'bash', { command: 'make deploy' }));
       };
@@ -716,7 +716,7 @@ describe('router', () => {
       );
       await say(left.chatId, 'talk to right');
       const pair = await until(async () => {
-        const [row] = await t.deps.db
+        const [row] = await t.db
           .select()
           .from(schema.chats)
           .where(

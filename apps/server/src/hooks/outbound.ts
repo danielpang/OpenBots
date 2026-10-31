@@ -22,6 +22,7 @@ import { toMessage, type Message } from '../schemas.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { isOrgAdmin } from '../workspace.js';
+import { inWorkspace } from '../db/scope.js';
 
 // Outbound event subscriptions (plan 11, H6). A worker listens to the event
 // bus and turns the events an owner subscribed to into `event_deliveries`
@@ -65,6 +66,8 @@ const RESPONSE_BYTES = 64 * 1024;
 
 export interface EventDeliveryJob {
   deliveryId: string;
+  /** Its organization, where it runs (infra/index.ts). */
+  workspaceId?: string;
 }
 
 const keyring = (deps: Pick<AppDeps, 'config'>) => keyringFromConfig(deps.config);
@@ -419,7 +422,7 @@ export async function fanOut(deps: OutboundDeps, event: WsEvent): Promise<EventD
       created.push(row);
       await deps.infra
         .queue<EventDeliveryJob>(EVENT_DELIVERIES_QUEUE)
-        .enqueue('deliver', { deliveryId: row.id });
+        .enqueue('deliver', { deliveryId: row.id, workspaceId: row.workspaceId });
     }
   }
   return created;
@@ -428,7 +431,10 @@ export async function fanOut(deps: OutboundDeps, event: WsEvent): Promise<EventD
 /** Listens to the bus in a worker process; stop with the returned function. */
 export async function startEventFanOut(deps: OutboundDeps): Promise<() => Promise<void>> {
   return deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (event) => {
-    fanOut(deps, event).catch((err: unknown) =>
+    // The event's organization first, then the work in it (db/scope.ts).
+    const workspaceId = event.workspace_id;
+    if (!workspaceId) return;
+    inWorkspace(workspaceId, () => fanOut(deps, event)).catch((err: unknown) =>
       deps.logger.error({ err, type: event.type }, 'outbound event fan-out failed'),
     );
   });
@@ -519,7 +525,11 @@ export async function deliverEvent(
   if (retry) {
     await deps.infra
       .queue<EventDeliveryJob>(EVENT_DELIVERIES_QUEUE)
-      .enqueue('deliver', { deliveryId: delivery.id }, { delayMs });
+      .enqueue(
+        'deliver',
+        { deliveryId: delivery.id, workspaceId: delivery.workspaceId },
+        { delayMs },
+      );
   }
   return row ?? null;
 }
@@ -540,7 +550,11 @@ export function eventDeliveryHandler(
  */
 export async function requeuePendingEventDeliveries(deps: OutboundDeps, now = new Date()) {
   const pending = await deps.db
-    .select({ id: schema.eventDeliveries.id, nextAttemptAt: schema.eventDeliveries.nextAttemptAt })
+    .select({
+      id: schema.eventDeliveries.id,
+      workspaceId: schema.eventDeliveries.workspaceId,
+      nextAttemptAt: schema.eventDeliveries.nextAttemptAt,
+    })
     .from(schema.eventDeliveries)
     .where(eq(schema.eventDeliveries.status, 'pending' satisfies EventDeliveryStatus));
   for (const row of pending) {
@@ -549,7 +563,7 @@ export async function requeuePendingEventDeliveries(deps: OutboundDeps, now = ne
       : 0;
     await deps.infra
       .queue<EventDeliveryJob>(EVENT_DELIVERIES_QUEUE)
-      .enqueue('deliver', { deliveryId: row.id }, { delayMs });
+      .enqueue('deliver', { deliveryId: row.id, workspaceId: row.workspaceId }, { delayMs });
   }
   return pending.length;
 }

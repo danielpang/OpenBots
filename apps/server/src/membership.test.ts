@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { schema } from './db/client.js';
 import { ownerActive } from './membership.js';
-import { tickRoutines } from './services/routines.js';
+import { tickDueRoutines } from './services/routines.js';
 import { ORIGIN, createTestApp, type TestApp } from './test-app.js';
 
 // A member suspended or removed in an organization (plan 21.6): their Bots
@@ -29,7 +29,7 @@ describe("a suspended or removed member's Bots", () => {
       eq(schema.workspaceMembers.workspaceId, bot.workspaceId),
     );
   const suspend = (on: boolean) =>
-    t.deps.db
+    t.db
       .update(schema.workspaceMembers)
       .set({ suspendedAt: on ? new Date() : null })
       .where(membership());
@@ -66,7 +66,7 @@ describe("a suspended or removed member's Bots", () => {
     expect((await hook()).status).toBe(202);
     await suspend(true);
     try {
-      expect(await ownerActive(t.deps.db, { ownerId: userId, workspaceId: bot.workspaceId })).toBe(
+      expect(await ownerActive(t.db, { ownerId: userId, workspaceId: bot.workspaceId })).toBe(
         false,
       );
       expect((await hook()).status).toBe(404);
@@ -85,22 +85,22 @@ describe("a suspended or removed member's Bots", () => {
       })
     ).json()) as { id: string };
     const due = () =>
-      t.deps.db
+      t.db
         .update(schema.routines)
         .set({ nextRunAt: new Date(Date.now() - 1000) })
         .where(eq(schema.routines.id, routine.id));
     await suspend(true);
     await due();
-    expect(await tickRoutines(t.deps)).toBe(0);
+    expect(await tickDueRoutines(t.deps)).toBe(0);
     await suspend(false);
     await due();
-    expect(await tickRoutines(t.deps)).toBe(1);
+    expect(await tickDueRoutines(t.deps)).toBe(1);
   });
 
   it('takes nothing once the owner is removed; the Bot stays', async () => {
-    await t.deps.db.delete(schema.workspaceMembers).where(membership());
+    await t.db.delete(schema.workspaceMembers).where(membership());
     expect((await hook()).status).toBe(404);
-    const [row] = await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
+    const [row] = await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
     expect(row).toBeDefined();
   });
 });

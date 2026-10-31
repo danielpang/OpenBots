@@ -16,7 +16,7 @@ describe('GET /api/v1/chats/:id/resync', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
-    const { db } = t.deps;
+    const { db } = t;
     const workspace = await ensureWorkspace(db);
     const aliceId = (await db.select().from(schema.users)).find(
       (u) => u.email === 'alice@example.com',
@@ -72,7 +72,7 @@ describe('GET /api/v1/chats/:id/resync', () => {
   });
 
   it('carries reactions and reply counts', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const [first] = await db.select().from(schema.messages).where(eq(schema.messages.seq, 1));
     const [reply] = await db.transaction(async (tx) =>
       tx
@@ -123,7 +123,7 @@ describe('GET /api/v1/chats/:id/resync', () => {
     }
     const chatSeq = async () =>
       (
-        await t.deps.db
+        await t.db
           .select({ seq: schema.chats.chatSeq })
           .from(schema.chats)
           .where(eq(schema.chats.id, chatId))
@@ -139,13 +139,13 @@ describe('GET /api/v1/chats/:id/resync', () => {
       });
 
     it('returns a message that completed while the client was away', async () => {
-      const streaming = await createStreaming(t.deps, { chatId, botId });
-      await appendPart(t.deps, streaming.id, { type: 'text_delta', text: 'Hel' });
+      const streaming = await createStreaming(t.ownerDeps, { chatId, botId });
+      await appendPart(t.ownerDeps, streaming.id, { type: 'text_delta', text: 'Hel' });
       // The client saw the message start streaming, then lost the socket.
       const since = await chatSeq();
       expect(await caughtUp(since)).toEqual([]);
-      await appendPart(t.deps, streaming.id, { type: 'text_delta', text: 'lo.' });
-      await finalize(t.deps, streaming.id);
+      await appendPart(t.ownerDeps, streaming.id, { type: 'text_delta', text: 'lo.' });
+      await finalize(t.ownerDeps, streaming.id);
       const [back] = await caughtUp(since);
       expect(back).toMatchObject({
         id: streaming.id,
@@ -157,7 +157,7 @@ describe('GET /api/v1/chats/:id/resync', () => {
     });
 
     it('returns a message whose widget changed while the client was away', async () => {
-      const asking = await postMessage(t.deps, chatId, {
+      const asking = await postMessage(t.ownerDeps, chatId, {
         authorType: 'bot',
         authorId: botId,
         parts: [
@@ -179,7 +179,7 @@ describe('GET /api/v1/chats/:id/resync', () => {
     });
 
     it('returns a message whose reactions changed while the client was away', async () => {
-      const said = await postMessage(t.deps, chatId, {
+      const said = await postMessage(t.ownerDeps, chatId, {
         authorType: 'bot',
         authorId: botId,
         parts: [{ type: 'text', text: 'Done.' }],

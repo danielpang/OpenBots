@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs OpenBot with Docker Compose (plan 16.3, D1): clones the repository,
 # copies .env.example to .env, generates OPENBOT_MASTER_KEY and the database
-# password and starts the stack. Then open the printed URL; the first-run
+# passwords and starts the stack. Then open the printed URL; the first-run
 # wizard creates the admin.
 #
 #   curl -fsSL https://raw.githubusercontent.com/danielpang/OpenBots/main/install.sh | bash
@@ -153,6 +153,22 @@ else
     }
     { print }
     END { if (!found) print "POSTGRES_PASSWORD=" pw }
+  ' .env >.env.tmp
+  chmod 600 .env.tmp
+  mv .env.tmp .env
+fi
+
+# The password of openbot_app, the database role the server works as under
+# row-level security between organizations. An existing one is kept.
+if grep -Eq '^OPENBOT_DB_APP_PASSWORD=.+' .env; then
+  log "Keeping the existing OPENBOT_DB_APP_PASSWORD"
+else
+  log "Generating OPENBOT_DB_APP_PASSWORD"
+  app_password="$(generate_password)"
+  awk -v pw="$app_password" '
+    /^OPENBOT_DB_APP_PASSWORD=/ { print "OPENBOT_DB_APP_PASSWORD=" pw; found = 1; next }
+    { print }
+    END { if (!found) print "OPENBOT_DB_APP_PASSWORD=" pw }
   ' .env >.env.tmp
   chmod 600 .env.tmp
   mv .env.tmp .env

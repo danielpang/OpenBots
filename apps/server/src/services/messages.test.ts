@@ -29,10 +29,10 @@ describe('streaming Bot messages', () => {
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
     await t.signUp('alice@example.com');
-    const [user] = await t.deps.db.select().from(schema.users);
-    const [member] = await t.deps.db.select().from(schema.workspaceMembers);
+    const [user] = await t.db.select().from(schema.users);
+    const [member] = await t.db.select().from(schema.workspaceMembers);
     const record = await createBot(
-      t.deps,
+      t.ownerDeps,
       { id: user!.id, workspaceId: member!.workspaceId },
       { name: 'Ada' },
     );
@@ -50,7 +50,7 @@ describe('streaming Bot messages', () => {
   const deltas = () =>
     events.filter((e): e is WsEventOf<'message.delta'> => e.type === 'message.delta');
   const row = async (id: string) =>
-    (await t.deps.db.select().from(schema.messages).where(eq(schema.messages.id, id)))[0]!;
+    (await t.db.select().from(schema.messages).where(eq(schema.messages.id, id)))[0]!;
 
   const replay = (
     list: WsEventOf<'message.delta'>[],
@@ -66,7 +66,7 @@ describe('streaming Bot messages', () => {
     );
 
   it('creates a streaming message with the next seq', async () => {
-    const message = await createStreaming(t.deps, { chatId, botId });
+    const message = await createStreaming(t.ownerDeps, { chatId, botId });
     expect(message).toMatchObject({
       chatId,
       authorType: 'bot',
@@ -84,16 +84,16 @@ describe('streaming Bot messages', () => {
         seq: message.seq,
       }),
     ]);
-    await finalize(t.deps, message.id);
+    await finalize(t.ownerDeps, message.id);
   });
 
   it('coalesces text deltas and flushes at part boundaries', async () => {
-    const message = await createStreaming(t.deps, { chatId, botId });
+    const message = await createStreaming(t.ownerDeps, { chatId, botId });
     for (const word of ['Let ', 'me ', 'look']) {
-      await appendPart(t.deps, message.id, { type: 'reasoning_delta', text: word });
+      await appendPart(t.ownerDeps, message.id, { type: 'reasoning_delta', text: word });
     }
     for (const word of ['Run', 'ning']) {
-      await appendPart(t.deps, message.id, { type: 'text_delta', text: word });
+      await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: word });
     }
     const call: MessagePart = {
       type: 'tool_call',
@@ -101,7 +101,7 @@ describe('streaming Bot messages', () => {
       tool_name: 'bash',
       args: { cmd: 'npm test' },
     };
-    await appendPart(t.deps, message.id, call);
+    await appendPart(t.ownerDeps, message.id, call);
     // Reasoning flushed when text began; text and the tool call flushed together.
     expect(await row(message.id)).toMatchObject({
       deltaSeq: 2,
@@ -124,13 +124,13 @@ describe('streaming Bot messages', () => {
       },
     ]);
     expect(deltas().every((e) => e.chat_id === chatId && e.seq === message.seq)).toBe(true);
-    await finalize(t.deps, message.id);
+    await finalize(t.ownerDeps, message.id);
   });
 
   it(`flushes buffered text after ${DELTA_FLUSH_MS} ms`, async () => {
-    const message = await createStreaming(t.deps, { chatId, botId });
-    await appendPart(t.deps, message.id, { type: 'text_delta', text: 'Hel' });
-    await appendPart(t.deps, message.id, { type: 'text_delta', text: 'lo' });
+    const message = await createStreaming(t.ownerDeps, { chatId, botId });
+    await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: 'Hel' });
+    await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: 'lo' });
     expect((await row(message.id)).parts).toEqual([]);
     await sleep(DELTA_FLUSH_MS + 100);
     expect(await row(message.id)).toMatchObject({
@@ -138,19 +138,19 @@ describe('streaming Bot messages', () => {
       parts: [{ type: 'text', text: 'Hello' }],
     });
     expect(deltas()).toHaveLength(1);
-    await finalize(t.deps, message.id);
+    await finalize(t.ownerDeps, message.id);
   });
 
   it('finalizes with usage, and replays (even repeated) rebuild the stored parts', async () => {
-    const message = await createStreaming(t.deps, { chatId, botId });
-    await appendPart(t.deps, message.id, { type: 'text_delta', text: 'Checking.' });
-    await appendPart(t.deps, message.id, {
+    const message = await createStreaming(t.ownerDeps, { chatId, botId });
+    await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: 'Checking.' });
+    await appendPart(t.ownerDeps, message.id, {
       type: 'tool_call',
       tool_call_id: 'c1',
       tool_name: 'read_file',
       args: { path: 'a.ts' },
     });
-    await appendPart(t.deps, message.id, {
+    await appendPart(t.ownerDeps, message.id, {
       type: 'tool_result',
       tool_call_id: 'c1',
       tool_name: 'read_file',
@@ -158,10 +158,14 @@ describe('streaming Bot messages', () => {
     });
     // Mid-stream, a reconnecting client loads the row.
     const midway = await row(message.id);
-    await appendPart(t.deps, message.id, { type: 'text_delta', text: 'All ' });
-    await appendPart(t.deps, message.id, { type: 'text_delta', text: 'good.' });
-    await appendPart(t.deps, message.id, { type: 'widget', kind: 'question', props: { q: '?' } });
-    const done = await finalize(t.deps, message.id, {
+    await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: 'All ' });
+    await appendPart(t.ownerDeps, message.id, { type: 'text_delta', text: 'good.' });
+    await appendPart(t.ownerDeps, message.id, {
+      type: 'widget',
+      kind: 'question',
+      props: { q: '?' },
+    });
+    const done = await finalize(t.ownerDeps, message.id, {
       usage: { inputTokens: 12, outputTokens: 5 },
     });
     await settle();
@@ -194,11 +198,11 @@ describe('streaming Bot messages', () => {
   });
 
   it('marks a failed message and refuses to finalize twice', async () => {
-    const message = await createStreaming(t.deps, { chatId, botId });
-    await appendPart(t.deps, message.id, { type: 'text', text: 'partial' });
-    const done = await finalize(t.deps, message.id, { status: 'failed' });
+    const message = await createStreaming(t.ownerDeps, { chatId, botId });
+    await appendPart(t.ownerDeps, message.id, { type: 'text', text: 'partial' });
+    const done = await finalize(t.ownerDeps, message.id, { status: 'failed' });
     expect(done).toMatchObject({ status: 'failed', parts: [{ type: 'text', text: 'partial' }] });
-    await expect(finalize(t.deps, message.id)).rejects.toThrow(/not streaming/);
+    await expect(finalize(t.ownerDeps, message.id)).rejects.toThrow(/not streaming/);
   });
 });
 
@@ -210,10 +214,10 @@ describe('widget state on read', () => {
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
     await t.signUp('alice@example.com');
-    const [user] = await t.deps.db.select().from(schema.users);
-    const [member] = await t.deps.db.select().from(schema.workspaceMembers);
+    const [user] = await t.db.select().from(schema.users);
+    const [member] = await t.db.select().from(schema.workspaceMembers);
     owner = { id: user!.id, workspaceId: member!.workspaceId };
-    chatId = (await createBot(t.deps, owner, { name: 'Ada' })).chatId;
+    chatId = (await createBot(t.ownerDeps, owner, { name: 'Ada' })).chatId;
   });
   afterAll(() => t.close());
 
@@ -224,19 +228,19 @@ describe('widget state on read', () => {
       props: { question: 'Which?', options: [{ id: 'a', label: 'A' }] },
       state: { status: 'pending' },
     } as const;
-    const message = await postMessage(t.deps, chatId, {
+    const message = await postMessage(t.ownerDeps, chatId, {
       authorType: 'system',
       parts: [{ type: 'text', text: 'Before' }, question],
     });
     const answered = { status: 'answered', answer: { option_id: 'a', label: 'A' } };
-    await t.deps.db.insert(schema.widgetStates).values({
+    await t.db.insert(schema.widgetStates).values({
       workspaceId: owner.workspaceId,
       messageId: message.id,
       partIndex: 1,
       state: answered,
     });
 
-    const { messages } = await listMessages(t.deps.db, owner, chatId);
+    const { messages } = await listMessages(t.db, owner, chatId);
     const read = messages.find((m) => m.id === message.id)!;
     expect(read.parts).toEqual([
       { type: 'text', text: 'Before' },
@@ -244,10 +248,10 @@ describe('widget state on read', () => {
     ]);
     expect((await row(message.id)).parts).toEqual([{ type: 'text', text: 'Before' }, question]);
 
-    const res = await withWidgetStates(t.deps.db, [message]);
+    const res = await withWidgetStates(t.db, [message]);
     expect(res[0]!.parts[1]).toMatchObject({ state: answered });
   });
 
   const row = async (id: string) =>
-    (await t.deps.db.select().from(schema.messages).where(eq(schema.messages.id, id)))[0]!;
+    (await t.db.select().from(schema.messages).where(eq(schema.messages.id, id)))[0]!;
 });

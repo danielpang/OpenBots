@@ -146,7 +146,7 @@ describe('connector tools and built-ins in a run', () => {
     const tested = (await res.json()) as { tools: { name: string }[] };
     expect(tested.tools.map((x) => x.name)).toEqual(['create_issue', 'list_issues']);
     // A custom connector's read-only hints count only once an admin trusts it (S-16).
-    await t.deps.db
+    await t.db
       .update(schema.connectors)
       .set({ trusted: true })
       .where(eq(schema.connectors.id, connectorId));
@@ -170,7 +170,7 @@ describe('connector tools and built-ins in a run', () => {
   });
   afterAll(async () => {
     unhook();
-    await closeMcpManager(t.deps);
+    await closeMcpManager(t.ownerDeps);
     await github.close();
     await new Promise<void>((resolve) => smtp.close(() => resolve()));
     await t.close();
@@ -200,18 +200,18 @@ describe('connector tools and built-ins in a run', () => {
     expect((await call('POST', `/chats/${chatId}/messages`, { text })).status).toBe(201);
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 8_000, interval: 10 });
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
       .orderBy(asc(schema.runs.createdAt));
   const messagesOf = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, chatId))
       .orderBy(asc(schema.messages.seq));
-  const botRow = async (id: string) => (await getState(t.deps, id))!;
+  const botRow = async (id: string) => (await getState(t.ownerDeps, id))!;
   // The worker writes the Bot's closing state after the run's status, so a
   // test that reads it waits for both.
   const settled = (botId: string, status: string) =>
@@ -220,7 +220,7 @@ describe('connector tools and built-ins in a run', () => {
       expect((await botRow(botId)).state).toMatch(/^(done|waiting|blocked|idle)$/);
     });
   const stepsOf = (runId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, runId))
@@ -268,7 +268,7 @@ describe('connector tools and built-ins in a run', () => {
     expect((await botRow(bot.id)).currentAction).toBe('Waiting for approval: github: create issue');
     expect(github.created).toEqual([]);
 
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .select()
       .from(schema.approvals)
       .where(eq(schema.approvals.runId, run!.id));
@@ -317,7 +317,7 @@ describe('connector tools and built-ins in a run', () => {
         }),
       }),
     ]);
-    const [connector] = await t.deps.db
+    const [connector] = await t.db
       .select()
       .from(schema.connectors)
       .where(eq(schema.connectors.id, connectorId));
@@ -354,7 +354,7 @@ describe('connector tools and built-ins in a run', () => {
       expect((await runsOf(bot.id)).find((r) => r.id === startedRunId)?.status).toBe('waiting'),
     );
     expect(mails).toEqual([]);
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .select()
       .from(schema.approvals)
       .where(eq(schema.approvals.runId, startedRunId));
@@ -364,7 +364,7 @@ describe('connector tools and built-ins in a run', () => {
     );
     expect(mails).toHaveLength(1);
     expect(mails[0]).toContain('Subject: Hello there');
-    const [widget] = await t.deps.db
+    const [widget] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, drafted.id));

@@ -38,7 +38,7 @@ describe('Bot memories API', () => {
       content: 'Deploys happen on Thursdays',
       sourceRunId: null,
     });
-    const [row] = await t.deps.db
+    const [row] = await t.db
       .select()
       .from(schema.botMemories)
       .where(eq(schema.botMemories.id, memory.id));
@@ -54,7 +54,7 @@ describe('Bot memories API', () => {
       kind: 'preference',
       content: 'Deploys on Fridays',
     });
-    const [after] = await t.deps.db
+    const [after] = await t.db
       .select()
       .from(schema.botMemories)
       .where(eq(schema.botMemories.id, memory.id));

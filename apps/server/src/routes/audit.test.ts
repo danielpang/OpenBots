@@ -4,6 +4,7 @@ import { schema } from '../db/client.js';
 import { listAudit, trimAuditLog } from '../services/audit.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
 import { ensureWorkspace } from '../workspace.js';
+import { inEveryOrganization } from '../workers.js';
 
 // The audit log (plan 17 control 9, S-11): what is recorded, per
 // organization (plan 21.3), and the retention trim. The managed service's
@@ -42,10 +43,10 @@ describe('audit log', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     admin = (await t.signUp('admin@example.com')).cookie!;
     member = (await t.signUp('member@example.com')).cookie!;
-    const users = await t.deps.db.select().from(schema.users);
+    const users = await t.db.select().from(schema.users);
     adminId = users.find((u) => u.email === 'admin@example.com')!.id;
     memberId = users.find((u) => u.email === 'member@example.com')!.id;
-    workspaceId = (await ensureWorkspace(t.deps.db)).id;
+    workspaceId = (await ensureWorkspace(t.db)).id;
   });
   afterAll(() => t.close());
 
@@ -73,7 +74,7 @@ describe('audit log', () => {
   /** The organization's rows, as the managed service's reader lists them. */
   const read = async (query = ''): Promise<Page> => {
     const params = new URLSearchParams(query.replace(/^\?/, ''));
-    const page = await listAudit(t.deps.db, workspaceId, {
+    const page = await listAudit(t.db, workspaceId, {
       ...(params.get('action') ? { action: params.get('action')! } : {}),
       limit: Number(params.get('limit') ?? 50),
     });
@@ -246,7 +247,7 @@ describe('audit log', () => {
   });
 
   it('trims rows past the retention period, 180 days unless changed', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const day = 86_400_000;
     const now = new Date('2026-10-01T00:00:00Z');
     for (const [action, age] of [
@@ -277,11 +278,13 @@ describe('audit log', () => {
         .filter((a) => a.startsWith('retention.'))
         .sort();
 
-    expect(await trimAuditLog(t.deps, now)).toBeGreaterThanOrEqual(1);
+    expect(
+      await inEveryOrganization(t.deps, () => trimAuditLog(t.deps, now)),
+    ).toBeGreaterThanOrEqual(1);
     expect(await left()).toEqual(['retention.kept', 'retention.middle']);
 
     await call(admin, 'PATCH', '/settings', { auditRetentionDays: 90 });
-    await trimAuditLog(t.deps, now);
+    await inEveryOrganization(t.deps, () => trimAuditLog(t.deps, now));
     expect(await left()).toEqual([]);
     await call(admin, 'PATCH', '/settings', { auditRetentionDays: 180 });
 

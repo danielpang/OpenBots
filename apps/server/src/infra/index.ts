@@ -1,5 +1,6 @@
 import { EVENTS_CHANNEL, type EventBus, type JobQueue, type WsEvent } from '@openbot/shared';
 import type { Config } from '../config.js';
+import { currentWorkspace, inWorkspace } from '../db/scope.js';
 import { RedisEventBus } from './bus-redis.js';
 import { MemoryEventBus } from './bus-memory.js';
 import { BullJobQueue } from './queue-bullmq.js';
@@ -35,7 +36,7 @@ export function createInfra(
     queue<T>(name: string) {
       let queue = queues.get(name);
       if (!queue) {
-        queue = url ? new BullJobQueue(name, url) : new MemoryJobQueue();
+        queue = scopedQueue(url ? new BullJobQueue(name, url) : new MemoryJobQueue());
         queues.set(name, queue);
       }
       return queue as JobQueue<T>;
@@ -48,7 +49,49 @@ export function createInfra(
   };
 }
 
-/** Publishes a realtime event for the WS gateway to forward (plan 14.2). */
+/**
+ * Publishes a realtime event for the WS gateway to forward (plan 14.2),
+ * with the organization of the work that made it, so whoever handles it
+ * works there (db/scope.ts).
+ */
 export function publishEvent(bus: EventBus, event: WsEvent): Promise<void> {
-  return bus.publish(EVENTS_CHANNEL, event);
+  const workspaceId = event.workspace_id ?? currentWorkspace();
+  return bus.publish(EVENTS_CHANNEL, workspaceId ? { ...event, workspace_id: workspaceId } : event);
+}
+
+/** A job's organization, kept beside its own data. */
+export interface ScopedJobData {
+  workspaceId?: string;
+}
+
+/**
+ * Every job belongs to an organization and runs there (db/scope.ts). The
+ * queuing code names it in `workspaceId`, from the row the job is for, or it
+ * is the scope's; a job for another organization than the scope's, or for
+ * none, is refused. `process` runs the handler in the job's organization.
+ */
+export function scopedQueue<T>(queue: JobQueue<T>): JobQueue<T> {
+  return {
+    enqueue(name, data, options) {
+      const named = (data as ScopedJobData).workspaceId;
+      const scope = currentWorkspace();
+      if (named && scope && named !== scope) {
+        return Promise.reject(new Error(`job ${name} is for another organization than its scope`));
+      }
+      const workspaceId = named ?? scope;
+      if (!workspaceId) {
+        return Promise.reject(new Error(`job ${name} was queued outside an organization`));
+      }
+      return queue.enqueue(name, { ...(data as object), workspaceId } as T, options);
+    },
+    process(handler, options) {
+      return queue.process(async (job) => {
+        const { workspaceId } = job.data as ScopedJobData;
+        if (typeof workspaceId !== 'string') throw new Error(`job ${job.id} has no organization`);
+        await inWorkspace(workspaceId, () => handler(job));
+      }, options);
+    },
+    cancel: (jobId) => queue.cancel(jobId),
+    close: () => queue.close(),
+  };
 }

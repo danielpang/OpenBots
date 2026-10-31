@@ -51,6 +51,7 @@ import { onRunStatus, onWidgetAction } from './hooks.js';
 import { announceMessage, postMessage, storeMessage } from './messages.js';
 import { insertRun, scheduleRun, TERMINAL_STATUSES, type RunInput, type RunRow } from './runs.js';
 import { skillOrigin } from './skills.js';
+import { dueRoutineWorkspaces, inWorkspace } from '../db/scope.js';
 
 // Routines (plan 4.6, 10.2, R1 to R5). A Routine binds a Bot, a trigger and a
 // prompt (or a Skill) and posts into the Bot's transcript by default.
@@ -755,12 +756,24 @@ export async function tickRoutines(deps: RoutinesDeps, now: Date = new Date()): 
 }
 
 /** The 30-second ticker in the worker; stop it with the returned function. */
+/**
+ * One scheduler tick: only the organizations with a Routine due, each in its
+ * own scope (db/scope.ts). Returns the runs started.
+ */
+export async function tickDueRoutines(deps: RoutinesDeps, now: Date = new Date()): Promise<number> {
+  let started = 0;
+  for (const id of await dueRoutineWorkspaces(deps.db, now)) {
+    started += await inWorkspace(id, () => tickRoutines(deps, now));
+  }
+  return started;
+}
+
 export function startRoutineScheduler(deps: RoutinesDeps, everyMs = ROUTINE_TICK_MS): () => void {
   let ticking = false;
   const tick = () => {
     if (ticking) return;
     ticking = true;
-    tickRoutines(deps)
+    tickDueRoutines(deps)
       .then(
         (started) => started && deps.logger.info({ runs: started }, 'started due routines'),
         (err: unknown) => deps.logger.error({ err }, 'routine scheduler tick failed'),

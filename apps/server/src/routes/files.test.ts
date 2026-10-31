@@ -154,12 +154,12 @@ describe('/api/v1/files', () => {
         await upload(carol, new TextEncoder().encode('draft'), 'draft.txt', 'text/plain')
       ).json()) as FileBody;
       await upload(carol, PNG, 'face.png', 'image/png', 'avatar');
-      const carolUser = (await t.deps.db.select().from(schema.users)).find(
+      const carolUser = (await t.db.select().from(schema.users)).find(
         (u) => u.email === 'carol@example.com',
       )!;
-      const owner = { id: carolUser.id, workspaceId: (await ensureWorkspace(t.deps.db)).id };
+      const owner = { id: carolUser.id, workspaceId: (await ensureWorkspace(t.db)).id };
       for (const purpose of ['artifact', 'webhook_body'] as const) {
-        await storeFile(t.deps, owner, { name: purpose, bytes: PNG, purpose });
+        await storeFile(t.ownerDeps, owner, { name: purpose, bytes: PNG, purpose });
       }
       const res = await t.app.request(`/api/v1/chats/${bot.chatId}/messages`, {
         method: 'POST',

@@ -61,6 +61,7 @@ import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secret
 import { isOrgAdmin, storedSettings, type Role } from '../workspace.js';
 import { computerStdioSpec } from './computer-stdio.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
+import { connectorWorkspace, currentWorkspace, inWorkspace, outsideScope } from '../db/scope.js';
 
 // Connectors (plan 4.4, 8; T1 to T3, P3). Connectors belong to a user and
 // every one of their Bots may use them, narrowed per Bot by `bot_connectors`
@@ -1145,8 +1146,11 @@ export async function importConnectors(deps: ConnectorsDeps, viewer: Viewer, jso
 
 // --- Sessions -------------------------------------------------------------------
 
+// One manager per process: keyed by its config, which every deps of the
+// process shares.
 const managers = new WeakMap<object, McpManager>();
 const listening = new WeakMap<object, Promise<Unsubscribe | null>>();
+const keyOf = (deps: object) => (deps as { config?: object }).config ?? deps;
 const refreshing = new Map<string, Promise<string>>();
 
 export { MCP_CONTROL_CHANNEL, type McpControl };
@@ -1154,7 +1158,7 @@ export { MCP_CONTROL_CHANNEL, type McpControl };
 /** Stops the sessions here and, through the bus, in every other process. */
 async function stopSessions(deps: ConnectorsDeps, connectorIds: string[]): Promise<void> {
   if (!connectorIds.length) return;
-  const manager = managers.get(deps);
+  const manager = managers.get(keyOf(deps));
   if (manager) await Promise.all(connectorIds.map((id) => manager.stop(id)));
   await deps.infra?.bus.publish<McpControl>(MCP_CONTROL_CHANNEL, { type: 'stop', connectorIds });
 }
@@ -1179,26 +1183,45 @@ export async function stopCustomStdio(deps: ConnectorsDeps, workspaceId: string)
 
 /** The process's MCP manager for these deps, created with its health loop on first use. */
 export function mcpManager(deps: ConnectorsDeps): McpManager {
-  let manager = managers.get(deps);
+  let manager = managers.get(keyOf(deps));
   if (!manager) {
-    const created = new McpManager({
-      resolve: (id, context) => sessionFor(deps, id, context),
-      onStarted: (id, snapshot) => recordSnapshot(deps, id, snapshot),
-      onToolsChanged: (id, tools) => storeTools(deps.db, id, tools),
-      onError: (id, error) => recordError(deps, id, error),
-      idleMs: deps.config.processLimits.mcpIdleStopMinutes * 60_000,
-    });
-    created.startHealthLoop();
-    managers.set(deps, created);
+    // One manager serves every organization: each session's callbacks work in
+    // the organization that started it (db/scope.ts), and the manager's own
+    // timers belong to none.
+    const organizations = new Map<string, string>();
+    const inItsOrganization = <T>(id: string, fn: () => Promise<T>) => {
+      const workspaceId = organizations.get(id);
+      return workspaceId ? inWorkspace(workspaceId, fn) : fn();
+    };
+    const created = outsideScope(
+      () =>
+        new McpManager({
+          resolve: (id, context) => {
+            const workspaceId = currentWorkspace();
+            if (workspaceId) organizations.set(id, workspaceId);
+            return sessionFor(deps, id, context);
+          },
+          onStarted: (id, snapshot) =>
+            inItsOrganization(id, () => recordSnapshot(deps, id, snapshot)),
+          onToolsChanged: (id, tools) =>
+            inItsOrganization(id, () => storeTools(deps.db, id, tools)),
+          onError: (id, error) => inItsOrganization(id, () => recordError(deps, id, error)),
+          idleMs: deps.config.processLimits.mcpIdleStopMinutes * 60_000,
+        }),
+    );
+    outsideScope(() => created.startHealthLoop());
+    managers.set(keyOf(deps), created);
     listening.set(
-      deps,
+      keyOf(deps),
       deps.infra
         ? deps.infra.bus
             .subscribe<McpControl>(MCP_CONTROL_CHANNEL, (control) => {
               if (control.type === 'stop') {
                 for (const id of control.connectorIds) void created.stop(id);
               } else if (control.type === 'computer') {
-                void stopComputerSessions(deps, created, control).catch((error: unknown) =>
+                void inWorkspace(control.workspaceId, () =>
+                  stopComputerSessions(deps, created, control),
+                ).catch((error: unknown) =>
                   deps.logger.warn(
                     { err: error },
                     'stopping stdio connectors with the computer failed',
@@ -1242,10 +1265,10 @@ async function stopComputerSessions(
 
 /** Stops every session (shutdown, tests). */
 export async function closeMcpManager(deps: object): Promise<void> {
-  const manager = managers.get(deps);
-  const unsubscribe = listening.get(deps);
-  managers.delete(deps);
-  listening.delete(deps);
+  const manager = managers.get(keyOf(deps));
+  const unsubscribe = listening.get(keyOf(deps));
+  managers.delete(keyOf(deps));
+  listening.delete(keyOf(deps));
   await (
     await unsubscribe
   )?.();
@@ -1724,6 +1747,21 @@ export const SIGN_IN_FIRST = 'Sign in to OpenBots in this browser, then try agai
  * owner's pages hear the outcome as `connector.updated`.
  */
 export async function completeConnectorOAuth(
+  deps: ConnectorsDeps,
+  viewer: Viewer | null,
+  query: { state?: string; code?: string; error?: string; error_description?: string },
+): Promise<OAuthOutcome> {
+  // The provider's redirect has no organization: the state's connector says
+  // which (a SECURITY DEFINER lookup), and the rest works there (db/scope.ts).
+  const named = query.state ? parseState(query.state) : null;
+  const workspaceId =
+    named && UUID.test(named.id) ? await connectorWorkspace(deps.db, named.id) : null;
+  return workspaceId
+    ? inWorkspace(workspaceId, () => completeInScope(deps, viewer, query))
+    : completeInScope(deps, viewer, query);
+}
+
+async function completeInScope(
   deps: ConnectorsDeps,
   viewer: Viewer | null,
   query: { state?: string; code?: string; error?: string; error_description?: string },

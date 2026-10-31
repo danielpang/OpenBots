@@ -13,6 +13,7 @@ import { DomainError } from '../errors.js';
 import { authenticateHeaders } from '../middleware/auth.js';
 import { ownedBotIds, ownedChatIds } from '../ownership.js';
 import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
+import { inWorkspace } from '../db/scope.js';
 
 // The realtime gateway on `/ws` (plan 14.2). A socket authenticates on upgrade
 // with the session cookie or an API key, subscribes to chats and Bots it owns,
@@ -142,10 +143,13 @@ export async function attachGateway(
       return send(client, subscribed(client, [], []));
     }
 
-    const [chats, bots] = await Promise.all([
-      ownedChatIds(db, client.user, frame.chats),
-      ownedBotIds(db, client.user, frame.bots),
-    ]);
+    // In the socket's organization (db/scope.ts).
+    const [chats, bots] = await inWorkspace(client.user.workspaceId, () =>
+      Promise.all([
+        ownedChatIds(db, client.user, frame.chats),
+        ownedBotIds(db, client.user, frame.bots),
+      ]),
+    );
     for (const id of chats) client.chats.add(id);
     for (const id of bots) client.bots.add(id);
     send(
@@ -161,6 +165,10 @@ export async function attachGateway(
   function forward(event: WsEvent) {
     let data: string | undefined;
     for (const client of clients) {
+      // An event names its organization; a socket gets only its own's.
+      if (event.workspace_id !== undefined && event.workspace_id !== client.user.workspaceId) {
+        continue;
+      }
       const wanted =
         (event.chat_id !== undefined && client.chats.has(event.chat_id)) ||
         (event.bot_id !== undefined && client.bots.has(event.bot_id)) ||

@@ -8,6 +8,7 @@ import { lockOrganization, organizationSlug, type Role } from '@openbot/server/w
 import { can } from './access.js';
 import { errorText, sendInviteEmail, type EmailOptions } from './email.js';
 import { INVITATION_DAYS, PENDING_INVITATIONS } from './plugin.js';
+import { asDirectory, inWorkspace } from '@openbot/server/db/scope';
 
 // Organizations, members and invitations on the managed service (plan
 // 21.6). Creating an organization, switching to one and accepting an
@@ -106,18 +107,21 @@ export interface MyOrganization {
 
 /** The caller's organizations, oldest membership first, and which one this request works in. */
 export async function listMyOrganizations(db: Db, account: Account): Promise<MyOrganization[]> {
-  const rows = await db
-    .select({
-      id: schema.workspaces.id,
-      name: schema.workspaces.name,
-      slug: schema.workspaces.slug,
-      role: schema.workspaceMembers.role,
-      suspendedAt: schema.workspaceMembers.suspendedAt,
-    })
-    .from(schema.workspaceMembers)
-    .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.workspaceMembers.workspaceId))
-    .where(eq(schema.workspaceMembers.userId, account.id))
-    .orderBy(asc(schema.workspaceMembers.createdAt), asc(schema.workspaces.id));
+  // Across organizations: the directory's to say (db/scope.ts).
+  const rows = await asDirectory(() =>
+    db
+      .select({
+        id: schema.workspaces.id,
+        name: schema.workspaces.name,
+        slug: schema.workspaces.slug,
+        role: schema.workspaceMembers.role,
+        suspendedAt: schema.workspaceMembers.suspendedAt,
+      })
+      .from(schema.workspaceMembers)
+      .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.workspaceMembers.workspaceId))
+      .where(eq(schema.workspaceMembers.userId, account.id))
+      .orderBy(asc(schema.workspaceMembers.createdAt), asc(schema.workspaces.id)),
+  );
   return rows.map((r) => ({
     id: r.id,
     name: r.name,
@@ -156,16 +160,9 @@ export async function createOrganization(
     throw error;
   }
   if (!created) throw new Error('The organization was not created');
-  await audit(
-    deps.db,
-    created.id,
-    account,
-    'organization.create',
-    {
-      type: 'organization',
-      id: created.id,
-    },
-    { name },
+  const { id } = created;
+  await inWorkspace(id, () =>
+    audit(deps.db, id, account, 'organization.create', { type: 'organization', id }, { name }),
   );
   return created;
 }
@@ -178,15 +175,17 @@ export async function activateOrganization(
   workspaceId: string,
 ) {
   assertSession(account);
-  const [member] = await deps.db
-    .select({ suspendedAt: schema.workspaceMembers.suspendedAt })
-    .from(schema.workspaceMembers)
-    .where(
-      and(
-        eq(schema.workspaceMembers.workspaceId, workspaceId),
-        eq(schema.workspaceMembers.userId, account.id),
+  const [member] = await inWorkspace(workspaceId, () =>
+    deps.db
+      .select({ suspendedAt: schema.workspaceMembers.suspendedAt })
+      .from(schema.workspaceMembers)
+      .where(
+        and(
+          eq(schema.workspaceMembers.workspaceId, workspaceId),
+          eq(schema.workspaceMembers.userId, account.id),
+        ),
       ),
-    );
+  );
   if (!member) throw notFound('Organization not found');
   if (member.suspendedAt) {
     throw new DomainError(
@@ -513,16 +512,19 @@ export async function cancelInvitation(deps: OrganizationsDeps, user: CurrentUse
  * address, or not found. Nobody else learns anything from an id.
  */
 export async function invitationFor(db: Db, account: Pick<Account, 'email'>, id: string) {
-  const [row] = await db
-    .select({
-      invite: schema.invites,
-      organization: schema.workspaces.name,
-      inviter: schema.users.name,
-    })
-    .from(schema.invites)
-    .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.invites.workspaceId))
-    .leftJoin(schema.users, eq(schema.users.id, schema.invites.inviterId))
-    .where(and(eq(schema.invites.id, id), pending()));
+  // Before the caller is in its organization: the directory's to say (db/scope.ts).
+  const [row] = await asDirectory(() =>
+    db
+      .select({
+        invite: schema.invites,
+        organization: schema.workspaces.name,
+        inviter: schema.users.name,
+      })
+      .from(schema.invites)
+      .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.invites.workspaceId))
+      .leftJoin(schema.users, eq(schema.users.id, schema.invites.inviterId))
+      .where(and(eq(schema.invites.id, id), pending())),
+  );
   if (!row || row.invite.email.toLowerCase() !== account.email.toLowerCase()) {
     throw notFound('This invite is used, expired, revoked, or for another email address');
   }
@@ -542,6 +544,17 @@ export async function acceptInvitation(
 ) {
   assertSession(account);
   const { invite } = await invitationFor(deps.db, account, id);
+  // The rest in the invitation's organization.
+  return inWorkspace(invite.workspaceId, () => accept(deps, account, headers, invite));
+}
+
+async function accept(
+  deps: OrganizationsDeps,
+  account: Account,
+  headers: Headers,
+  invite: typeof schema.invites.$inferSelect,
+) {
+  const { id } = invite;
   const [already] = await deps.db
     .select({ id: schema.workspaceMembers.id })
     .from(schema.workspaceMembers)

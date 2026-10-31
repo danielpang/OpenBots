@@ -5,6 +5,7 @@ import { notFound } from '../errors.js';
 import { requireUser } from '../middleware/auth.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
+import { asDirectory } from '../db/scope.js';
 
 // API keys (U4): list, create (the key is returned once), revoke. Keys are
 // hashed at rest by better-auth's api-key plugin. A key belongs to the
@@ -105,10 +106,16 @@ export const apiKeyRoutes = createRouter()
           expiresIn: expiresInDays ? expiresInDays * 86_400 : null,
         },
       });
-      await db
-        .update(schema.apikeys)
-        .set({ workspaceId: c.var.user.workspaceId })
-        .where(eq(schema.apikeys.id, created.id));
+      // better-auth made it with no organization, so it is the directory's
+      // until it has one (db/scope.ts).
+      await asDirectory(() =>
+        db
+          .update(schema.apikeys)
+          .set({ workspaceId: c.var.user.workspaceId })
+          .where(
+            and(eq(schema.apikeys.id, created.id), eq(schema.apikeys.referenceId, c.var.user.id)),
+          ),
+      );
       await recordAudit(db, {
         workspaceId: c.var.user.workspaceId,
         actor: userActor(c.var.user),

@@ -189,7 +189,7 @@ describe('/api/v1/providers', () => {
     expect((await call(member, 'PATCH', `/providers/${own.id}`, { name: 'Mine' })).status).toBe(
       200,
     );
-    await t.deps.db.delete(schema.bots).where(eq(schema.bots.name, 'Mine first'));
+    await t.db.delete(schema.bots).where(eq(schema.bots.name, 'Mine first'));
     expect((await call(member, 'DELETE', `/providers/${own.id}`)).status).toBe(204);
   });
 
@@ -200,14 +200,14 @@ describe('/api/v1/providers', () => {
     expect(anthropic).toMatchObject({ hasKey: true, keyHint: '…et' });
 
     const { encryptSecret, keyringFromConfig } = await import('../secrets.js');
-    const [owner] = await t.deps.db
+    const [owner] = await t.db
       .select()
       .from(schema.users)
       .where(eq(schema.users.email, 'member@example.com'));
-    const [own] = await t.deps.db
+    const [own] = await t.db
       .insert(schema.providers)
       .values({
-        workspaceId: (await t.deps.db.select().from(schema.workspaces))[0]!.id,
+        workspaceId: (await t.db.select().from(schema.workspaces))[0]!.id,
         ownerId: owner!.id,
         kind: 'openai',
         protocol: 'native',
@@ -226,7 +226,7 @@ describe('/api/v1/providers', () => {
       keyHint: 'sk-proj-…WXYZ',
     });
     expect(mine.find((p) => p.slug === 'anthropic')!.keyHint).toBeNull();
-    await t.deps.db.delete(schema.providers).where(eq(schema.providers.id, own!.id));
+    await t.db.delete(schema.providers).where(eq(schema.providers.id, own!.id));
   });
 
   it('lists presets for the add-provider form', async () => {
@@ -262,7 +262,7 @@ describe('/api/v1/providers', () => {
         presetId: null,
       });
       // Header values are sealed and never returned (S-9).
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.providers)
         .where(eq(schema.providers.id, local.id));
@@ -400,7 +400,7 @@ describe('/api/v1/providers', () => {
         await test();
         expect(await toolsOf()).toBe(true);
         // The bookkeeping stays out of the API.
-        const [row] = await t.deps.db
+        const [row] = await t.db
           .select()
           .from(schema.providerModels)
           .where(eq(schema.providerModels.modelId, 'qwen3'));
@@ -464,7 +464,7 @@ describe('/api/v1/providers', () => {
 
       // A row that stopped being local, or a host that now resolves privately, is refused
       // at request time too: the test reports it instead of reaching the endpoint.
-      await t.deps.db
+      await t.db
         .update(schema.providers)
         .set({ local: false })
         .where(eq(schema.providers.id, local.id));
@@ -488,7 +488,7 @@ describe('/api/v1/providers', () => {
       } finally {
         delete t.deps.net;
       }
-      await t.deps.db
+      await t.db
         .update(schema.providers)
         .set({ local: true })
         .where(eq(schema.providers.id, local.id));
@@ -524,7 +524,7 @@ describe('/api/v1/providers', () => {
       expect(
         await patch({ baseUrl: fake.baseUrl, apiKey: 'sk-again-0123456789abcdef' }),
       ).toMatchObject({ hasKey: true, keyHint: 'sk-…cdef' });
-      const [audit] = await t.deps.db
+      const [audit] = await t.db
         .select()
         .from(schema.auditLog)
         .where(eq(schema.auditLog.targetId, moved.id));
@@ -546,15 +546,10 @@ describe('/api/v1/providers', () => {
         return (await res.json()) as Provider;
       };
       const stored = async () =>
-        (
-          await t.deps.db.select().from(schema.providers).where(eq(schema.providers.id, moved.id))
-        )[0]!;
+        (await t.db.select().from(schema.providers).where(eq(schema.providers.id, moved.id)))[0]!;
       const dropped = async () =>
         (
-          await t.deps.db
-            .select()
-            .from(schema.auditLog)
-            .where(eq(schema.auditLog.targetId, moved.id))
+          await t.db.select().from(schema.auditLog).where(eq(schema.auditLog.targetId, moved.id))
         ).filter((a) => (a.metadata as { headersDropped?: boolean }).headersDropped).length;
       // Same host: the headers stay.
       expect((await patch({ baseUrl: `${fake.baseUrl}/` })).headers).toEqual(['x-gateway-key']);
@@ -591,8 +586,8 @@ describe('/api/v1/providers', () => {
   });
 
   it('seals header values stored before S-9 (data migration)', async () => {
-    const workspaceId = (await t.deps.db.select().from(schema.workspaces))[0]!.id;
-    const [legacy] = await t.deps.db
+    const workspaceId = (await t.db.select().from(schema.workspaces))[0]!.id;
+    const [legacy] = await t.db
       .insert(schema.providers)
       .values({
         workspaceId,
@@ -609,8 +604,8 @@ describe('/api/v1/providers', () => {
     const listed = (await (await call(admin, 'GET', '/providers')).json()) as { items: Provider[] };
     expect(listed.items.find((p) => p.id === legacy!.id)!.headers).toEqual(['x-legacy']);
 
-    expect(await sealPlaintextProviderHeaders(t.deps)).toBeGreaterThan(0);
-    const [row] = await t.deps.db
+    expect(await sealPlaintextProviderHeaders(t.ownerDeps)).toBeGreaterThan(0);
+    const [row] = await t.db
       .select()
       .from(schema.providers)
       .where(eq(schema.providers.id, legacy!.id));
@@ -620,12 +615,12 @@ describe('/api/v1/providers', () => {
     await call(admin, 'PUT', `/providers/${legacy!.id}/models`, { models: [{ modelId: 'qwen3' }] });
     await call(admin, 'POST', `/providers/${legacy!.id}/discover`);
     expect(fake.requests.at(-1)!.headers).toMatchObject({ 'x-legacy': 'sekrit-legacy-header' });
-    expect(await sealPlaintextProviderHeaders(t.deps)).toBe(0);
+    expect(await sealPlaintextProviderHeaders(t.ownerDeps)).toBe(0);
     expect((await call(admin, 'DELETE', `/providers/${legacy!.id}`)).status).toBe(204);
   });
 
   it('refuses discovery on a non-OpenAI-compatible provider', async () => {
-    const [anthropic] = await t.deps.db.select().from(schema.providers);
+    const [anthropic] = await t.db.select().from(schema.providers);
     const res = await call(admin, 'POST', `/providers/${anthropic!.id}/discover`);
     expect(res.status).toBe(400);
     expect(((await res.json()) as { code: string }).code).toBe('DISCOVERY_UNSUPPORTED');
@@ -690,7 +685,7 @@ describe('/api/v1/providers', () => {
     };
     const newBot = async (body: Record<string, unknown>) =>
       ((await (await call(member, 'POST', '/bots', body)).json()) as { id: string }).id;
-    const [local] = await t.deps.db
+    const [local] = await t.db
       .select()
       .from(schema.providers)
       .where(eq(schema.providers.slug, 'local-llm'));
@@ -706,13 +701,13 @@ describe('/api/v1/providers', () => {
 
     // No computer on this install: tool calling is all any Bot needs.
     expect(await ids(`?botId=${seer}`)).toEqual(withTools);
-    setComputerProvider(t.deps, {} as ComputerProvider);
+    setComputerProvider(t.ownerDeps, {} as ComputerProvider);
     try {
       expect(await ids(`?botId=${seer}`)).toEqual(withVision);
       // Denying the computer group takes the computer, and the need, away.
       expect(await ids(`?botId=${blind}`)).toEqual(withTools);
     } finally {
-      setComputerProvider(t.deps, null);
+      setComputerProvider(t.ownerDeps, null);
     }
     // Another user's Bot is not found.
     expect((await call(admin, 'GET', `/models?botId=${seer}`)).status).toBe(404);
@@ -721,7 +716,7 @@ describe('/api/v1/providers', () => {
   it("gives a new Bot the first usable provider's catalog default, thinking on (plan 3)", async () => {
     const [anthropic, mistral] = await Promise.all(
       ['anthropic', 'mistral'].map(async (slug) =>
-        (await t.deps.db.select().from(schema.providers)).find((p) => p.slug === slug)!,
+        (await t.db.select().from(schema.providers)).find((p) => p.slug === slug)!,
       ),
     );
     const modelOf = async (body: Record<string, unknown>) => {
@@ -750,14 +745,14 @@ describe('/api/v1/providers', () => {
     } finally {
       await setOpus(true);
     }
-    await t.deps.db
+    await t.db
       .update(schema.providers)
       .set({ status: 'error' })
       .where(eq(schema.providers.id, anthropic!.id));
     try {
       expect(await modelOf({ name: 'Skipped' })).toMatchObject({ provider_id: mistral!.id });
     } finally {
-      await t.deps.db
+      await t.db
         .update(schema.providers)
         .set({ status: 'untested' })
         .where(eq(schema.providers.id, anthropic!.id));
@@ -765,7 +760,7 @@ describe('/api/v1/providers', () => {
   });
 
   it('prefers a default with vision for a Bot that can use the computer (L4)', async () => {
-    const providers = await t.deps.db.select().from(schema.providers);
+    const providers = await t.db.select().from(schema.providers);
     const anthropic = providers.find((p) => p.slug === 'anthropic')!;
     const mistral = providers.find((p) => p.slug === 'mistral')!;
     const defaultOf = async (needs: string) =>
@@ -776,7 +771,7 @@ describe('/api/v1/providers', () => {
         models: [{ modelId: 'claude-opus-5-5', capabilities: { vision } }],
       });
     await opusVision(false);
-    setComputerProvider(t.deps, {} as ComputerProvider);
+    setComputerProvider(t.ownerDeps, {} as ComputerProvider);
     try {
       // The first provider's default cannot see the screen; the next one's can.
       const res = await call(member, 'POST', '/bots', { name: 'Operator' });
@@ -798,7 +793,7 @@ describe('/api/v1/providers', () => {
         provider_id: anthropic.id,
       });
     } finally {
-      setComputerProvider(t.deps, null);
+      setComputerProvider(t.ownerDeps, null);
       await opusVision(true);
     }
   });

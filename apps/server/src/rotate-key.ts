@@ -5,10 +5,12 @@
 // configured key opens.
 import { loadConfig } from './config.js';
 import { createDb } from './db/client.js';
+import { scopedDb } from './db/scope.js';
 import { rotateMasterKey } from './rotation.js';
 
 const config = loadConfig();
-const db = createDb(config.databaseUrl, { max: 1 });
+// Under row-level security like the app, one organization at a time (db/scope.ts).
+const db = scopedDb(createDb(config.databaseUrl, { max: 1 }));
 if (!config.previousMasterKeys.length) {
   console.log(
     'rotate-key: OPENBOT_MASTER_KEY_PREVIOUS is empty; checking every secret opens with OPENBOT_MASTER_KEY',

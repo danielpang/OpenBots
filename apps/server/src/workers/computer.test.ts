@@ -33,7 +33,7 @@ describe('computer tools in a run', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
-    computer = await useTestComputer(t.deps);
+    computer = await useTestComputer(t.ownerDeps);
     cookie = (await t.signUp('dana@example.com')).cookie!;
     unhook = registerRunHooks();
     await t.deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
@@ -70,14 +70,14 @@ describe('computer tools in a run', () => {
 
   async function runOf(botId: string, status: string) {
     return until(async () => {
-      const [row] = await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, botId));
+      const [row] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, botId));
       expect(row?.status).toBe(status);
       return row!;
     });
   }
 
   async function partsOf(runId: string) {
-    const rows = await t.deps.db
+    const rows = await t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.runId, runId))
@@ -100,7 +100,7 @@ describe('computer tools in a run', () => {
     const run = await runOf(bot.id, 'completed');
 
     // Its own screen, started on the agent.
-    const [screen] = await t.deps.db
+    const [screen] = await t.db
       .select()
       .from(schema.botScreens)
       .where(eq(schema.botScreens.botId, bot.id));
@@ -129,7 +129,7 @@ describe('computer tools in a run', () => {
     });
 
     // Activity: the start is logged once, then each call with its label.
-    const steps = await t.deps.db
+    const steps = await t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, run.id))
@@ -167,7 +167,7 @@ describe('computer tools in a run', () => {
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Run the tests' });
     const run = await runOf(bot.id, 'waiting');
     expect(runs).toBe(0);
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .select()
       .from(schema.approvals)
       .where(eq(schema.approvals.runId, run.id));
@@ -175,7 +175,7 @@ describe('computer tools in a run', () => {
     expect(res.status).toBe(200);
     await runOf(bot.id, 'completed');
     expect(runs).toBe(1);
-    const steps = await t.deps.db
+    const steps = await t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, run.id));
@@ -219,7 +219,7 @@ describe('computer tools in a run', () => {
     await call('POST', `/bots/${bot.id}/screen/control`, { action: 'take' });
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Click it' });
     await until(async () => {
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.botState)
         .where(eq(schema.botState.botId, bot.id));
@@ -239,7 +239,7 @@ describe('computer tools in a run', () => {
   it('posts one compact "Computer started" row when a run boots the computer (W3)', async () => {
     const startedRows = async (chatId?: string) =>
       (
-        await t.deps.db
+        await t.db
           .select()
           .from(schema.messages)
           .where(chatId ? eq(schema.messages.chatId, chatId) : undefined)
@@ -297,7 +297,7 @@ describe('computer tools in a run', () => {
       await call('POST', `/chats/${bot.chatId}/messages`, { text: 'List home' });
       await runOf(bot.id, 'completed');
       const parts = (
-        await t.deps.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
+        await t.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
       ).flatMap((m) => m.parts as MessagePart[]);
       const row = parts.find((p) => p.type === 'event' && p.kind === 'computer_started');
       expect(row).toMatchObject({ data: { updated: true } });
@@ -323,7 +323,7 @@ describe('computer tools in a run', () => {
     await call('POST', `/bots/${bot.id}/screen/control`, { action: 'take' });
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Click with xdotool' });
     const run = await runOf(bot.id, 'waiting');
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .select()
       .from(schema.approvals)
       .where(eq(schema.approvals.runId, run.id));

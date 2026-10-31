@@ -28,7 +28,11 @@ describe('runs API', () => {
   }
 
   it("answers 404 for another user's run and for unknown ids", async () => {
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: bot.chatId, trigger: 'routine' });
+    const run = await enqueueRun(t.ownerDeps, {
+      botId: bot.id,
+      chatId: bot.chatId,
+      trigger: 'routine',
+    });
     expect(run).toMatchObject({ status: 'queued', priority: 3 });
     expect((await call(alice, 'GET', `/runs/${run.id}`)).status).toBe(200);
     expect((await call(bob, 'GET', `/runs/${run.id}`)).status).toBe(404);
@@ -38,7 +42,11 @@ describe('runs API', () => {
   });
 
   it('cancels a queued run, which its job then skips', async () => {
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: bot.chatId, trigger: 'webhook' });
+    const run = await enqueueRun(t.ownerDeps, {
+      botId: bot.id,
+      chatId: bot.chatId,
+      trigger: 'webhook',
+    });
     const res = await call(alice, 'POST', `/runs/${run.id}/cancel`);
     expect(await res.json()).toMatchObject({
       status: 'cancelled',
@@ -48,15 +56,19 @@ describe('runs API', () => {
   });
 
   it('streams run events as SSE and ends when the run finishes', async () => {
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: bot.chatId, trigger: 'message' });
+    const run = await enqueueRun(t.ownerDeps, {
+      botId: bot.id,
+      chatId: bot.chatId,
+      trigger: 'message',
+    });
     const res = await call(alice, 'GET', `/runs/${run.id}/events`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     // Finish the run from "the worker" while the client listens.
     setTimeout(() => {
       void (async () => {
-        await t.deps.db.insert(schema.runSteps).values({
-          workspaceId: (await t.deps.db.select().from(schema.workspaces))[0]!.id,
+        await t.db.insert(schema.runSteps).values({
+          workspaceId: (await t.db.select().from(schema.workspaces))[0]!.id,
           runId: run.id,
           idx: 0,
           type: 'llm',
@@ -75,7 +87,11 @@ describe('runs API', () => {
   });
 
   it('ends at once for a finished run', async () => {
-    const run = await enqueueRun(t.deps, { botId: bot.id, chatId: bot.chatId, trigger: 'message' });
+    const run = await enqueueRun(t.ownerDeps, {
+      botId: bot.id,
+      chatId: bot.chatId,
+      trigger: 'message',
+    });
     await call(alice, 'POST', `/runs/${run.id}/cancel`);
     const body = await (await call(alice, 'GET', `/runs/${run.id}/events`)).text();
     expect(body.match(/^data: /gm)).toHaveLength(1);

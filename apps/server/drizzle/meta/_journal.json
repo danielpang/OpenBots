@@ -162,6 +162,13 @@
       "when": 1793424122189,
       "tag": "0022_organizations_cleanup",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793459023962,
+      "tag": "0023_row_level_security",
+      "breakpoints": true
     }
   ]
 }

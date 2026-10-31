@@ -41,20 +41,20 @@ describe('memory embedding sources', () => {
     });
     const bot = (await res.json()) as { id: string };
     botId = bot.id;
-    const [row] = await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, botId));
+    const [row] = await t.db.select().from(schema.bots).where(eq(schema.bots.id, botId));
     workspaceId = row!.workspaceId;
   });
   afterAll(() => t.close());
   beforeEach(async () => {
-    await t.deps.db.delete(schema.botMemories);
+    await t.db.delete(schema.botMemories);
   });
 
   const save = (content: string, embedder: Embedder) =>
-    saveMemory(t.deps, { botId, workspaceId, kind: 'fact', content }, embedder);
+    saveMemory(t.ownerDeps, { botId, workspaceId, kind: 'fact', content }, embedder);
 
   const sources = async () =>
     Object.fromEntries(
-      (await t.deps.db.select().from(schema.botMemories)).map((m) => [m.content, m.embeddingModel]),
+      (await t.db.select().from(schema.botMemories)).map((m) => [m.content, m.embeddingModel]),
     );
 
   it('records the source and compares a query only with memories of that source', async () => {
@@ -69,7 +69,9 @@ describe('memory embedding sources', () => {
     });
 
     const search = async (embedder: Embedder) =>
-      (await searchMemories(t.deps, botId, 'deploys', 10, embedder)).map((m) => m.content).sort();
+      (await searchMemories(t.ownerDeps, botId, 'deploys', 10, embedder))
+        .map((m) => m.content)
+        .sort();
     expect(await search(tagged(OPENAI))).toEqual(['Deploys on Thursdays']);
     expect(await search(localEmbedder)).toEqual(['Deploys at noon', 'Deploys on Fridays']);
     // The query fell back too, so it is compared with the local memories.
@@ -82,19 +84,19 @@ describe('memory embedding sources', () => {
   it('re-embeds stale memories, and stops when the model falls back', async () => {
     await save('Deploys on Thursdays', tagged(OPENAI));
     await save('Deploys on Fridays', localEmbedder);
-    await t.deps.db
+    await t.db
       .insert(schema.botMemories)
       .values({ workspaceId, botId, kind: 'fact', content: 'From before sources' });
 
-    expect(await reembedMemories(t.deps, botId, tagged(OPENAI, 'local'))).toBe(0);
+    expect(await reembedMemories(t.ownerDeps, botId, tagged(OPENAI, 'local'))).toBe(0);
     expect((await sources())['Deploys on Fridays']).toBe('local');
 
-    expect(await reembedMemories(t.deps, botId, tagged(OPENAI))).toBe(2);
-    const rows = await t.deps.db.select().from(schema.botMemories);
+    expect(await reembedMemories(t.ownerDeps, botId, tagged(OPENAI))).toBe(2);
+    const rows = await t.db.select().from(schema.botMemories);
     expect(rows.every((m) => m.embeddingModel === OPENAI)).toBe(true);
     const legacy = rows.find((m) => m.content === 'From before sources')!;
     expect(legacy.embedding).toHaveLength(1536);
-    expect(await queueReembedIfStale(t.deps, botId, OPENAI)).toBe(false);
+    expect(await queueReembedIfStale(t.ownerDeps, botId, OPENAI)).toBe(false);
   });
 
   it('queues the re-embed from context assembly when the source changed', async () => {
@@ -107,16 +109,16 @@ describe('memory embedding sources', () => {
     await save('Deploys on Fridays', localEmbedder);
 
     // Still the old source: nothing is stale, nothing is queued.
-    await contextMemories(t.deps, botId, 'deploys', localEmbedder);
+    await contextMemories(t.ownerDeps, botId, 'deploys', localEmbedder);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(jobs).toEqual([]);
 
     // The Bot now embeds with OpenAI: its local memory is re-embedded in the background.
-    await contextMemories(t.deps, botId, 'deploys', tagged(OPENAI));
+    await contextMemories(t.ownerDeps, botId, 'deploys', tagged(OPENAI));
     for (let i = 0; i < 100 && (await sources())['Deploys on Fridays'] !== OPENAI; i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    expect(jobs).toEqual([{ botId, source: OPENAI }]);
+    expect(jobs).toEqual([{ botId, source: OPENAI, workspaceId: expect.any(String) }]);
     expect(await sources()).toEqual({ 'Deploys on Fridays': OPENAI });
   });
 

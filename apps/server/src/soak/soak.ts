@@ -121,7 +121,9 @@ export async function runSoak(options: SoakOptions): Promise<SoakReport> {
     OPENBOT_SIGNUP_MODE: 'open',
     ...(process.env.REDIS_URL ? { REDIS_URL: process.env.REDIS_URL } : {}),
   });
-  const { db, infra } = t.deps;
+  // The owner's handle for the harness's own reads; the app works under RLS.
+  const { db } = t;
+  const { infra } = t.deps;
   const unhook = registerRunHooks();
 
   const violations: string[] = [];
@@ -268,9 +270,12 @@ export async function runSoak(options: SoakOptions): Promise<SoakReport> {
     if (roll < routineRate + webhookRate) {
       // Recorded before scheduleRun publishes the run's first event.
       const trigger: RunTrigger = roll < routineRate ? 'routine' : 'webhook';
-      const row = await insertRun(db, { botId: bot.id, chatId: bot.chatId, trigger });
-      triggers.set(row.id, trigger);
-      await scheduleRun(t.deps, row, 'run');
+      // As a Routine or a webhook would, in the Bot's organization.
+      await t.inOrganization(async () => {
+        const row = await insertRun(t.deps.db, { botId: bot.id, chatId: bot.chatId, trigger });
+        triggers.set(row.id, trigger);
+        await scheduleRun(t.deps, row, 'run');
+      });
       return;
     }
     // Owner messages: the API starts a `message` run or steers the open one.

@@ -89,16 +89,13 @@ describe('a model without vision', () => {
     expect(said.status).toBe(201);
     const run = await vi.waitFor(
       async () => {
-        const [row] = await t.deps.db
-          .select()
-          .from(schema.runs)
-          .where(eq(schema.runs.botId, bot.id));
+        const [row] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
         expect(row?.status).toBe('completed');
         return row!;
       },
       { timeout: 5_000, interval: 10 },
     );
-    const steps = await t.deps.db
+    const steps = await t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, run.id))

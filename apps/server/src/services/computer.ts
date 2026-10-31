@@ -168,15 +168,16 @@ const REMOTE_TAKEN =
   'An administrator can set OPENBOT_COMPUTER_AGENT_SHARED=true to let every account share it, ' +
   'files and logins included.';
 
-const providers = new WeakMap<AppDeps, ComputerProvider | null>();
+// One provider per process: keyed by its config, which every deps of the process shares.
+const providers = new WeakMap<object, ComputerProvider | null>();
 
 /** Replaces the provider for one `AppDeps` (tests use a mocked dockerode or the fake agent). */
 export function setComputerProvider(deps: AppDeps, provider: ComputerProvider | null) {
-  providers.set(deps, provider);
+  providers.set(deps.config, provider);
 }
 
 export function computerProvider(deps: AppDeps): ComputerProvider | null {
-  if (!providers.has(deps)) {
+  if (!providers.has(deps.config)) {
     const { computerAgent, dockerHost } = deps.config;
     if (computerAgent?.shared) {
       deps.logger.warn(
@@ -184,7 +185,7 @@ export function computerProvider(deps: AppDeps): ComputerProvider | null {
       );
     }
     providers.set(
-      deps,
+      deps.config,
       computerAgent
         ? createRemoteProvider(computerAgent)
         : dockerHost
@@ -192,7 +193,7 @@ export function computerProvider(deps: AppDeps): ComputerProvider | null {
           : null,
     );
   }
-  return providers.get(deps) ?? null;
+  return providers.get(deps.config) ?? null;
 }
 
 export function computerAvailable(deps: AppDeps) {

@@ -44,7 +44,7 @@ async function signIn(t: TestApp, email: string) {
 async function join(t: TestApp, email: string, extra: Record<string, unknown> = {}) {
   const res = await createAccount(t, email, extra);
   if (!res.ok) return { res, cookie: undefined };
-  await t.deps.db
+  await t.db
     .update(schema.users)
     .set({ emailVerified: true })
     .where(eq(schema.users.email, email.toLowerCase()));
@@ -126,7 +126,7 @@ describe('organizations on the managed service', () => {
       workspace: { id: created.id, name: 'Fresh Co' },
     });
     expect((await call(cookie, 'GET', '/bots')).status).toBe(200);
-    const [row] = await t.deps.db
+    const [row] = await t.db
       .select()
       .from(schema.auditLog)
       .where(eq(schema.auditLog.targetId, created.id));
@@ -185,7 +185,7 @@ describe('organizations on the managed service', () => {
     expect((await call(eve, 'POST', `/invitations/${res.id}/accept`)).status).toBe(404);
 
     const { cookie: cy } = await join(t, 'cy@example.com');
-    await t.deps.db
+    await t.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(eq(schema.invites.id, res.id));
@@ -277,7 +277,7 @@ describe('organizations on the managed service', () => {
       await json(call(ada, 'PATCH', `/organization/members/${admin.id}`, { role: 'owner' })),
     ).toMatchObject({ role: 'owner' });
     await json(call(ada, 'PATCH', `/organization/members/${admin.id}`, { role: 'admin' }));
-    const roles = await t.deps.db
+    const roles = await t.db
       .select({ action: schema.auditLog.action })
       .from(schema.auditLog)
       .where(eq(schema.auditLog.action, 'member.role'));
@@ -354,7 +354,7 @@ describe('organizations on the managed service', () => {
     // The owner never sees a member's Bot, removed or not (U2).
     expect((await call(ada, 'GET', `/bots/${bot.id}`)).status).toBe(404);
     expect((await call(rex.cookie, 'POST', `/organizations/${acme}/activate`)).status).toBe(404);
-    const [stays] = await t.deps.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
+    const [stays] = await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
     expect(stays).toBeDefined();
   });
 
@@ -462,12 +462,12 @@ describe('sign-up by invitation only', () => {
     // A server call is held to the same policy.
     expect((await createAccount(t, 'friend@example.com', { invite: other.id })).status).toBe(400);
     // An expired one proves nothing.
-    await t.deps.db
+    await t.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(eq(schema.invites.id, invited.id));
     expect((await startSignUp(t, 'friend@example.com', invited.id)).res.status).toBe(400);
-    await t.deps.db
+    await t.db
       .update(schema.invites)
       .set({ expiresAt: new Date(Date.now() + 86_400_000) })
       .where(eq(schema.invites.id, invited.id));

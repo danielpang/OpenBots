@@ -6,6 +6,8 @@ import type { AppDeps } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, forbidden } from '../errors.js';
 import { computerProvider } from './computer.js';
+import { inWorkspace } from '../db/scope.js';
+import { ensureWorkspace } from '../workspace.js';
 
 // First run (plan 16.3, D1). An install needs setup until its first user
 // exists; that user becomes the admin (auth.ts), called the owner on a
@@ -39,7 +41,11 @@ export async function wizardRequired(deps: Pick<AppDeps, 'db' | 'config'>): Prom
     .where(eq(schema.users.email, LOCAL_OWNER_EMAIL))
     .limit(1);
   if (!localOwner) return false;
-  const [bot] = await db.select({ id: schema.bots.id }).from(schema.bots).limit(1);
+  // A self-hosted install's one organization (db/scope.ts).
+  const workspace = await ensureWorkspace(db);
+  const [bot] = await inWorkspace(workspace.id, () =>
+    db.select({ id: schema.bots.id }).from(schema.bots).limit(1),
+  );
   return !bot;
 }
 

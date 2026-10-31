@@ -26,6 +26,7 @@ import {
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel, type RunWorkerOptions } from './runs.js';
+import { inEveryOrganization } from '../workers.js';
 
 // Approvals end to end (plan 5.6, 18.3, P1, T5): the policy asks, the run
 // pauses with an approval widget and an `approvals` row, the "process" that
@@ -102,7 +103,7 @@ describe('approvals', () => {
 
   async function startProcess(): Promise<Process> {
     const infra = createInfra(t.deps.config);
-    const deps: AppDeps = { ...t.deps, infra };
+    const deps: AppDeps = { ...t.ownerDeps, infra };
     const events: WsEvent[] = [];
     await infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
     await infra.queue<RunJob>(RUNS_QUEUE).process(createRunWorker(deps, options()), {
@@ -115,7 +116,7 @@ describe('approvals', () => {
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
     cookie = (await t.signUp('dana@example.com')).cookie!;
-    const [user] = await t.deps.db.select().from(schema.users);
+    const [user] = await t.db.select().from(schema.users);
     ownerId = user!.id;
     unhook = registerRunHooks();
     proc = await startProcess();
@@ -157,7 +158,7 @@ describe('approvals', () => {
   };
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -182,7 +183,7 @@ describe('approvals', () => {
 
   const botMessages = async (chatId: string) =>
     (
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.messages)
         .where(eq(schema.messages.chatId, chatId))
@@ -190,17 +191,17 @@ describe('approvals', () => {
     ).filter((m) => m.authorType === 'bot' && !isGreeting(m));
 
   const approvalsOf = (runId: string) =>
-    t.deps.db.select().from(schema.approvals).where(eq(schema.approvals.runId, runId));
+    t.db.select().from(schema.approvals).where(eq(schema.approvals.runId, runId));
 
   const auditOf = (targetId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.auditLog)
       .where(eq(schema.auditLog.targetId, targetId))
       .orderBy(asc(schema.auditLog.createdAt));
 
   const stepsOf = (runId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runSteps)
       .where(eq(schema.runSteps.runId, runId))
@@ -327,7 +328,7 @@ describe('approvals', () => {
       ['approval.requested', bot.id],
       ['approval.approved', ownerId],
     ]);
-    const [widget] = await t.deps.db
+    const [widget] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, asked.id));
@@ -357,7 +358,7 @@ describe('approvals', () => {
       [{ text: 'Build directory removed.' }],
     ]);
     // Without the Bot's greeting, so the old message is the oldest one.
-    await t.deps.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
+    await t.db.delete(schema.messages).where(eq(schema.messages.chatId, bot.chatId));
     await say(bot, 'an old message the retry can drop');
     await settled(bot.id, 'completed');
     await say(bot, 'clean the build');
@@ -404,7 +405,7 @@ describe('approvals', () => {
       decidedBy: ownerId,
     });
     // The stored widget keeps who decided and when, so a reload still says "Denied by you".
-    const [stored] = await t.deps.db
+    const [stored] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, asked.id));
@@ -440,7 +441,7 @@ describe('approvals', () => {
       const [, job, options] = enqueue.mock.calls.find(
         ([, job]) => job.approvalId === approval.id,
       )!;
-      expect(job).toEqual({ approvalId: approval.id });
+      expect(job).toEqual({ approvalId: approval.id, workspaceId: approval.workspaceId });
       expect(options!.delayMs).toBeGreaterThan(4 * 60_000);
       expect(options!.delayMs).toBeLessThanOrEqual(5 * 60_000);
     } finally {
@@ -455,17 +456,17 @@ describe('approvals', () => {
     ]);
     // Not due yet: nothing happens.
     expect(await expireApproval(proc.deps, approval.id)).toBe(false);
-    await t.deps.db
+    await t.db
       .update(schema.approvals)
       .set({ expiresAt: new Date(Date.now() - 1_000) })
       .where(eq(schema.approvals.id, approval.id));
-    expect(await expireDueApprovals(proc.deps)).toBe(1);
+    expect(await inEveryOrganization(proc.deps, () => expireDueApprovals(proc.deps))).toBe(1);
 
     await settled(bot.id, 'completed');
     expect(ranFor('bash', command)).toEqual([]);
     expect(promptText(model.calls[1]!)).toContain('expired unanswered');
     expect((await approvalsOf(run.id))[0]).toMatchObject({ status: 'expired', decidedBy: null });
-    const [widget] = await t.deps.db
+    const [widget] = await t.db
       .select()
       .from(schema.widgetStates)
       .where(eq(schema.widgetStates.messageId, asked.id));
@@ -605,7 +606,7 @@ describe('approvals', () => {
     );
     expect(ranFor('send_email', 'Hello there')).toHaveLength(1);
     expect(promptText(model.calls[2]!)).toContain('"sent":true');
-    const steps = await t.deps.db
+    const steps = await t.db
       .select()
       .from(schema.runSteps)
       .where(

@@ -18,6 +18,7 @@ import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { useTestComputer, type TestComputer } from '../test-computer.js';
 import { createTestApp, isGreeting, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel, type RunWorkerOptions } from './runs.js';
+import { inEveryOrganization } from '../workers.js';
 
 // Sign-in requests end to end (K1, K8): a Bot calls request_login and waits.
 // Without a main Bot the login_request widget is in its own transcript. With
@@ -49,7 +50,7 @@ describe('request_login', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_SIGNUP_MODE: 'open' });
-    computer = await useTestComputer(t.deps);
+    computer = await useTestComputer(t.ownerDeps);
     cookie = (await t.signUp('dana@example.com')).cookie!;
     unhook.push(registerRunHooks(), registerLoginHooks());
     await t.deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
@@ -105,7 +106,7 @@ describe('request_login', () => {
   }
 
   const runsOf = (botId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.runs)
       .where(eq(schema.runs.botId, botId))
@@ -119,7 +120,7 @@ describe('request_login', () => {
     });
 
   const messagesIn = (chatId: string) =>
-    t.deps.db
+    t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.chatId, chatId))
@@ -138,7 +139,7 @@ describe('request_login', () => {
 
   const widgetState = async (messageId: string, partIndex: number) =>
     (
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.widgetStates)
         .where(
@@ -160,10 +161,7 @@ describe('request_login', () => {
   };
 
   async function pairChat(a: Bot, b: Bot) {
-    const chats = await t.deps.db
-      .select()
-      .from(schema.chats)
-      .where(eq(schema.chats.type, 'bot_to_bot'));
+    const chats = await t.db.select().from(schema.chats).where(eq(schema.chats.type, 'bot_to_bot'));
     return chats.find(
       (c) => [c.botId, c.peerBotId].includes(a.id) && [c.botId, c.peerBotId].includes(b.id),
     );
@@ -272,20 +270,20 @@ describe('request_login', () => {
     const expiresAt = Date.parse((stored!.state as { expires_at: string }).expires_at);
     expect(Math.abs(expiresAt - (Date.now() + approvalTtlMs(t.deps.config)))).toBeLessThan(60_000);
     // Not due yet: nothing happens.
-    expect(await expireLoginRequest(t.deps, target)).toBe(false);
-    expect(await expireDueLoginRequests(t.deps)).toBe(0);
+    expect(await expireLoginRequest(t.ownerDeps, target)).toBe(false);
+    expect(await inEveryOrganization(t.deps, () => expireDueLoginRequests(t.deps))).toBe(0);
 
     // A request stored before expiry was recorded falls due a TTL after its message.
-    await t.deps.db
+    await t.db
       .update(schema.widgetStates)
       .set({ state: { status: 'pending' } })
       .where(eq(schema.widgetStates.id, stored!.id));
-    expect(await expireDueLoginRequests(t.deps)).toBe(0);
-    await t.deps.db
+    expect(await inEveryOrganization(t.deps, () => expireDueLoginRequests(t.deps))).toBe(0);
+    await t.db
       .update(schema.messages)
       .set({ createdAt: new Date(Date.now() - approvalTtlMs(t.deps.config) - 1_000) })
       .where(eq(schema.messages.id, target.messageId));
-    expect(await expireDueLoginRequests(t.deps)).toBe(1);
+    expect(await inEveryOrganization(t.deps, () => expireDueLoginRequests(t.deps))).toBe(1);
 
     await runOf(bot.id, 'completed');
     expect(promptText(model.calls[1]!)).toContain('expired before the owner answered');
@@ -295,7 +293,7 @@ describe('request_login', () => {
     });
     await until(() => expect(lastState(bot.id)?.state).not.toBe('waiting'));
     expect((await answer(target.messageId, target.partIndex, 'done')).status).toBe(409);
-    expect(await expireLoginRequest(t.deps, target), 'once').toBe(false);
+    expect(await expireLoginRequest(t.ownerDeps, target), 'once').toBe(false);
     expect((await runsOf(bot.id)).map((r) => r.id)).toEqual([run.id]);
   });
 
@@ -463,12 +461,12 @@ describe('request_login', () => {
       expect(jobs[0]![2]!.delayMs).toBeLessThanOrEqual(approvalTtlMs(t.deps.config));
 
       const stored = await widgetState(target.messageId, target.partIndex);
-      await t.deps.db
+      await t.db
         .update(schema.widgetStates)
         .set({ state: { ...(stored!.state as object), expires_at: new Date(0).toISOString() } })
         .where(eq(schema.widgetStates.id, stored!.id));
       const seen = events.length;
-      expect(await expireDueLoginRequests(t.deps)).toBe(1);
+      expect(await inEveryOrganization(t.deps, () => expireDueLoginRequests(t.deps))).toBe(1);
 
       for (const { bot, model } of [first, second]) {
         await runOf(bot.id, 'completed');
@@ -545,15 +543,15 @@ describe('request_login', () => {
     )!;
     const posted = { messageId: request.message.id, partIndex: request.partIndex };
     // Still pending: nothing to do.
-    await resumeIfAnswered(t.deps, run.id, posted);
+    await resumeIfAnswered(t.ownerDeps, run.id, posted);
     expect((await runsOf(bot.id))[0]!.status).toBe('waiting');
 
     // Done landed while the run was still running, so it resumed nobody.
-    await t.deps.db
+    await t.db
       .update(schema.widgetStates)
       .set({ state: { status: 'signed_in', waiting: [] } })
       .where(eq(schema.widgetStates.messageId, request.message.id));
-    await resumeIfAnswered(t.deps, run.id, posted);
+    await resumeIfAnswered(t.ownerDeps, run.id, posted);
     await runOf(bot.id, 'completed');
   });
 

@@ -72,7 +72,14 @@ describe('.env.example', () => {
     expect(commands).toContain('openssl rand -base64 32');
     expect(install).toContain('openssl rand -hex 24');
     expect(commands).toContain('openssl rand -hex 24');
-    for (const name of ['OPENBOT_MASTER_KEY', 'POSTGRES_PASSWORD', 'DATABASE_URL', 'change-me']) {
+    expect(install).toContain('OPENBOT_DB_APP_PASSWORD');
+    for (const name of [
+      'OPENBOT_MASTER_KEY',
+      'POSTGRES_PASSWORD',
+      'DATABASE_URL',
+      'change-me',
+      'OPENBOT_DB_APP_PASSWORD',
+    ]) {
       expect(prose).toContain(name);
     }
   });

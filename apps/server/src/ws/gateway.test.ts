@@ -36,10 +36,10 @@ describe('WS gateway', () => {
 
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
-    const workspace = await ensureWorkspace(t.deps.db);
-    const users = await t.deps.db.select().from(schema.users);
+    const workspace = await ensureWorkspace(t.db);
+    const users = await t.db.select().from(schema.users);
     const idOf = (email: string) => users.find((u) => u.email === email)!.id;
-    const bots = await t.deps.db
+    const bots = await t.db
       .insert(schema.bots)
       .values([
         { workspaceId: workspace.id, ownerId: idOf('alice@example.com'), handle: 'a', name: 'A' },

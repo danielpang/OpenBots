@@ -559,7 +559,7 @@ describe('loadBuiltins', () => {
     });
   }
 
-  const bot = async () => (await t.deps.db.select().from(schema.bots)).find((b) => b.id === botId)!;
+  const bot = async () => (await t.db.select().from(schema.bots)).find((b) => b.id === botId)!;
   const tools = (builtins: BuiltinServices): Record<string, AnyAgentTool> =>
     toolsFor({ run: {}, memory: {}, builtins } as unknown as ToolContext);
 
@@ -570,10 +570,10 @@ describe('loadBuiltins', () => {
       else res.end('x'.repeat(20_000));
     });
     try {
-      expect((await loadBuiltins(t.deps, await bot())).maxPageChars).toBe(40_000);
-      const { config } = t.deps;
+      expect((await loadBuiltins(t.ownerDeps, await bot())).maxPageChars).toBe(40_000);
+      const { config } = t.ownerDeps;
       const deps = {
-        ...t.deps,
+        ...t.ownerDeps,
         config: {
           ...config,
           processLimits: {
@@ -600,7 +600,7 @@ describe('loadBuiltins', () => {
   });
 
   it('offers email and GitHub once their connectors exist, narrowed by the Bot', async () => {
-    let builtins = await loadBuiltins(t.deps, await bot());
+    let builtins = await loadBuiltins(t.ownerDeps, await bot());
     expect(builtins.httpAllowlist).toEqual(['api.example.com', '127.0.0.1']);
     expect(builtins.email).toBeNull();
     expect(builtins.webSearch).toBeNull();
@@ -625,7 +625,7 @@ describe('loadBuiltins', () => {
     });
     expect(res.status).toBe(201);
 
-    builtins = await loadBuiltins(t.deps, await bot());
+    builtins = await loadBuiltins(t.ownerDeps, await bot());
     expect(builtins.email).not.toBeNull();
     expect(builtins.webSearch).not.toBeNull();
     expect(builtins.connectors.github).toMatchObject({ id: github, name: 'GitHub (built-in)' });
@@ -655,7 +655,7 @@ describe('loadBuiltins', () => {
       ],
     });
     expect(res.status).toBe(200);
-    builtins = await loadBuiltins(t.deps, await bot());
+    builtins = await loadBuiltins(t.ownerDeps, await bot());
     const offered = tools(builtins);
     expect(offered.send_email).toBeDefined();
     expect(offered.read_inbox).toBeUndefined();
@@ -669,7 +669,7 @@ describe('loadBuiltins', () => {
   });
 
   it('refuses http_request hosts outside the allowlist and reaches only named private hosts', async () => {
-    const builtins = await loadBuiltins(t.deps, await bot());
+    const builtins = await loadBuiltins(t.ownerDeps, await bot());
     const tool = tools(builtins).http_request!;
     const ctx = { builtins } as unknown as ToolContext;
     await expect(
@@ -690,7 +690,7 @@ describe('loadBuiltins', () => {
   });
 
   it('holds web_fetch to the allowlist too (S-8)', async () => {
-    const builtins = await loadBuiltins(t.deps, await bot());
+    const builtins = await loadBuiltins(t.ownerDeps, await bot());
     const tool = tools(builtins).web_fetch!;
     const ctx = { builtins } as unknown as ToolContext;
     await expect(
@@ -700,9 +700,9 @@ describe('loadBuiltins', () => {
 
   it('attaches only chat attachments, never an Artifact blob, webhook body or avatar', async () => {
     const owner = await bot().then((b) => ({ id: b.ownerId, workspaceId: b.workspaceId }));
-    const builtins = await loadBuiltins(t.deps, await bot());
+    const builtins = await loadBuiltins(t.ownerDeps, await bot());
     for (const purpose of ['artifact', 'webhook_body', 'avatar'] as const) {
-      const stored = await storeFile(t.deps, owner, {
+      const stored = await storeFile(t.ownerDeps, owner, {
         name: `${purpose}.png`,
         bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         purpose,
@@ -721,7 +721,7 @@ describe('loadBuiltins', () => {
     });
     expect(res.status).toBe(201);
     const file = (await res.json()) as { id: string };
-    const builtins = await loadBuiltins(t.deps, await bot());
+    const builtins = await loadBuiltins(t.ownerDeps, await bot());
     expect(await builtins.file(file.id)).toEqual({
       file_id: file.id,
       name: 'notes.txt',
@@ -737,7 +737,7 @@ describe('loadBuiltins', () => {
   it('leaves out every built-in an admin blocks, and refuses calls blocked mid-run (T3, U3)', async () => {
     const policy = (body: object) =>
       call('PUT', '/connector-policy', { catalogIds: [], urlPatterns: [], ...body });
-    const offered = async () => Object.keys(tools(await loadBuiltins(t.deps, await bot())));
+    const offered = async () => Object.keys(tools(await loadBuiltins(t.ownerDeps, await bot())));
     try {
       expect(await offered()).toEqual(
         expect.arrayContaining(['web_search', 'web_fetch', 'http_request', 'attach_file']),
@@ -753,7 +753,7 @@ describe('loadBuiltins', () => {
       expect((await policy({ catalogIds: [], allowedCatalogIds: ['github_builtin'] })).status).toBe(
         200,
       );
-      const builtins = await loadBuiltins(t.deps, await bot());
+      const builtins = await loadBuiltins(t.ownerDeps, await bot());
       names = Object.keys(tools(builtins));
       for (const name of ['web_search', 'web_fetch', 'http_request', 'send_email', 'read_inbox']) {
         expect(names).not.toContain(name);
@@ -765,7 +765,7 @@ describe('loadBuiltins', () => {
 
       // A block made after the run loaded its tools refuses the call.
       expect((await policy({ allowedCatalogIds: [] })).status).toBe(200);
-      const loaded = await loadBuiltins(t.deps, await bot());
+      const loaded = await loadBuiltins(t.ownerDeps, await bot());
       const fetchTool = tools(loaded).web_fetch!;
       expect((await policy({ catalogIds: ['web_fetch'] })).status).toBe(200);
       await expect(
@@ -782,7 +782,7 @@ describe('loadBuiltins', () => {
   });
 
   it('reads the inbox through the configured reader', async () => {
-    const builtins = await loadBuiltins(t.deps, await bot(), {
+    const builtins = await loadBuiltins(t.ownerDeps, await bot(), {
       email: {
         readInbox: async (settings, query) => [
           {

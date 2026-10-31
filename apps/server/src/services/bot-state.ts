@@ -21,6 +21,8 @@ export interface SettleJob {
   botId: string;
   /** The run that finished; a later run's state is left alone. */
   runId: string | null;
+  /** Its organization, where it runs (infra/index.ts). */
+  workspaceId?: string;
 }
 
 export interface SetStateOptions {
@@ -47,7 +49,11 @@ export async function setState(
   if (state === 'done') {
     await deps.infra
       .queue<SettleJob>(BOT_STATE_QUEUE)
-      .enqueue('settle', { botId, runId }, { delayMs: DONE_SETTLE_MS });
+      .enqueue(
+        'settle',
+        { botId, runId, workspaceId: row.workspaceId },
+        { delayMs: DONE_SETTLE_MS },
+      );
   }
   return row;
 }

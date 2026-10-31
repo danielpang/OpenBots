@@ -31,10 +31,10 @@ describe('ownership', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
-    const users = await t.deps.db.select().from(schema.users);
+    const users = await t.db.select().from(schema.users);
     aliceId = users.find((u) => u.email === 'alice@example.com')!.id;
     bobId = users.find((u) => u.email === 'bob@example.com')!.id;
-    workspaceId = (await ensureWorkspace(t.deps.db)).id;
+    workspaceId = (await ensureWorkspace(t.db)).id;
   });
   afterAll(() => t.close());
 
@@ -55,7 +55,7 @@ describe('ownership', () => {
     ownerId: string,
     { mime = 'image/png', purpose = 'avatar' }: { mime?: string; purpose?: FilePurpose } = {},
   ) => {
-    const [file] = await t.deps.db
+    const [file] = await t.db
       .insert(schema.files)
       .values({
         workspaceId,
@@ -72,7 +72,7 @@ describe('ownership', () => {
   };
 
   const providerOf = async (ownerId: string | null) => {
-    const [provider] = await t.deps.db
+    const [provider] = await t.db
       .insert(schema.providers)
       .values({
         workspaceId,
@@ -106,10 +106,7 @@ describe('ownership', () => {
       expect((await call(alice, 'PATCH', `/bots/${bot.id}`, { avatar: avatar(bobs) })).status).toBe(
         404,
       );
-      const [unchanged] = await t.deps.db
-        .select()
-        .from(schema.bots)
-        .where(eq(schema.bots.id, bot.id));
+      const [unchanged] = await t.db.select().from(schema.bots).where(eq(schema.bots.id, bot.id));
       expect(unchanged!.avatar).toEqual(bot.avatar);
 
       const patched = await call(alice, 'PATCH', `/bots/${bot.id}`, { avatar: avatar(own) });
@@ -243,7 +240,7 @@ describe('ownership', () => {
 
   /** A Bot message in `bot`'s transcript with the given parts, from a run. */
   const botMessage = async (bot: Bot, parts: unknown[]) => {
-    const { db } = t.deps;
+    const { db } = t;
     const run = await insertRun(db, { botId: bot.id, chatId: bot.chatId, trigger: 'message' });
     const [message] = await db.transaction(async (tx) =>
       tx
@@ -264,7 +261,7 @@ describe('ownership', () => {
   it('refuses another user’s approval decision', async () => {
     const bot = await newBot(alice, 'Asker');
     const { run, message } = await botMessage(bot, []);
-    const [approval] = await t.deps.db
+    const [approval] = await t.db
       .insert(schema.approvals)
       .values({ workspaceId, runId: run.id, messageId: message.id, toolName: 'bash', args: {} })
       .returning();
@@ -273,7 +270,7 @@ describe('ownership', () => {
         (await call(bob, 'POST', `/approvals/${approval!.id}/decide`, { decision })).status,
       ).toBe(404);
     }
-    const [after] = await t.deps.db
+    const [after] = await t.db
       .select()
       .from(schema.approvals)
       .where(eq(schema.approvals.id, approval!.id));
@@ -293,10 +290,7 @@ describe('ownership', () => {
     const answer = { action: { type: 'answer', option_id: 'a' } };
     expect((await call(bob, 'POST', path, answer)).status).toBe(404);
     const states = () =>
-      t.deps.db
-        .select()
-        .from(schema.widgetStates)
-        .where(eq(schema.widgetStates.messageId, message.id));
+      t.db.select().from(schema.widgetStates).where(eq(schema.widgetStates.messageId, message.id));
     expect(await states()).toEqual([]);
 
     expect((await call(alice, 'POST', path, answer)).status).toBe(200);
@@ -315,7 +309,7 @@ describe('ownership', () => {
     ).json()) as { id: string };
     const members = async () =>
       (
-        await t.deps.db
+        await t.db
           .select({ botId: schema.chatMembers.memberId })
           .from(schema.chatMembers)
           .where(eq(schema.chatMembers.chatId, group.id))
@@ -347,7 +341,7 @@ describe('ownership', () => {
     expect((await call(bob, 'DELETE', `${path}?emoji=${encodeURIComponent('👍')}`)).status).toBe(
       404,
     );
-    const rows = await t.deps.db
+    const rows = await t.db
       .select({ emoji: schema.reactions.emoji, reactorId: schema.reactions.reactorId })
       .from(schema.reactions)
       .where(eq(schema.reactions.messageId, message.id));

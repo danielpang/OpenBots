@@ -28,7 +28,7 @@ describe('chats and messages', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
-    aliceId = (await t.deps.db.select().from(schema.users)).find(
+    aliceId = (await t.db.select().from(schema.users)).find(
       (u) => u.email === 'alice@example.com',
     )!.id;
     ada = (await (await call(alice, 'POST', '/bots', { name: 'Ada' })).json()) as typeof ada;
@@ -72,7 +72,7 @@ describe('chats and messages', () => {
     });
 
     it('creates the transcript when it is missing', async () => {
-      const { db } = t.deps;
+      const { db } = t;
       const workspace = await ensureWorkspace(db);
       const [bot] = await db
         .insert(schema.bots)
@@ -86,7 +86,7 @@ describe('chats and messages', () => {
     });
 
     it('clears a blocked Bot back to idle', async () => {
-      await setState(t.deps, ada.id, 'blocked');
+      await setState(t.ownerDeps, ada.id, 'blocked');
       await call(alice, 'GET', `/bots/${ada.id}/chat`);
       const state = (await (await call(alice, 'GET', `/bots/${ada.id}/state`)).json()) as {
         state: string;
@@ -172,7 +172,7 @@ describe('chats and messages', () => {
     });
 
     it('attaches images and files as parts and references a Skill', async () => {
-      const { db } = t.deps;
+      const { db } = t;
       const workspace = await ensureWorkspace(db);
       const [image, doc] = await db
         .insert(schema.files)
@@ -223,7 +223,7 @@ describe('chats and messages', () => {
     });
 
     it('references only a Skill one of the chat Bots has enabled with / (S2)', async () => {
-      const { db } = t.deps;
+      const { db } = t;
       const workspace = await ensureWorkspace(db);
       const insert = async (slug: string) =>
         (
@@ -261,7 +261,7 @@ describe('chats and messages', () => {
     });
 
     it('attaches only chat attachments and records the chat each was first sent in', async () => {
-      const { db } = t.deps;
+      const { db } = t;
       const workspace = await ensureWorkspace(db);
       const file = (
         name: string,
@@ -305,7 +305,7 @@ describe('chats and messages', () => {
       );
       const seqs = results.map((m) => m.seq).sort((a, b) => a - b);
       expect(seqs).toEqual(Array.from({ length: 20 }, (_, i) => chat.lastSeq + i + 1));
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select({ chatSeq: schema.chats.chatSeq })
         .from(schema.chats)
         .where(eq(schema.chats.id, chat.id));
@@ -318,8 +318,8 @@ describe('chats and messages', () => {
     let root: Message;
 
     beforeAll(async () => {
-      const workspace = await ensureWorkspace(t.deps.db);
-      const [chat] = await t.deps.db
+      const workspace = await ensureWorkspace(t.db);
+      const [chat] = await t.db
         .insert(schema.chats)
         .values({ workspaceId: workspace.id, ownerId: aliceId, type: 'group', title: 'Team' })
         .returning();
@@ -419,7 +419,7 @@ describe('chats and messages', () => {
       expect(
         (await call(alice, 'DELETE', `${path}?emoji=${encodeURIComponent('👍')}`)).status,
       ).toBe(204);
-      const rows = await t.deps.db
+      const rows = await t.db
         .select()
         .from(schema.reactions)
         .where(eq(schema.reactions.messageId, message.id));

@@ -14,6 +14,7 @@ import {
 } from '../services/computer.js';
 import { useTestComputer, type TestComputer } from '../test-computer.js';
 import { createTestApp, type TestApp } from '../test-app.js';
+import { inEveryOrganization } from '../workers.js';
 
 describe('computer API', () => {
   let t: TestApp;
@@ -25,11 +26,11 @@ describe('computer API', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
-    computer = await useTestComputer(t.deps);
+    computer = await useTestComputer(t.ownerDeps);
     dana = (await t.signUp('dana@example.com')).cookie!;
     eve = (await t.signUp('eve@example.com')).cookie!;
     danaId = (
-      await t.deps.db.select().from(schema.users).where(eq(schema.users.email, 'dana@example.com'))
+      await t.db.select().from(schema.users).where(eq(schema.users.email, 'dana@example.com'))
     )[0]!.id;
     await t.deps.infra.bus.subscribe<WsEvent>(EVENTS_CHANNEL, (e) => events.push(e));
   });
@@ -85,7 +86,7 @@ describe('computer API', () => {
     expect(JSON.stringify(created)).not.toContain(computer.agent.token);
     expect(computer.docker.calls.some((c) => c.op === 'putArchive')).toBe(true);
 
-    const [row] = await t.deps.db
+    const [row] = await t.db
       .select()
       .from(schema.computers)
       .where(eq(schema.computers.ownerId, danaId));
@@ -239,22 +240,22 @@ describe('computer API', () => {
     expect((await call(eve, 'POST', '/computer/stop')).status).toBe(404);
 
     await call(dana, 'POST', '/computer/start');
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
-    const [row] = await t.deps.db
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
+    const [row] = await t.db
       .select()
       .from(schema.computers)
       .where(eq(schema.computers.ownerId, danaId));
-    await t.deps.db
+    await t.db
       .update(schema.computers)
       .set({ alwaysOn: true, lastUsedAt: new Date(0) })
       .where(eq(schema.computers.id, row!.id));
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
-    await t.deps.db
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
+    await t.db
       .update(schema.computers)
       .set({ alwaysOn: false })
       .where(eq(schema.computers.id, row!.id));
-    expect(await sweepIdleComputers(t.deps)).toBe(1);
-    const [after] = await t.deps.db
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(1);
+    const [after] = await t.db
       .select()
       .from(schema.computers)
       .where(eq(schema.computers.id, row!.id));
@@ -264,7 +265,7 @@ describe('computer API', () => {
   });
 
   it('audits create, start, stop, takeover and release (S-11)', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const [row] = await db
       .select()
       .from(schema.computers)
@@ -300,7 +301,7 @@ describe('computer API', () => {
   });
 
   it('retries a failed idle stop on later sweeps, backing off (plan 9.5)', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const rowOf = async () =>
       (await db.select().from(schema.computers).where(eq(schema.computers.ownerId, danaId)))[0]!;
     await call(dana, 'POST', '/computer/start');
@@ -314,7 +315,8 @@ describe('computer API', () => {
       attempts++;
       throw new Error('daemon busy');
     };
-    const sweep = (at: number) => sweepIdleComputers(t.deps, new Date(at));
+    const sweep = (at: number) =>
+      inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps, new Date(at)));
     const now = Date.now();
     const seen = events.length;
     try {
@@ -366,7 +368,7 @@ describe('computer API', () => {
   });
 
   it('drops a pending idle stop retry when the computer starts again', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     await call(dana, 'POST', '/computer/start');
     const [row] = await db
       .select()
@@ -379,7 +381,7 @@ describe('computer API', () => {
     const stop = computer.provider.stop;
     computer.provider.stop = () => Promise.reject(new Error('daemon busy'));
     try {
-      expect(await sweepIdleComputers(t.deps)).toBe(0);
+      expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
     } finally {
       computer.provider.stop = stop;
     }
@@ -391,12 +393,12 @@ describe('computer API', () => {
     expect(started).toMatchObject({ status: 'running' });
     expect(started!.spec).not.toHaveProperty('idleStopRetry');
     // Used just now: a sweep leaves it running.
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
     await call(dana, 'POST', '/computer/stop');
   });
 
   it('does not start a stopped computer to list, download or upload files', async () => {
-    const [row] = await t.deps.db
+    const [row] = await t.db
       .select()
       .from(schema.computers)
       .where(eq(schema.computers.ownerId, danaId));
@@ -417,7 +419,7 @@ describe('computer API', () => {
   });
 
   it("stops a deleted Bot's screen and hands its display on fresh (B7, K2)", async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const newBot = async (name: string) =>
       (
         (await (await call(dana, 'POST', '/bots', JSON.stringify({ name }))).json()) as {
@@ -466,9 +468,7 @@ describe('computer API', () => {
     const made = creates().length;
     const volumes = new Set(computer.docker.volumes);
     const computerRow = async () =>
-      (
-        await t.deps.db.select().from(schema.computers).where(eq(schema.computers.ownerId, danaId))
-      )[0]!;
+      (await t.db.select().from(schema.computers).where(eq(schema.computers.ownerId, danaId)))[0]!;
     expect((await computerRow()).status).toBe('stopped');
 
     // Unchanged settings: started as it is.
@@ -505,9 +505,8 @@ describe('computer API', () => {
     const creates = () => computer.docker.calls.filter((c) => c.op === 'createContainer');
     const volumes = new Set(computer.docker.volumes);
     const specOf = async () =>
-      (
-        await t.deps.db.select().from(schema.computers).where(eq(schema.computers.ownerId, danaId))
-      )[0]!.spec as Record<string, unknown>;
+      (await t.db.select().from(schema.computers).where(eq(schema.computers.ownerId, danaId)))[0]!
+        .spec as Record<string, unknown>;
     // Made on the default network, and recorded so.
     expect(await specOf()).toMatchObject({ network: 'openbot-sandbox' });
     const made = creates().length;
@@ -589,12 +588,12 @@ describe('computer API', () => {
       expect(imageOf(-1)).toBe('ghcr.io/danielpang/openbot/computer:9.9.9');
       expect(statusesSince(seen)).toEqual(['updating', 'stopped', 'starting', 'running']);
       expect(computer.docker.volumes).toEqual(volumes);
-      const [row] = await t.deps.db
+      const [row] = await t.db
         .select()
         .from(schema.computers)
         .where(eq(schema.computers.ownerId, danaId));
       expect(row!.spec).toMatchObject({ image: 'ghcr.io/danielpang/openbot/computer:9.9.9' });
-      const [audit] = await t.deps.db
+      const [audit] = await t.db
         .select()
         .from(schema.auditLog)
         .where(eq(schema.auditLog.action, 'computer.create'))
@@ -622,7 +621,7 @@ describe('computer API', () => {
     await call(dana, 'POST', '/computer/start');
     await call(dana, 'POST', '/computer/stop');
     const made = creates().length;
-    await refreshSandboxImage(t.deps);
+    await refreshSandboxImage(t.ownerDeps);
     expect(computer.docker.calls.at(-1)).toEqual({ op: 'pull', args: [image] });
     // Nothing moved: started as it is.
     expect((await call(dana, 'POST', '/computer/start')).status).toBe(200);
@@ -642,7 +641,7 @@ describe('computer API', () => {
   });
 
   it('never stops a computer for idleness while the owner has a screen, and a stop hands it back (K3)', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const bot = (await (
       await call(dana, 'POST', '/bots', JSON.stringify({ name: 'Held' }))
     ).json()) as { id: string };
@@ -661,9 +660,9 @@ describe('computer API', () => {
     expect((await control('take')).status).toBe(200);
     await idle();
     // A long sign-in on the screen: the computer stays on.
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
     expect((await control('release')).status).toBe(200);
-    expect(await sweepIdleComputers(t.deps)).toBe(1);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(1);
 
     // Stopped while held: the takeover ends and the Bot is told it has the screen back.
     expect((await control('take')).status).toBe(200);
@@ -683,7 +682,7 @@ describe('computer API', () => {
   });
 
   it('lets the owner keep the computer on or change its idle timeout (plan 9.5)', async () => {
-    const { db } = t.deps;
+    const { db } = t;
     const settings = (cookie: string, body: unknown) =>
       call(cookie, 'PATCH', '/computer', JSON.stringify(body));
     expect((await settings(eve, { alwaysOn: true })).status, 'no computer yet').toBe(404);
@@ -706,17 +705,17 @@ describe('computer API', () => {
     expect(await saved.json()).toMatchObject({ idleTimeoutMin: 120, alwaysOn: false });
     // Unused for an hour: under the new timeout, it stays on.
     await usedAgo(60);
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
 
     expect(await (await settings(dana, { alwaysOn: true })).json()).toMatchObject({
       alwaysOn: true,
       idleTimeoutMin: 120,
     });
     await usedAgo(24 * 60);
-    expect(await sweepIdleComputers(t.deps)).toBe(0);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(0);
 
     await settings(dana, { alwaysOn: false, idleTimeoutMin: 30 });
-    expect(await sweepIdleComputers(t.deps)).toBe(1);
+    expect(await inEveryOrganization(t.deps, () => sweepIdleComputers(t.deps))).toBe(1);
     expect(await (await call(dana, 'GET', '/computer')).json()).toMatchObject({
       computer: { status: 'stopped', alwaysOn: false, idleTimeoutMin: 30 },
     });
@@ -787,7 +786,7 @@ describe('computer API', () => {
       OPENBOT_SIGNUP_MODE: 'open',
     });
     try {
-      setComputerProvider(other.deps, null);
+      setComputerProvider(other.ownerDeps, null);
       const cookie = (await other.signUp('solo@example.com')).cookie!;
       const req = (method: string, path: string) =>
         other.app.request(`/api/v1${path}`, { method, headers: { cookie } });
@@ -817,7 +816,10 @@ describe('the remote computer (plan 9.2)', () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
     agent = await startFakeAgent({ token: 'remote-token' });
     t.deps.config.computerAgent = { url: agent.url, token: 'remote-token', shared: false };
-    setComputerProvider(t.deps, createRemoteProvider({ url: agent.url, token: 'remote-token' }));
+    setComputerProvider(
+      t.ownerDeps,
+      createRemoteProvider({ url: agent.url, token: 'remote-token' }),
+    );
     dana = (await t.signUp('dana@example.com')).cookie!;
     eve = (await t.signUp('eve@example.com')).cookie!;
   });
@@ -858,7 +860,7 @@ describe('the remote computer (plan 9.2)', () => {
       (await call(eve, 'POST', `/bots/${bot.id}/screen/control`, { action: 'take' })).status,
     ).toBe(503);
     expect((await call(eve, 'GET', '/computer/files')).status).toBe(409);
-    const rows = await t.deps.db.select().from(schema.computers);
+    const rows = await t.db.select().from(schema.computers);
     expect(rows).toHaveLength(1);
     // Dana's screen was never handed to anyone else.
     expect(agent.calls.filter((c) => c.path === '/screens' && c.method === 'POST')).toEqual([

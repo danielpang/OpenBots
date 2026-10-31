@@ -11,6 +11,7 @@ import { recordAudit } from '@openbot/server/services/audit';
 import { ac, roles } from './access.js';
 import { invitationProof, UUID } from './invitations.js';
 import { signUpAllowed, inviteRequired } from './sign-up.js';
+import { asDirectory, inWorkspace } from '@openbot/server/db/scope';
 
 // better-auth on the managed service (plan 21.5): the organization plugin,
 // mapped onto the core's tables, and the policy the core leaves to this
@@ -182,29 +183,32 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
                 const proof = ctx ? acceptOnCreate.get(ctx) : undefined;
                 if (!proof || !ctx) return;
                 acceptOnCreate.delete(ctx);
-                await db.transaction(async (tx) => {
-                  // Once: only a pending invitation turns accepted.
-                  const [accepted] = await tx
-                    .update(schema.invites)
-                    .set({ status: 'accepted' })
-                    .where(
-                      and(eq(schema.invites.id, proof.id), eq(schema.invites.status, 'pending')),
-                    )
-                    .returning({ id: schema.invites.id });
-                  if (!accepted) return;
-                  await tx
-                    .insert(schema.workspaceMembers)
-                    .values({ workspaceId: proof.workspaceId, userId: user.id, role: proof.role })
-                    .onConflictDoNothing();
-                  await recordAudit(tx, {
-                    workspaceId: proof.workspaceId,
-                    actor: { type: 'user', id: user.id },
-                    action: 'invitation.accept',
-                    targetType: 'invite',
-                    targetId: proof.id,
-                    metadata: { role: proof.role, via: 'oauth' },
-                  });
-                });
+                // In the invitation's organization (db/scope.ts).
+                await inWorkspace(proof.workspaceId, () =>
+                  db.transaction(async (tx) => {
+                    // Once: only a pending invitation turns accepted.
+                    const [accepted] = await tx
+                      .update(schema.invites)
+                      .set({ status: 'accepted' })
+                      .where(
+                        and(eq(schema.invites.id, proof.id), eq(schema.invites.status, 'pending')),
+                      )
+                      .returning({ id: schema.invites.id });
+                    if (!accepted) return;
+                    await tx
+                      .insert(schema.workspaceMembers)
+                      .values({ workspaceId: proof.workspaceId, userId: user.id, role: proof.role })
+                      .onConflictDoNothing();
+                    await recordAudit(tx, {
+                      workspaceId: proof.workspaceId,
+                      actor: { type: 'user', id: user.id },
+                      action: 'invitation.accept',
+                      targetType: 'invite',
+                      targetId: proof.id,
+                      metadata: { role: proof.role, via: 'oauth' },
+                    });
+                  }),
+                );
               },
             },
           },
@@ -214,17 +218,20 @@ export function managedPolicyPlugin({ config, db }: ExtensionContext): BetterAut
                 const named = (session as { activeOrganizationId?: string | null })
                   .activeOrganizationId;
                 if (named) return;
-                const [latest] = await db
-                  .select({ workspaceId: schema.workspaceMembers.workspaceId })
-                  .from(schema.workspaceMembers)
-                  .where(
-                    and(
-                      eq(schema.workspaceMembers.userId, session.userId),
-                      isNull(schema.workspaceMembers.suspendedAt),
-                    ),
-                  )
-                  .orderBy(desc(schema.workspaceMembers.createdAt))
-                  .limit(1);
+                // Across organizations: the directory's to say (db/scope.ts).
+                const [latest] = await asDirectory(() =>
+                  db
+                    .select({ workspaceId: schema.workspaceMembers.workspaceId })
+                    .from(schema.workspaceMembers)
+                    .where(
+                      and(
+                        eq(schema.workspaceMembers.userId, session.userId),
+                        isNull(schema.workspaceMembers.suspendedAt),
+                      ),
+                    )
+                    .orderBy(desc(schema.workspaceMembers.createdAt))
+                    .limit(1),
+                );
                 if (!latest) return;
                 return { data: { ...session, activeOrganizationId: latest.workspaceId } };
               },

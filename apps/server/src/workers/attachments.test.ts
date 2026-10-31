@@ -56,7 +56,7 @@ describe('attachments in a run', () => {
 
   beforeAll(async () => {
     t = await createTestApp({ OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' });
-    computer = await useTestComputer(t.deps);
+    computer = await useTestComputer(t.ownerDeps);
     cookie = (await t.signUp('dana@example.com')).cookie!;
     other = (await t.signUp('mallory@example.com')).cookie!;
     unhook = registerRunHooks();
@@ -127,7 +127,7 @@ describe('attachments in a run', () => {
 
   const completed = (botId: string, count = 1) =>
     until(async () => {
-      const runs = await t.deps.db
+      const runs = await t.db
         .select()
         .from(schema.runs)
         .where(eq(schema.runs.botId, botId))
@@ -138,7 +138,7 @@ describe('attachments in a run', () => {
 
   const resultsOf = async (runId: string) =>
     (
-      await t.deps.db
+      await t.db
         .select()
         .from(schema.messages)
         .where(eq(schema.messages.runId, runId))
@@ -237,11 +237,8 @@ describe('attachments in a run', () => {
     ]);
     // Another user's file cannot be attached through the API, so a message
     // naming it is written directly, as a forged or stale part would be.
-    const [chat] = await t.deps.db
-      .select()
-      .from(schema.chats)
-      .where(eq(schema.chats.id, bot.chatId));
-    await t.deps.db.transaction((tx) =>
+    const [chat] = await t.db.select().from(schema.chats).where(eq(schema.chats.id, bot.chatId));
+    await t.db.transaction((tx) =>
       storeMessage(tx, chat!, {
         authorType: 'user',
         authorId: chat!.ownerId,
@@ -265,8 +262,8 @@ describe('attachments in a run', () => {
     const text = promptText(model.calls[0]!);
     expect(text).not.toContain('<attachment name=');
     expect(text).toContain(`file ${theirs.id}); not shown here`);
-    expect(await chatAttachment(t.deps.db, chat!, theirs.id)).toBeNull();
-    expect(await chatAttachment(t.deps.db, chat!, mine.id)).toBeNull();
+    expect(await chatAttachment(t.db, chat!, theirs.id)).toBeNull();
+    expect(await chatAttachment(t.db, chat!, mine.id)).toBeNull();
   });
 
   it("passes another Bot's attachment in a group the same way (C9)", async () => {

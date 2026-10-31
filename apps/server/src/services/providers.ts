@@ -35,6 +35,7 @@ import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secrets.js';
 import { ensureWorkspace, getOrganization, storedSettings, updateSettings } from '../workspace.js';
+import { inWorkspace } from '../db/scope.js';
 
 // Model providers (plan 4.10, 5.9; L1 to L5). Built-ins are seeded from `.env`
 // at start; custom endpoints come from Settings > Models. Instance-level rows
@@ -388,8 +389,17 @@ export async function seedProvidersFromEnv(
     );
     return;
   }
-  // The implicit organization of a self-hosted install.
+  // The implicit organization of a self-hosted install, and the work in it (db/scope.ts).
   const workspace = await ensureWorkspace(deps.db);
+  await inWorkspace(workspace.id, () => seedInto(deps, workspace.id, specs));
+}
+
+async function seedInto(
+  deps: Pick<AppDeps, 'db' | 'config' | 'logger'>,
+  workspaceId: string,
+  specs: ReturnType<typeof seedSpecs>,
+): Promise<void> {
+  const workspace = { id: workspaceId };
   for (const spec of specs) {
     const preset = presetById(spec.presetId)!;
     await deps.db.transaction(async (tx) => {

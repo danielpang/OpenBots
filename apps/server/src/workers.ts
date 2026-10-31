@@ -1,5 +1,6 @@
 import type { JobHandler } from '@openbot/shared';
 import type { AppDeps } from './context.js';
+import { forEachWorkspace } from './db/scope.js';
 import {
   EVENT_DELIVERIES_QUEUE,
   eventDeliveryHandler,
@@ -41,20 +42,32 @@ export const JOB_HANDLERS: Record<
   [MEMORIES_QUEUE]: { handler: (deps) => reembedHandler(deps) as JobHandler, concurrency: 2 },
 };
 
+/**
+ * Work for every organization (db/scope.ts): `fn` runs in each one's scope
+ * in turn, and the counts add up.
+ */
+export async function inEveryOrganization(
+  deps: Pick<AppDeps, 'db'>,
+  fn: () => Promise<number>,
+): Promise<number> {
+  const counts = await forEachWorkspace(deps.db, fn);
+  return counts.reduce((sum, n) => sum + n, 0);
+}
+
 /** Background work for the `worker` and `all` roles (queues, scheduler). */
 export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<void> }> {
   const { infra, logger } = deps;
   // In-process queues cannot outlive the process, so its running runs are queued again.
   if (infra.kind === 'memory') {
-    const recovered = await recoverInterruptedRuns(deps);
+    const recovered = await inEveryOrganization(deps, () => recoverInterruptedRuns(deps));
     if (recovered) logger.warn({ runs: recovered }, 'took over runs interrupted by a restart');
-    const requeued = await requeuePendingEventDeliveries(deps);
+    const requeued = await inEveryOrganization(deps, () => requeuePendingEventDeliveries(deps));
     if (requeued) logger.info({ deliveries: requeued }, 'requeued pending event deliveries');
   }
   // Requests that came due while no worker was up, or whose in-memory job was lost.
-  const expired = await expireDueApprovals(deps);
+  const expired = await inEveryOrganization(deps, () => expireDueApprovals(deps));
   if (expired) logger.info({ approvals: expired }, 'expired overdue approval requests');
-  const logins = await expireDueLoginRequests(deps);
+  const logins = await inEveryOrganization(deps, () => expireDueLoginRequests(deps));
   if (logins) logger.info({ logins }, 'expired overdue sign-in requests');
   for (const [name, { handler, concurrency }] of Object.entries(JOB_HANDLERS)) {
     await infra.queue(name).process(handler(deps), {
@@ -66,7 +79,7 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
   void refreshSandboxImage(deps);
   // Idle computers stop after their timeout (plan 9.5); the home volume stays.
   const sweep = setInterval(() => {
-    sweepIdleComputers(deps).then(
+    inEveryOrganization(deps, () => sweepIdleComputers(deps)).then(
       (stopped) => stopped && logger.info({ computers: stopped }, 'stopped idle computers'),
       (err: unknown) => logger.error({ err }, 'idle computer sweep failed'),
     );
@@ -74,7 +87,7 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
   sweep.unref();
   // Audit rows past the workspace's retention (default 180 days, S-11); now and hourly.
   const trimAudit = () =>
-    trimAuditLog(deps).then(
+    inEveryOrganization(deps, () => trimAuditLog(deps)).then(
       (trimmed) => trimmed && logger.info({ rows: trimmed }, 'trimmed the audit log'),
       (err: unknown) => logger.error({ err }, 'audit log trim failed'),
     );

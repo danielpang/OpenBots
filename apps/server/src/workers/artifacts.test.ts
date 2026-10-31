@@ -79,14 +79,14 @@ describe('artifact tools in a run', () => {
 
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Write up Q3' });
     const run = await until(async () => {
-      const [row] = await t.deps.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+      const [row] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
       expect(row?.status).toBe('completed');
       return row!;
     });
     await unsubscribe();
 
     // Cards in the run's message, after each tool result.
-    const [reply] = await t.deps.db
+    const [reply] = await t.db
       .select()
       .from(schema.messages)
       .where(eq(schema.messages.runId, run.id))
@@ -130,7 +130,7 @@ describe('artifact tools in a run', () => {
 
     // Activity labels in the log.
     const steps = await until(async () => {
-      const rows = await t.deps.db
+      const rows = await t.db
         .select()
         .from(schema.runSteps)
         .where(eq(schema.runSteps.runId, run.id))

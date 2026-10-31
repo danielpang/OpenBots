@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
+import { asDirectory, inWorkspace, withScope } from './db/scope.js';
 import { problem } from './errors.js';
 import type { RateLimiter } from './infra/rate-limit.js';
 import type { Logger } from './logger.js';
@@ -144,7 +145,12 @@ export function createAuth({
     basePath: '/api/auth',
     secret: authSecret(config.masterKey),
     trustedOrigins: [origin],
-    database: drizzleAdapter(db, { provider: 'pg', schema, usePlural: true }),
+    // better-auth's own queries are the directory's (db/scope.ts).
+    database: drizzleAdapter(withScope(db, { directory: true }), {
+      provider: 'pg',
+      schema,
+      usePlural: true,
+    }),
     emailAndPassword: { enabled: true },
     account: { encryptOAuthTokens: true },
     socialProviders: {
@@ -194,27 +200,29 @@ export function createAuth({
           },
           after: async (user) => {
             if (!selfHosted()) return;
-            const joined = await db.transaction(async (tx) => {
-              await lockWorkspace(tx);
-              const workspace = await ensureWorkspace(tx);
-              const [owner] = await tx
-                .select({ id: schema.workspaceMembers.id })
-                .from(schema.workspaceMembers)
-                .where(
-                  and(
-                    eq(schema.workspaceMembers.workspaceId, workspace.id),
-                    eq(schema.workspaceMembers.role, 'owner'),
-                  ),
-                )
-                .limit(1);
-              // Two first signups can both pass `before`; under the lock only
-              // the first becomes the owner.
-              if (owner) return false;
-              await tx
-                .insert(schema.workspaceMembers)
-                .values({ workspaceId: workspace.id, userId: user.id, role: 'owner' });
-              return true;
-            });
+            const workspace = await ensureWorkspace(db);
+            const joined = await inWorkspace(workspace.id, () =>
+              db.transaction(async (tx) => {
+                await lockWorkspace(tx);
+                const [owner] = await tx
+                  .select({ id: schema.workspaceMembers.id })
+                  .from(schema.workspaceMembers)
+                  .where(
+                    and(
+                      eq(schema.workspaceMembers.workspaceId, workspace.id),
+                      eq(schema.workspaceMembers.role, 'owner'),
+                    ),
+                  )
+                  .limit(1);
+                // Two first signups can both pass `before`; under the lock only
+                // the first becomes the owner.
+                if (owner) return false;
+                await tx
+                  .insert(schema.workspaceMembers)
+                  .values({ workspaceId: workspace.id, userId: user.id, role: 'owner' });
+                return true;
+              }),
+            );
             if (!joined) {
               await db.delete(schema.users).where(eq(schema.users.id, user.id));
               throw signupClosed();
@@ -229,15 +237,17 @@ export function createAuth({
             if (config.localToken && ctx?.path !== LOCAL_SESSION_PATH) throw localOnly();
             if (!selfHosted()) return;
             const workspace = await ensureWorkspace(db);
-            const [member] = await db
-              .select({ role: schema.workspaceMembers.role })
-              .from(schema.workspaceMembers)
-              .where(
-                and(
-                  eq(schema.workspaceMembers.userId, session.userId),
-                  eq(schema.workspaceMembers.workspaceId, workspace.id),
+            const [member] = await inWorkspace(workspace.id, () =>
+              db
+                .select({ role: schema.workspaceMembers.role })
+                .from(schema.workspaceMembers)
+                .where(
+                  and(
+                    eq(schema.workspaceMembers.userId, session.userId),
+                    eq(schema.workspaceMembers.workspaceId, workspace.id),
+                  ),
                 ),
-              );
+            );
             if (member && member.role !== 'owner') {
               throw new APIError('FORBIDDEN', {
                 code: 'NOT_OWNER',
@@ -323,17 +333,19 @@ const SIGN_IN_EMAIL = '/api/auth/sign-in/email';
 /** The owner of the implicit organization (a self-hosted install has only them). */
 async function findOwner(db: Db): Promise<string | undefined> {
   const workspace = await ensureWorkspace(db);
-  const [owner] = await db
-    .select({ id: schema.workspaceMembers.userId })
-    .from(schema.workspaceMembers)
-    .where(
-      and(
-        eq(schema.workspaceMembers.workspaceId, workspace.id),
-        eq(schema.workspaceMembers.role, 'owner'),
-      ),
-    )
-    .orderBy(asc(schema.workspaceMembers.createdAt))
-    .limit(1);
+  const [owner] = await inWorkspace(workspace.id, () =>
+    db
+      .select({ id: schema.workspaceMembers.userId })
+      .from(schema.workspaceMembers)
+      .where(
+        and(
+          eq(schema.workspaceMembers.workspaceId, workspace.id),
+          eq(schema.workspaceMembers.role, 'owner'),
+        ),
+      )
+      .orderBy(asc(schema.workspaceMembers.createdAt))
+      .limit(1),
+  );
   return owner?.id;
 }
 
@@ -398,10 +410,13 @@ async function auditOrganizations(
   if (config.deployment === 'self_hosted') return [(await ensureWorkspace(db)).id];
   if (activeOrganizationId) return [activeOrganizationId];
   if (!userId) return [];
-  const rows = await db
-    .select({ id: schema.workspaceMembers.workspaceId })
-    .from(schema.workspaceMembers)
-    .where(eq(schema.workspaceMembers.userId, userId));
+  // Every organization of one account: the directory's to say.
+  const rows = await asDirectory(() =>
+    db
+      .select({ id: schema.workspaceMembers.workspaceId })
+      .from(schema.workspaceMembers)
+      .where(eq(schema.workspaceMembers.userId, userId)),
+  );
   return rows.map((r) => r.id);
 }
 
@@ -414,14 +429,16 @@ async function auditAuth(
   metadata: Record<string, unknown>,
 ) {
   for (const workspaceId of await auditOrganizations(db, config, userId, activeOrganizationId)) {
-    await recordAudit(db, {
-      workspaceId,
-      actor: { type: 'user', id: userId },
-      action,
-      targetType: 'user',
-      targetId: userId,
-      metadata,
-    });
+    await inWorkspace(workspaceId, () =>
+      recordAudit(db, {
+        workspaceId,
+        actor: { type: 'user', id: userId },
+        action,
+        targetType: 'user',
+        targetId: userId,
+        metadata,
+      }),
+    );
   }
 }
 
@@ -444,14 +461,16 @@ async function auditFailedSignIn(
         .where(eq(schema.users.email, email))
     : [];
   for (const workspaceId of await auditOrganizations(db, config, user?.id ?? null, null)) {
-    await recordAudit(db, {
-      workspaceId,
-      actor: { type: 'user', id: user?.id ?? null },
-      action: 'auth.sign_in_failed',
-      targetType: 'user',
-      targetId: user?.id ?? null,
-      metadata: { email, ip, status },
-    });
+    await inWorkspace(workspaceId, () =>
+      recordAudit(db, {
+        workspaceId,
+        actor: { type: 'user', id: user?.id ?? null },
+        action: 'auth.sign_in_failed',
+        targetType: 'user',
+        targetId: user?.id ?? null,
+        metadata: { email, ip, status },
+      }),
+    );
   }
 }
 

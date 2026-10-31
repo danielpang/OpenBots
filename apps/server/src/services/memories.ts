@@ -218,6 +218,8 @@ export interface ReembedJob {
   botId: string;
   /** The source the Bot's memories should have; a job for an old source does nothing. */
   source: string;
+  /** Its organization, where it runs (infra/index.ts). */
+  workspaceId?: string;
 }
 
 const staleFor = (botId: string, source: string) =>
@@ -233,7 +235,7 @@ export async function queueReembedIfStale(
   source: string,
 ): Promise<boolean> {
   const [stale] = await deps.db
-    .select({ id: schema.botMemories.id })
+    .select({ id: schema.botMemories.id, workspaceId: schema.botMemories.workspaceId })
     .from(schema.botMemories)
     .where(staleFor(botId, source))
     .limit(1);
@@ -242,7 +244,7 @@ export async function queueReembedIfStale(
     .queue<ReembedJob>(MEMORIES_QUEUE)
     .enqueue(
       'reembed',
-      { botId, source },
+      { botId, source, workspaceId: stale.workspaceId },
       { groupKey: `reembed:${botId}`, priority: PRIORITY.background },
     );
   return true;

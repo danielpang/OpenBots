@@ -294,7 +294,7 @@ describe('POST /api/v1/local/session on an install from before local mode', () =
     const config = { ...t.deps.config, localToken: TOKEN };
     const auth = createAuth({
       config,
-      db: t.deps.db,
+      db: t.db,
       logger: t.deps.logger,
       limiter: t.deps.infra.limiter,
       rateLimit: false,
