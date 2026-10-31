@@ -46,9 +46,7 @@ describe('email sign-up', () => {
   it('explains a wrong, expired or spent code', () => {
     expect(authErrorMessage(new ApiError(400, { code: 'INVALID_OTP' }))).toMatch(/wrong/);
     expect(authErrorMessage(new ApiError(400, { code: 'OTP_EXPIRED' }))).toMatch(/expired/);
-    expect(authErrorMessage(new ApiError(429, { code: 'TOO_MANY_ATTEMPTS' }))).toMatch(
-      /Too many tries/,
-    );
+    expect(authErrorMessage(new ApiError(400, { code: 'TOO_MANY_ATTEMPTS' }))).toMatch(/new code/);
   });
 });
 

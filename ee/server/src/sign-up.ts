@@ -14,6 +14,7 @@ import { and, count, eq } from 'drizzle-orm';
 import type { ExtensionContext } from '@openbot/server';
 import type { Config } from '@openbot/server/config';
 import { schema, type Db } from '@openbot/server/db/client';
+import { CLIENT_IP_HEADER } from '@openbot/server/client-ip';
 import { parseMasterKey } from '@openbot/server/secrets';
 import {
   emailEnabled,
@@ -35,14 +36,17 @@ import { invitationProof } from './invitations.js';
 // 2. POST /api/auth/sign-up/verify {code}: the code of this request, once.
 // 3. POST /api/auth/sign-up/complete {name, password}: creates the account,
 //    confirmed, and signs in. An unconfirmed account from before this flow
-//    is taken over instead, in one transaction: new name and password, and
-//    its sessions end.
+//    is deleted first, in the same transaction, with everything tied to it
+//    (its sign-in methods, sessions, memberships, invitations and API keys),
+//    so nothing linked to it keeps access.
 //
 // Nothing an unauthenticated request does deletes or replaces an account.
-// Limits come before any work: 5 sends an hour per address (429), and per
-// IP through better-auth's limiter; verify attempts count per address, 10
-// an hour, whatever new codes are sent. Codes last 10 minutes, are stored
-// as an HMAC bound to their request, and compared in constant time. A code
+// Limits: per IP before anything else; per address (10 sends an hour) only
+// for a request that passed the policy checks, before anything is made or
+// sent; 5 tries per code, after which that code is dead. Nobody can spend
+// another person's tries, and guessing stays bounded: 5 tries times 10 codes
+// an hour against a million codes. Codes last 10 minutes, are stored as an
+// HMAC bound to their request, and compared in constant time. A code
 // reaches a log only on a development server without email that sets
 // OPENBOT_DEV_LOG_EMAIL_LINKS (refused in production). The invite of
 // /sign-up?invite=<id> travels with the request; invite mode checks it at
@@ -50,10 +54,14 @@ import { invitationProof } from './invitations.js';
 
 export const CODE_LENGTH = 6;
 export const CODE_MINUTES = 10;
+/** Tries per code; then the code is dead. */
+export const CODE_TRIES = 5;
 /** Codes (or notices) one address may be sent in an hour. */
-export const SENDS_PER_HOUR = 5;
-/** Code attempts one address may make in an hour, across its codes. */
-export const TRIES_PER_HOUR = 10;
+export const SENDS_PER_HOUR = 10;
+/** Sign-ups one IP may start in an hour. */
+export const STARTS_PER_IP = 20;
+/** Code tries one IP may make in an hour. */
+export const TRIES_PER_IP = 50;
 export const SIGN_UP_COOKIE = 'openbot_sign_up';
 const COOKIE_PATH = '/api/auth/sign-up';
 
@@ -62,6 +70,8 @@ interface Pending {
   /** HMAC of the code, null once used or when the address has an account. */
   mac: string | null;
   invite: string | null;
+  /** Tries so far; at CODE_TRIES the code is dead. */
+  tries: number;
   confirmed: boolean;
 }
 
@@ -96,6 +106,14 @@ const invalidCode = () =>
   new APIError('BAD_REQUEST', { code: 'INVALID_OTP', message: 'That code is wrong' });
 const expired = () =>
   new APIError('BAD_REQUEST', { code: 'OTP_EXPIRED', message: 'That code expired' });
+const dead = () =>
+  new APIError('BAD_REQUEST', {
+    code: 'TOO_MANY_ATTEMPTS',
+    message: 'Too many tries. Send a new code',
+  });
+
+/** The caller's address, as the server's edge saw it; none for a call without a socket. */
+const ipOf = (request: Request | undefined) => request?.headers.get(CLIENT_IP_HEADER) ?? null;
 
 /** Invite mode lets in the first user and someone with a pending invitation for the address. */
 export async function signUpAllowed(
@@ -170,8 +188,24 @@ export function signUpPlugin(
           body: z.object({ email: z.email().max(254), invite: z.string().max(64).optional() }),
         },
         async (ctx) => {
+          const ip = ipOf(ctx.request);
+          if (ip) {
+            const starts = await infra.limiter.consume(`sign-up-ip:${ip}`, {
+              window: 3600,
+              max: STARTS_PER_IP,
+            });
+            if (!starts.allowed) {
+              throw tooMany(
+                'TOO_MANY_REQUESTS',
+                'Too many sign-ups. Try again later',
+                starts.retryAfter,
+              );
+            }
+          }
           const address = ctx.body.email.trim().toLowerCase();
-          // Before anything is made or sent.
+          const invite = ctx.body.invite ?? null;
+          if (!(await signUpAllowed(config, db, address, invite))) throw inviteRequired();
+          // Counted against the address only now, and before anything is made or sent.
           const sends = await infra.limiter.consume(`sign-up-send:${address}`, {
             window: 3600,
             max: SENDS_PER_HOUR,
@@ -179,8 +213,6 @@ export function signUpPlugin(
           if (!sends.allowed) {
             throw tooMany('TOO_MANY_CODES', 'Too many codes for this email', sends.retryAfter);
           }
-          const invite = ctx.body.invite ?? null;
-          if (!(await signUpAllowed(config, db, address, invite))) throw inviteRequired();
           const [user] = await db
             .select({ verified: schema.users.emailVerified })
             .from(schema.users)
@@ -193,6 +225,7 @@ export function signUpPlugin(
             email: address,
             mac: code ? codeMac(config, identifier, code) : null,
             invite,
+            tries: 0,
             confirmed: false,
           };
           await db.insert(schema.verifications).values({
@@ -212,28 +245,37 @@ export function signUpPlugin(
         async (ctx) => {
           const { row, identifier, pending } = await pendingOf(ctx.getCookie(SIGN_UP_COOKIE));
           if (pending.confirmed) return ctx.json({ confirmed: true });
-          // Counted per address before comparing, and not reset by a new code.
-          const tries = await infra.limiter.consume(`sign-up-try:${pending.email}`, {
-            window: 3600,
-            max: TRIES_PER_HOUR,
-          });
-          if (!tries.allowed) {
-            throw tooMany('TOO_MANY_ATTEMPTS', 'Too many tries. Try again later', tries.retryAfter);
+          const ip = ipOf(ctx.request);
+          if (ip) {
+            const tries = await infra.limiter.consume(`sign-up-try-ip:${ip}`, {
+              window: 3600,
+              max: TRIES_PER_IP,
+            });
+            if (!tries.allowed) {
+              throw tooMany(
+                'TOO_MANY_REQUESTS',
+                'Too many tries. Try again later',
+                tries.retryAfter,
+              );
+            }
           }
-          if (!pending.mac || !sameMac(codeMac(config, identifier, ctx.body.code), pending.mac)) {
-            throw invalidCode();
-          }
-          // Once: only the row as read turns confirmed.
-          const [used] = await db
-            .update(schema.verifications)
-            .set({
-              value: JSON.stringify({ ...pending, mac: null, confirmed: true } satisfies Pending),
-              expiresAt: new Date(Date.now() + CODE_MINUTES * 60_000),
-            })
-            .where(
-              and(eq(schema.verifications.id, row.id), eq(schema.verifications.value, row.value)),
-            )
-            .returning({ id: schema.verifications.id });
+          if (pending.tries >= CODE_TRIES) throw dead();
+          // The try counts before the comparison, once: only the row as read is updated.
+          const counted: Pending = { ...pending, tries: pending.tries + 1 };
+          const tried = await swap(db, row.id, row.value, counted);
+          if (!tried) throw invalidCode();
+          const right =
+            pending.mac !== null &&
+            sameMac(codeMac(config, identifier, ctx.body.code), pending.mac);
+          if (!right) throw counted.tries >= CODE_TRIES ? dead() : invalidCode();
+          // Used once: the code is gone, and the request is confirmed.
+          const used = await swap(
+            db,
+            row.id,
+            tried,
+            { ...counted, mac: null, confirmed: true },
+            true,
+          );
           if (!used) throw invalidCode();
           return ctx.json({ confirmed: true });
         },
@@ -281,32 +323,7 @@ export function signUpPlugin(
           if (!taken) throw invalidCode();
 
           const hash = await ctx.context.password.hash(password);
-          const [existing] = await db
-            .select({ id: schema.users.id, verified: schema.users.emailVerified })
-            .from(schema.users)
-            .where(eq(schema.users.email, pending.email));
-          let userId: string;
-          if (existing?.verified) {
-            throw new APIError('BAD_REQUEST', {
-              code: 'ACCOUNT_EXISTS',
-              message: 'This email has an account. Sign in instead',
-            });
-          } else if (existing) {
-            userId = existing.id;
-            await takeOver(db, userId, ctx.body.name, hash);
-          } else {
-            const user = await ctx.context.internalAdapter.createUser(
-              { email: pending.email, name: ctx.body.name, emailVerified: true },
-              { method: 'email-code' },
-            );
-            userId = user.id;
-            await ctx.context.internalAdapter.linkAccount({
-              userId,
-              providerId: 'credential',
-              accountId: userId,
-              password: hash,
-            });
-          }
+          const userId = await createConfirmed(db, pending.email, ctx.body.name, hash);
           const user = await ctx.context.internalAdapter.findUserById(userId);
           if (!user) throw invalidCode();
           const session = await ctx.context.internalAdapter.createSession(userId);
@@ -319,24 +336,74 @@ export function signUpPlugin(
   };
 }
 
+/** Replaces the row as read with `next`; the new value, or null when it changed meanwhile. */
+async function swap(db: Db, id: string, value: string, next: Pending, renew = false) {
+  const text = JSON.stringify(next);
+  const [row] = await db
+    .update(schema.verifications)
+    .set({
+      value: text,
+      ...(renew ? { expiresAt: new Date(Date.now() + CODE_MINUTES * 60_000) } : {}),
+    })
+    .where(and(eq(schema.verifications.id, id), eq(schema.verifications.value, value)))
+    .returning({ id: schema.verifications.id });
+  return row ? text : null;
+}
+
+/** Postgres's foreign key violation, from postgres.js or PGlite. */
+function foreignKeyViolation(error: unknown): boolean {
+  for (let e: unknown = error; e && typeof e === 'object'; e = (e as { cause?: unknown }).cause) {
+    if ((e as { code?: unknown }).code === '23503') return true;
+  }
+  return false;
+}
+
 /**
- * An unconfirmed account from before this flow, now confirmed by whoever
- * holds its inbox: their name and password, and its old sessions end.
+ * The account, confirmed, with its password, in one transaction. An
+ * unconfirmed account with the address, left from before this flow, is
+ * deleted first with everything tied to it: sign-in methods (a linked
+ * GitHub or Google identity too), sessions, memberships, invitations it
+ * sent and API keys all cascade. Should it own anything else, nothing
+ * changes and the sign-up is refused.
  */
-async function takeOver(db: Db, userId: string, name: string, hash: string) {
-  await db.transaction(async (tx) => {
-    const [user] = await tx
-      .update(schema.users)
-      .set({ name, emailVerified: true, updatedAt: new Date() })
-      .where(and(eq(schema.users.id, userId), eq(schema.users.emailVerified, false)))
-      .returning({ id: schema.users.id });
-    if (!user) throw invalidCode();
-    await tx
-      .delete(schema.accounts)
-      .where(and(eq(schema.accounts.userId, userId), eq(schema.accounts.providerId, 'credential')));
-    await tx
-      .insert(schema.accounts)
-      .values({ userId, providerId: 'credential', accountId: userId, password: hash });
-    await tx.delete(schema.sessions).where(eq(schema.sessions.userId, userId));
-  });
+async function createConfirmed(db: Db, email: string, name: string, hash: string) {
+  try {
+    return await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({ id: schema.users.id, verified: schema.users.emailVerified })
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .for('update');
+      if (existing?.verified) {
+        throw new APIError('BAD_REQUEST', {
+          code: 'ACCOUNT_EXISTS',
+          message: 'This email has an account. Sign in instead',
+        });
+      }
+      if (existing) {
+        await tx
+          .delete(schema.users)
+          .where(and(eq(schema.users.id, existing.id), eq(schema.users.emailVerified, false)));
+      }
+      const [user] = await tx
+        .insert(schema.users)
+        .values({ email, name, emailVerified: true })
+        .returning({ id: schema.users.id });
+      await tx
+        .insert(schema.accounts)
+        .values({
+          userId: user!.id,
+          providerId: 'credential',
+          accountId: user!.id,
+          password: hash,
+        });
+      return user!.id;
+    });
+  } catch (error) {
+    if (!foreignKeyViolation(error)) throw error;
+    throw new APIError('BAD_REQUEST', {
+      code: 'ACCOUNT_IN_USE',
+      message: 'This email cannot sign up here. Contact support',
+    });
+  }
 }

@@ -5,10 +5,11 @@ import { schema } from '@openbot/server/db/client';
 import { createTestApp, type TestApp } from '@openbot/server/test-app';
 import { emailFromEnv, managedExtensions } from './index.js';
 import { readInviteCookie, signInviteCookie } from './plugin.js';
-import { SENDS_PER_HOUR, TRIES_PER_HOUR } from './sign-up.js';
+import { CODE_TRIES, SENDS_PER_HOUR, STARTS_PER_IP, TRIES_PER_IP } from './sign-up.js';
 import {
   PASSWORD,
   completeSignUp,
+  cookieOf,
   createAccount,
   emailTo,
   mailbox,
@@ -132,12 +133,27 @@ describe('email sign-up', () => {
     expect(await t.deps.db.select().from(schema.accounts)).toEqual(credentials);
   });
 
-  it('lets whoever holds the inbox take over an unconfirmed account, ending its sessions', async () => {
+  it('deletes a leftover unconfirmed account with everything tied to it, once the code is in', async () => {
     await createAccount(t, 'legacy@example.com', { name: 'Squatter', password: 'squatter pass' });
-    const [user] = await userRows(t, 'legacy@example.com');
+    const [old] = await userRows(t, 'legacy@example.com');
+    // What someone may have tied to it: a GitHub identity, a session, a
+    // membership and an invitation they sent.
+    const org = await t.createOrganization('Squat Co');
+    await t.addMember(old!.id, org);
+    await t.deps.db.insert(schema.accounts).values({
+      userId: old!.id,
+      providerId: 'github',
+      accountId: 'gh-squatter',
+    });
     await t.deps.db.insert(schema.sessions).values({
-      userId: user!.id,
+      userId: old!.id,
       token: randomUUID(),
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    await t.deps.db.insert(schema.invites).values({
+      workspaceId: org,
+      email: 'friend@example.com',
+      inviterId: old!.id,
       expiresAt: new Date(Date.now() + 86_400_000),
     });
     // Unusable until confirmed.
@@ -145,15 +161,27 @@ describe('email sign-up', () => {
     expect(early.status).toBe(403);
     expect(await early.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
 
-    const done = await signUpByEmail(t, mail, 'legacy@example.com', { name: 'Lee' });
-    expect(done.res.status).toBe(200);
+    // Starting a sign-up changes nothing; confirming it replaces the account.
+    const start = await startSignUp(t, 'legacy@example.com');
+    expect(await userRows(t, 'legacy@example.com')).toEqual([old]);
+    expect((await verifyCode(t, start.request, mail.code('legacy@example.com')!)).status).toBe(200);
+    const done = await completeSignUp(t, start.request, { name: 'Lee' });
+    expect(done.status).toBe(200);
     const [now] = await userRows(t, 'legacy@example.com');
-    expect(now).toMatchObject({ id: user!.id, name: 'Lee', emailVerified: true });
-    const sessions = await t.deps.db
-      .select()
-      .from(schema.sessions)
-      .where(eq(schema.sessions.userId, user!.id));
-    expect(sessions).toHaveLength(1); // the new one only
+    expect(now).toMatchObject({ name: 'Lee', emailVerified: true });
+    expect(now!.id).not.toBe(old!.id);
+    for (const table of [schema.accounts, schema.sessions] as const) {
+      expect(await t.deps.db.select().from(table).where(eq(table.userId, old!.id))).toEqual([]);
+    }
+    expect(
+      await t.deps.db
+        .select()
+        .from(schema.workspaceMembers)
+        .where(eq(schema.workspaceMembers.userId, old!.id)),
+    ).toEqual([]);
+    expect(
+      await t.deps.db.select().from(schema.invites).where(eq(schema.invites.inviterId, old!.id)),
+    ).toEqual([]);
     expect((await signIn(t, 'legacy@example.com', 'squatter pass')).status).toBe(401);
     expect((await signIn(t, 'legacy@example.com')).status).toBe(200);
   });
@@ -201,18 +229,31 @@ describe('email sign-up', () => {
     expect(mail.sent.length).toBe(sent);
   });
 
-  it('counts code attempts per address, across new codes', async () => {
-    let start = await startSignUp(t, 'guess@example.com');
-    for (let i = 0; i < TRIES_PER_HOUR; i++) {
-      if (i === TRIES_PER_HOUR / 2) start = await startSignUp(t, 'guess@example.com');
-      const code = mail.code('guess@example.com')!;
-      expect((await verifyCode(t, start.request, wrong(code))).status).toBe(400);
+  it('kills a code after 5 tries', async () => {
+    const start = await startSignUp(t, 'guess@example.com');
+    const code = mail.code('guess@example.com')!;
+    for (let i = 1; i < CODE_TRIES; i++) {
+      const res = await verifyCode(t, start.request, wrong(code));
+      expect(await res.json()).toMatchObject({ code: 'INVALID_OTP' });
     }
-    // A new code, and the right one: still refused until the window passes.
-    const last = await startSignUp(t, 'guess@example.com');
-    const res = await verifyCode(t, last.request, mail.code('guess@example.com')!);
-    expect(res.status).toBe(429);
-    expect(await res.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
+    const last = await verifyCode(t, start.request, wrong(code));
+    expect(await last.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
+    // Dead: the right code no longer works, and a new one does.
+    const late = await verifyCode(t, start.request, code);
+    expect(late.status).toBe(400);
+    expect(await late.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
+    const again = await startSignUp(t, 'guess@example.com');
+    expect((await verifyCode(t, again.request, mail.code('guess@example.com')!)).status).toBe(200);
+  });
+
+  it("lets nobody spend another request's tries", async () => {
+    const victim = await startSignUp(t, 'kim@example.com');
+    const victimCode = mail.code('kim@example.com')!;
+    const attacker = await startSignUp(t, 'kim@example.com');
+    for (let i = 0; i < CODE_TRIES + 2; i++) {
+      await verifyCode(t, attacker.request, wrong(victimCode));
+    }
+    expect((await verifyCode(t, victim.request, victimCode)).status).toBe(200);
   });
 
   it('needs the request a code was sent for', async () => {
@@ -221,6 +262,61 @@ describe('email sign-up', () => {
     expect(res.status).toBe(400);
     const forged = await verifyCode(t, 'openbot_sign_up=forged', mail.code('bound@example.com')!);
     expect(forged.status).toBe(400);
+  });
+
+  it('limits sign-ups and tries per IP', async () => {
+    const app = await managedApp(emailTo(mail));
+    try {
+      const fromIp = (ip: string, path: string, body: unknown, cookie?: string) =>
+        app.app.request(
+          path,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              origin: 'http://localhost:3000',
+              ...(cookie ? { cookie } : {}),
+            },
+            body: JSON.stringify(body),
+          },
+          { incoming: { socket: { remoteAddress: ip } } },
+        );
+      for (let i = 0; i < STARTS_PER_IP; i++) {
+        const res = await fromIp('203.0.113.7', '/api/auth/sign-up/start', {
+          email: `ip${i}@example.com`,
+        });
+        expect(res.status).toBe(200);
+      }
+      const over = await fromIp('203.0.113.7', '/api/auth/sign-up/start', {
+        email: 'one-more@example.com',
+      });
+      expect(over.status).toBe(429);
+      expect(Number(over.headers.get('x-retry-after'))).toBeGreaterThan(0);
+      const other = await fromIp('203.0.113.8', '/api/auth/sign-up/start', {
+        email: 'elsewhere@example.com',
+      });
+      expect(other.status).toBe(200);
+
+      // Tries, across requests.
+      let statuses: number[] = [];
+      for (let i = 0; i < TRIES_PER_IP + 1; i++) {
+        const start = await fromIp(`10.1.${i}.1`, '/api/auth/sign-up/start', {
+          email: `try${i}@example.com`,
+        });
+        const request = cookieOf(start, 'openbot_sign_up');
+        const res = await fromIp(
+          '198.51.100.1',
+          '/api/auth/sign-up/verify',
+          { code: '000000' },
+          request,
+        );
+        statuses = [...statuses, res.status];
+      }
+      expect(statuses.at(-1)).toBe(429);
+      expect(statuses.slice(0, TRIES_PER_IP).every((s) => s === 400)).toBe(true);
+    } finally {
+      await app.close();
+    }
   });
 
   it("serves none of better-auth's own email sign-up or verification links", async () => {
@@ -441,6 +537,16 @@ describe('a GitHub sign-up from an invite link', () => {
     ).toEqual([]);
     const [row] = await t.deps.db.select().from(schema.invites).where(eq(schema.invites.id, id));
     expect(row!.status).toBe('pending');
+  });
+
+  it('counts only sign-ups that pass the policy against the address', async () => {
+    for (let i = 0; i < SENDS_PER_HOUR + 2; i++) {
+      const refused = await startSignUp(t, 'outsider@example.com');
+      expect(refused.res.status).toBe(400);
+      expect(await refused.res.json()).toMatchObject({ code: 'INVITE_REQUIRED' });
+    }
+    const id = await invite('outsider@example.com');
+    expect((await startSignUp(t, 'outsider@example.com', id)).res.status).toBe(200);
   });
 
   it('signs its cookie and keeps it for 10 minutes', () => {
