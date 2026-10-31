@@ -43,7 +43,7 @@ export function createApp(deps: AppDeps, { webDist = WEB_DIST }: AppOptions = {}
       {
         requestId: c.var.requestId,
         method: c.req.method,
-        path: redactPath(c.req.path),
+        path: (deps.extensions?.redactPath ?? ((p: string) => p))(redactPath(c.req.path)),
         status: c.res.status,
         durationMs: Math.round((performance.now() - started) * 10) / 10,
       },

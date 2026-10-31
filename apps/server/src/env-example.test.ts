@@ -26,7 +26,7 @@ const COMPOSE_VARS = [
 ];
 
 /** Read by the managed build (ee/server), not by the core server. */
-const MANAGED_VARS = ['RESEND_API_KEY', 'OPENBOT_EMAIL_FROM'];
+const MANAGED_VARS = ['RESEND_API_KEY', 'OPENBOT_EMAIL_FROM', 'OPENBOT_DEV_LOG_EMAIL_LINKS'];
 
 describe('.env.example', () => {
   const example = parseEnv(readFileSync(EXAMPLE, 'utf8'));

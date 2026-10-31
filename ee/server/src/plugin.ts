@@ -5,7 +5,7 @@ import { and, count, desc, eq, gt, isNull } from 'drizzle-orm';
 import type { ExtensionContext } from '@openbot/server';
 import { schema, type Db } from '@openbot/server/db/client';
 import { ac, roles } from './access.js';
-import { sendVerificationEmail, type EmailOptions } from './email.js';
+import { emailEnabled, errorText, sendVerificationEmail, type EmailOptions } from './email.js';
 
 // better-auth on the managed service (plan 21.5): the organization plugin,
 // mapped onto the core's tables, and the policy the core leaves to this
@@ -113,11 +113,17 @@ export function managedPolicyPlugin(
           autoSignInAfterVerification: true,
           expiresIn: 24 * 3600,
           sendVerificationEmail: async ({ user, url }) => {
-            const sent = await sendVerificationEmail(email, { to: user.email, link: url }, (err) =>
-              logger.warn({ err, userId: user.id }, 'verification email failed'),
+            // The link is a credential: it never reaches a log, except on a
+            // development server that sends no email and asked for it
+            // (OPENBOT_DEV_LOG_EMAIL_LINKS, refused in production).
+            if (!emailEnabled(email)) {
+              if (email.logLinks) logger.info({ userId: user.id, url }, 'email verification link');
+              else logger.warn({ userId: user.id }, 'email verification not sent: no email set up');
+              return;
+            }
+            await sendVerificationEmail(email, { to: user.email, link: url }, (err) =>
+              logger.warn({ err: errorText(err), userId: user.id }, 'verification email failed'),
             );
-            // Without email the link is in the log, for the operator and for development.
-            if (!sent) logger.info({ userId: user.id, url }, 'email verification link');
           },
         },
         databaseHooks: {

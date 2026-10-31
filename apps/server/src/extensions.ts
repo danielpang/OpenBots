@@ -36,6 +36,8 @@ export interface ServerExtensions {
   authPlugins?(context: ExtensionContext): BetterAuthPlugin[];
   /** Mounts more routes on the app, before the SPA fallback. */
   routes?(app: OpenAPIHono<AppEnv>): void;
+  /** Hides secrets in a request path before it is logged, as webhook tokens are. */
+  redactPath?(path: string): string;
   /** The web build to serve instead of `apps/web/dist`. */
   webDist?: string;
   /**

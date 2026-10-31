@@ -6,7 +6,7 @@ import { endMembershipAccess } from '@openbot/server/membership';
 import { recordAudit, userActor } from '@openbot/server/services/audit';
 import { lockOrganization, organizationSlug, type Role } from '@openbot/server/workspace';
 import { can } from './access.js';
-import { sendInviteEmail, type EmailOptions } from './email.js';
+import { errorText, sendInviteEmail, type EmailOptions } from './email.js';
 import { INVITATION_DAYS, PENDING_INVITATIONS } from './plugin.js';
 
 // Organizations, members and invitations on the managed service (plan
@@ -475,7 +475,8 @@ export async function createInvitation(
   const emailed = await sendInviteEmail(
     deps.email,
     { to: email, organization: organization!.name, inviter: user.name, role: input.role, link },
-    (error) => deps.logger.warn({ err: error, inviteId: invite.id }, 'invite email failed'),
+    // The invitation's id is its link's secret: the log names the organization only.
+    (error) => deps.logger.warn({ err: errorText(error), workspaceId }, 'invite email failed'),
   );
   return { invite, link, emailed };
 }

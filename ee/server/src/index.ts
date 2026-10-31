@@ -23,11 +23,18 @@ export interface ManagedOptions {
   webDist?: string;
 }
 
-/** Reads RESEND_API_KEY and OPENBOT_EMAIL_FROM. */
+/** Reads RESEND_API_KEY, OPENBOT_EMAIL_FROM and OPENBOT_DEV_LOG_EMAIL_LINKS. */
 export function emailFromEnv(env: NodeJS.ProcessEnv = process.env): EmailOptions {
+  const logLinks = ['1', 'true'].includes(env.OPENBOT_DEV_LOG_EMAIL_LINKS ?? '');
+  if (logLinks && env.NODE_ENV === 'production') {
+    throw new Error(
+      'invalid configuration:\n  OPENBOT_DEV_LOG_EMAIL_LINKS: logs sign-in links; not allowed with NODE_ENV=production',
+    );
+  }
   return {
     ...(env.RESEND_API_KEY ? { apiKey: env.RESEND_API_KEY } : {}),
     ...(env.OPENBOT_EMAIL_FROM ? { from: env.OPENBOT_EMAIL_FROM } : {}),
+    ...(logLinks ? { logLinks } : {}),
   };
 }
 
@@ -42,6 +49,8 @@ export function managedExtensions({
     routes: (app) => {
       app.route('/api/v1', organizationRoutes(email));
     },
+    // An invitation's id is its link's secret; request logs leave it out.
+    redactPath: (path) => path.replace(/\/invitations\/[^/]+/, '/invitations/[redacted]'),
     webDist,
   };
 }

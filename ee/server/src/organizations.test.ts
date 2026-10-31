@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '@openbot/server/db/client';
 import { ORIGIN, createTestApp, type TestApp } from '@openbot/server/test-app';
-import { managedExtensions } from './index.js';
+import { emailFromEnv, managedExtensions } from './index.js';
 
 // The managed service's organizations end to end (plan 21.6): onboarding,
 // invitations with and without email, roles and the owner rules,
@@ -608,20 +608,74 @@ describe('email verification on the managed service', () => {
     expect(pending[0]!.status).toBe('pending');
   });
 
-  it('logs the link when the server cannot send email', async () => {
-    const plain = await createTestApp(
-      { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' },
-      { extensions: managedExtensions() },
-    );
-    try {
-      const info = vi.spyOn(plain.deps.logger, 'info');
-      await plain.signUp('quiet@example.com');
-      const logged = info.mock.calls.find(([, message]) => message === 'email verification link');
-      expect((logged?.[0] as { url?: string } | undefined)?.url).toContain(
-        '/api/auth/verify-email',
+  it('logs a verification link only on a development server that asked for it', async () => {
+    for (const [logLinks, expected] of [
+      [false, false],
+      [true, true],
+    ] as const) {
+      const app = await createTestApp(
+        { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' },
+        { extensions: managedExtensions({ email: logLinks ? { logLinks } : {} }) },
       );
+      try {
+        const info = vi.spyOn(app.deps.logger, 'info');
+        await app.signUp('quiet@example.com');
+        const logged = JSON.stringify(info.mock.calls);
+        expect(logged.includes('/api/auth/verify-email'), String(logLinks)).toBe(expected);
+      } finally {
+        await app.close();
+      }
+    }
+    expect(() =>
+      emailFromEnv({ OPENBOT_DEV_LOG_EMAIL_LINKS: '1', NODE_ENV: 'production' }),
+    ).toThrow(/OPENBOT_DEV_LOG_EMAIL_LINKS/);
+    expect(emailFromEnv({ OPENBOT_DEV_LOG_EMAIL_LINKS: '1' })).toEqual({ logLinks: true });
+  });
+
+  it('logs no link, token or invitation id when sending fails', async () => {
+    const failing = vi.fn<typeof fetch>(async () => new Response('down', { status: 503 }));
+    const app = await createTestApp(
+      { OPENBOT_DEPLOYMENT: 'managed', OPENBOT_SIGNUP_MODE: 'open' },
+      {
+        extensions: managedExtensions({
+          email: { apiKey: 're_test', from: 'OpenBots <hi@example.com>', fetch: failing },
+        }),
+      },
+    );
+    const calls: unknown[] = [];
+    for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const) {
+      vi.spyOn(app.deps.logger, level).mockImplementation(((...args: unknown[]) => {
+        calls.push(args);
+      }) as never);
+    }
+    try {
+      await app.signUp('lost@example.com');
+      const owner = await join(app, 'boss2@example.com');
+      const post = (path: string, body: unknown) =>
+        app.app.request(`/api/v1${path}`, {
+          method: 'POST',
+          headers: { origin: ORIGIN, cookie: owner.cookie!, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      await post('/organizations', { name: 'Quiet Co' });
+      const invite = (await (
+        await post('/organization/invitations', { email: 'guest@example.com' })
+      ).json()) as { id: string; emailed: boolean };
+      expect(invite.emailed).toBe(false);
+      await app.app.request(`/api/v1/invitations/${invite.id}`, {
+        headers: { cookie: owner.cookie! },
+      });
+      const sentBodies = failing.mock.calls.map(([, init]) => String(init?.body));
+      const token = sentBodies.map((b) => b.match(/token=([^&"\\]+)/)?.[1]).find(Boolean);
+      expect(token).toBeDefined();
+      const logged = JSON.stringify(calls);
+      expect(logged).toContain('verification email failed');
+      expect(logged).toContain('invite email failed');
+      expect(logged).not.toContain('verify-email');
+      expect(logged).not.toContain(token!);
+      expect(logged).not.toContain(invite.id);
     } finally {
-      await plain.close();
+      await app.close();
     }
   });
 });

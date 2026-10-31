@@ -1,6 +1,9 @@
-// Invite email through Resend (plan 21.5), when RESEND_API_KEY and
-// OPENBOT_EMAIL_FROM are set. Without them an invitation is still made and
-// the inviter copies its link; a failed send is logged and the link stays.
+// Email through Resend (plan 21.5), when RESEND_API_KEY and
+// OPENBOT_EMAIL_FROM are set: invitations and email verification. Without
+// them an invitation is still made and the inviter copies its link. Links
+// in these emails are credentials: a failed send logs who and why, never
+// the link or its token, and only a development server that sends no email
+// may log verification links (OPENBOT_DEV_LOG_EMAIL_LINKS).
 
 export interface EmailOptions {
   /** RESEND_API_KEY. */
@@ -9,6 +12,16 @@ export interface EmailOptions {
   from?: string;
   /** The HTTP client; tests stand in a fake. */
   fetch?: typeof fetch;
+  /**
+   * OPENBOT_DEV_LOG_EMAIL_LINKS: with no email set up, log verification
+   * links so a developer can open them. Refused with NODE_ENV=production.
+   */
+  logLinks?: boolean;
+}
+
+/** An error's message alone: a request error could carry what was sent. */
+export function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface InviteEmail {
