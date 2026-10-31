@@ -60,7 +60,10 @@ secrets_to_files() {
 }
 
 # OPENBOT_SERVER_DIR is for tests that run this script outside the image.
+# OPENBOT_MAIN is the server to start: the self-hosted one by default, the
+# managed one (ee/server) in the managed image.
 cd "${OPENBOT_SERVER_DIR:-/app/apps/server}"
+MAIN="${OPENBOT_MAIN:-dist/main.js}"
 
 command="${1:-start}"
 [ "$#" -gt 0 ] && shift
@@ -69,7 +72,7 @@ case "$command" in
   start)
     secrets_to_files
     node dist/db/migrate-cli.js
-    exec node dist/main.js "$@"
+    exec node "$MAIN" "$@"
     ;;
   migrate)
     secrets_to_files

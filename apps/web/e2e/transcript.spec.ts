@@ -39,7 +39,10 @@ test('send a message and watch a streamed reply arrive', async ({ page }) => {
     });
   } else {
     const me = (await request('/api/v1/me')) as { role: string };
-    test.skip(me.role !== 'admin', 'needs a fresh database so this user is the admin');
+    test.skip(
+      me.role !== 'owner' && me.role !== 'admin',
+      'needs this user to own their organization',
+    );
     model = await startFakeModel({ wordDelayMs: 120 });
     await useFakeModel(request, bot.id, model.baseUrl);
   }

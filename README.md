@@ -391,8 +391,8 @@ OpenBot uses it to build webhook URLs and OAuth redirect URIs.
 
 **Before exposing anything:** use a strong password and consider the tunnel provider's own access
 controls described below. A self-hosted install (`OPENBOT_DEPLOYMENT=self_hosted`, the default)
-has one account and closes sign-up once it exists; with `OPENBOT_DEPLOYMENT=managed`, keep
-`OPENBOT_SIGNUP_MODE` at `first_user_admin` or `invite`.
+has one account and closes sign-up once it exists. The managed service (`OPENBOT_DEPLOYMENT=managed`)
+runs from the managed build in `ee/`, where every account verifies its email.
 
 ### Option A: ngrok
 

@@ -29,7 +29,10 @@ test('a Chief of Staff routes work to three specialists; the loop guard stops a 
     return res.status() === 204 ? null : ((await res.json()) as unknown);
   };
   const me = (await request('/api/v1/me')) as { role: string };
-  test.skip(me.role !== 'admin', 'needs a fresh database so this user is the admin');
+  test.skip(
+    me.role !== 'owner' && me.role !== 'admin',
+    'needs this user to own their organization',
+  );
 
   model = await startFakeModel({ wordDelayMs: 10 });
   const provider = (await request('/api/v1/providers', {

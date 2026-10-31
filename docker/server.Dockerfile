@@ -48,9 +48,12 @@ RUN mkdir /out && for dist in apps/*/dist packages/*/dist; do \
 COPY --from=mcp-catalog /opt/openbot/mcp /opt/openbot/mcp
 
 # --- prod-deps: production dependencies of the server and its packages -------
+# The self-hosted image holds no ee/ code (the managed image is
+# ee/server/Dockerfile), so the directory goes once the install is done.
 FROM fetch AS prod-deps
 COPY . .
-RUN pnpm install --prod --frozen-lockfile --offline --filter "@openbot/server..." --store-dir /pnpm-store
+RUN pnpm install --prod --frozen-lockfile --offline --filter "@openbot/server..." --store-dir /pnpm-store \
+    && rm -rf ee
 
 # --- runtime -------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime

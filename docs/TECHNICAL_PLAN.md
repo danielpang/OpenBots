@@ -74,7 +74,7 @@ One server image runs three roles: `api` (HTTP and WebSocket), `worker` (runs, R
 | LLM access | Vercel AI SDK with provider packages, plus custom model providers through the AI SDK's openai-compatible package and Anthropic-compatible base URLs | Uniform streaming, tools, multi-step across Anthropic, OpenAI, xAI, Google, and any OpenAI-compatible or Anthropic-compatible endpoint (OpenRouter, Groq, Together, Fireworks, DeepSeek, Mistral, Azure OpenAI, Ollama, LM Studio, vLLM, LiteLLM); provider options pass through model features | LiteLLM proxy as the only route, per-provider SDKs |
 | Default model | Per configured provider: a new Bot gets its provider's catalog default model, with adaptive thinking on for Anthropic. Anthropic's catalog default is `claude-opus-5-5`. Small tasks (reply classifier, memory extraction, activity labels) use the provider's small model | | |
 | MCP | `@modelcontextprotocol/sdk` client, stdio and Streamable HTTP, OAuth 2.1 with PKCE and dynamic client registration | Reference implementation | Provider-side MCP connectors (later optimization) |
-| Auth | better-auth (email and password, GitHub and Google OAuth, sessions, API keys; the Mac app's local mode signs its owner in with a local token instead, 14.4; organizations and admins come later with the managed service, likely through its organization plugin) | Drizzle adapter, single container | Auth.js, Lucia |
+| Auth | better-auth (email and password, GitHub and Google OAuth, sessions, API keys; the Mac app's local mode signs its owner in with a local token instead, 14.4; organizations, roles, invitations and email verification on the managed service through its organization plugin, section 21) | Drizzle adapter, single container | Auth.js, Lucia |
 | Realtime | WebSocket (`ws`) with a JSON event protocol; SSE for run streams | Bidirectional needed for terminal and screen control | Socket.IO |
 | Web app | React 19, Vite, TanStack Router and Query, Tailwind v4, shadcn/ui, xterm.js, noVNC, react-markdown, shiki, CodeMirror for Artifacts | SPA served from the server container | Next.js |
 | Avatars | `packages/avatars`: deterministic SVG generator with CSS motion states | One visual system, animates for state, renders on server for notifications | Static image packs |
@@ -88,7 +88,7 @@ One server image runs three roles: `api` (HTTP and WebSocket), `worker` (runs, R
 
 ## 4. Domain model
 
-All tables carry `workspace_id` (one workspace in v1) and, where ownership matters, `owner_id` (a user). Ownership follows the PRD: Bots, the computer, connectors, and the Skills library belong to a user (U2, T1, S2, K1); memory and Routines belong to a Bot (M1, R3).
+All tables carry `workspace_id`, the organization (one implicit organization on a self-hosted install, many on the managed service; section 21), and, where ownership matters, `owner_id` (a user). Ownership follows the PRD: Bots, the computer, connectors, and the Skills library belong to a user (U2, T1, S2, K1); memory and Routines belong to a Bot (M1, R3).
 
 ### 4.1 Bots and identity (B1 to B8, I1, I2)
 
@@ -575,9 +575,9 @@ Widget actions post to `POST /messages/:id/widgets/:part/action`. If a run is wa
 | Artifacts | `GET /artifacts/:id`, `GET /artifacts/:id/versions`, `PUT /artifacts/:id` (user edit), `GET /artifacts/:id/download` |
 | Files | `POST /files`, `GET /files` (attachments for the Computer page), `GET /files/:id` |
 | Models | `GET/POST /providers`, `PATCH/DELETE /providers/:id`, `POST /providers/:id/test`, `POST /providers/:id/discover`, `GET/PUT /providers/:id/models`, `GET /models` |
-| Settings | `GET/PATCH /settings` (limits and custom stdio; signup mode and audit retention on the managed service only), `GET /capabilities` (`deployment`: `self_hosted` or `managed`), managed only: `GET /admin/members`, `PATCH /admin/members/:id`, `GET/POST /admin/invites`, `DELETE /admin/invites/:id`, `GET /admin/audit` |
+| Settings | `GET/PATCH /settings` (the active organization's limits, under its ceiling on the managed service, and custom stdio; audit retention on the managed service only), `GET /capabilities` (`deployment`: `self_hosted` or `managed`; `customStdio`, `localEndpoints`), managed only (ee/server, section 21.5): `/organizations`, `/organization/*`, `/invitations/{id}` |
 
-`OPENBOT_DEPLOYMENT` decides the account model. `self_hosted` (the default) is single-owner: the setup wizard creates the one account (an admin internally, so every role check passes, but called the owner in all copy), every later signup is refused with `SIGNUP_CLOSED` whatever the stored signup mode or an invite, the `/admin/*` routes answer 404, and signup mode and audit retention keep their defaults. Audit rows are still recorded. The web app reads `deployment` from `/capabilities` and shows no Admin or Audit log tab, invites, member lists, roles or "admin" wording; the owner's limits are in Settings > Limits. `managed` is for the hosted OpenBots service: admins, members, invites, signup modes and the audit log as described here.
+`OPENBOT_DEPLOYMENT` decides the account model. `self_hosted` (the default) is single-owner, one implicit organization: the setup wizard creates the one account (its `owner`, so every role check passes), every later signup is refused with `SIGNUP_CLOSED`, there are no organization routes, and audit retention keeps its default. Audit rows are still recorded. The web app shows no organization, invites, member lists, roles or "admin" wording; the owner's limits are in Settings > Limits. `managed` is the hosted OpenBots service, built from `ee/`: organizations, roles, invitations, email verification and each organization's audit log (section 21).
 
 Routes are declared with zod schemas; the OpenAPI document and the TypeScript client in `packages/api-client` are generated.
 
@@ -689,7 +689,12 @@ OPENBOT_IMAGE_PREFIX=ghcr.io/danielpang/openbot  # where compose pulls server an
 OPENBOT_SANDBOX_IMAGE=                       # empty: ${OPENBOT_IMAGE_PREFIX}/computer:${OPENBOT_VERSION}
 OPENBOT_DEPLOYMENT=self_hosted              # self_hosted (one owner, sign-up closed) | managed
 OPENBOT_LOCAL_TOKEN=                        # set by the Mac app: its owner signs in with it, no password (14.4)
-OPENBOT_SIGNUP_MODE=first_user_admin        # managed only: first_user_admin | invite | open
+OPENBOT_SIGNUP_MODE=first_user_admin        # managed only: open | invite (first_user_admin, its old name)
+OPENBOT_LOCAL_ENDPOINTS=                     # admins may mark endpoints local (S-8): default true self-hosted, false managed
+OPENBOT_CUSTOM_STDIO=                        # admins may turn on custom stdio (S-1): default true self-hosted, false managed
+RESEND_API_KEY=                              # managed: invite and verification email; without it, invite links to copy
+OPENBOT_EMAIL_FROM=                          # managed: the sender, e.g. "OpenBots <hi@example.com>"
+OPENBOT_DEV_LOG_EMAIL_LINKS=                 # managed, development only: log verification links (refused in production)
 OPENBOT_LIMITS_BOTS_PER_ACCOUNT=50
 OPENBOT_LIMITS_BOTS_PER_GROUP=6
 ANTHROPIC_API_KEY=
@@ -883,7 +888,7 @@ Still to confirm:
 4. License: decided. The core is under the Business Source License 1.1 with an Additional Use Grant: production use inside your own organization, with no hosted offering to third parties and no paid setup or consulting for them. It changes to Apache-2.0 four years after each release. The managed service's code lives in `ee/` under a proprietary license, and the core never imports it.
 5. Built-in connectors at 1.0: web search, web fetch, HTTP request, email, GitHub; everything else through the MCP catalog.
 6. Redis as a required service at 1.0 (recommended) with a Postgres-only lite mode later.
-7. Per-account provider keys and an admin model allowlist (L6, L7) ship after 1.0 (recommended).
+7. Per-account provider keys (L6) shipped with organizations on the managed service (section 21.4); an admin model allowlist (L7) ships after 1.0 (recommended).
 
 ---
 
@@ -893,54 +898,76 @@ The hosted service is one server shared by many organizations. People sign up, c
 
 ### 21.1 Data model
 
-The tables already carried `workspace_id`, so the organization is the `workspaces` row and the column keeps its name: in the schema, "workspace" means organization. better-auth's organization plugin is mapped onto the existing tables instead of adding its own, which keeps the 57 files that read `workspace_id` as they are:
+The tables already carried `workspace_id`, so the organization is the `workspaces` row and the column keeps its name: in the schema, "workspace" means organization. better-auth's organization plugin is mapped onto the existing tables (`modelName` and `fields` in `ee/server/src/plugin.ts`) instead of adding its own, which keeps the 57 files that read `workspace_id` as they are and lets the core scope by one column whichever build runs. Migrating to the plugin's own tables would have meant renaming `workspace_id` in ten schema files and every query for no gain in isolation.
 
-| better-auth model | Table (`modelName`, with `usePlural`) | Changes (migration `0020_organizations`) |
+| better-auth model | Table (`modelName`, with `usePlural`) | Changes (migrations `0021_organizations`, `0022_organizations_cleanup`) |
 | --- | --- | --- |
-| `organization` | `workspaces` (`workspace`) | adds `slug` (unique, backfilled from the name), `logo`, `metadata`; `settings` stays (limits, connector policy switches) |
+| `organization` | `workspaces` (`workspace`) | adds `slug` (unique, backfilled from the name and id), `logo`, `metadata`; `settings` stays (limits, audit retention, custom stdio, small models) |
 | `member` | `workspace_members` (`workspaceMember`, `organizationId` mapped to `workspaceId`) | `role` becomes text checked to `owner`, `admin`, `member` (the `workspace_role` enum goes); `disabled_at` becomes `suspended_at`, the `suspendedAt` additional field; the earliest admin of each workspace becomes its `owner` |
-| `invitation` | `invites` (`invite`, `inviterId` mapped to the renamed `inviter_id`) | adds `status`; `used_at` becomes status `accepted`; `token_hash`, `used_at`, `used_by` go; invites without an email are dropped, since every invitation is for one address |
+| `invitation` | `invites` (`invite`, `organizationId` mapped to `workspaceId`) | adds `status` and `inviter_id`; `used_at` becomes status `accepted`; `token_hash`, `created_by`, `used_at`, `used_by` go; invites without an email are dropped, since every invitation is for one address |
 | `session.activeOrganizationId` | `sessions.active_organization_id` | nullable, set null when the organization goes; backfilled with each member's workspace |
 | (ours) | `apikeys.workspace_id` | the organization a key was made in; backfilled from the user's membership |
+
+The migration is split in two so drizzle-kit never has to guess a rename: 0021 adds the new columns and copies the data across, 0022 drops the old ones. A self-hosted install's one workspace becomes its implicit organization and its owner the `owner`, so it and the Mac app's local mode keep working.
 
 Unique keys that were per user become per (organization, user): Bot handles (`bots (workspace_id, owner_id, handle)`, so one member's handles never collide with, or reveal, another's), the main Bot, Skill and connector slugs, and the computer (`computers (workspace_id, owner_id)`). Provider slugs were already per (organization, owner).
 
 ### 21.2 The active organization and the request context
 
-`authenticateHeaders` (middleware/auth.ts) resolves the caller and their organization on every request and WebSocket upgrade:
+`authenticateAccount` and `authenticateHeaders` (middleware/auth.ts) resolve the caller and their organization on every request and WebSocket upgrade:
 
 - Self-hosted: always the implicit organization (the one `workspaces` row), whatever the session says. Only its owner gets in.
 - Managed, session: the session's `activeOrganizationId`. Managed, API key: the key's `workspace_id`; a key without one is refused.
 - The user must be a member of that organization and not suspended in it. A stale active organization (the user was removed, or it was deleted) resolves to none.
+- With `requireVerifiedEmail` (the managed build), an account whose email is not verified gets 403 `EMAIL_NOT_VERIFIED` on every request, its API keys included.
 
-`CurrentUser` carries `workspaceId` (the active organization) and `role` (`owner`, `admin` or `member` there). `requireUser` needs an active, unsuspended membership and answers 403 `NO_ORGANIZATION` or `MEMBER_SUSPENDED`; `requireAdmin` also needs `owner` or `admin`; `requireAccount` needs only a signed-in user, for the routes that work without one (`GET /me`, and ee's organization list, create, switch and invite routes). Every service and query takes the organization from the caller, or from the row it works on (a Bot, a chat, an endpoint) in workers. `ensureWorkspace` remains only as the self-hosted implicit organization (setup, local mode, start-up).
+`CurrentUser` carries `workspaceId` (the active organization) and `role` (`owner`, `admin` or `member` there). `requireUser` needs an active, unsuspended membership and answers 403 `NO_ORGANIZATION` or `MEMBER_SUSPENDED`; `requireAdmin` also needs `owner` or `admin`; `requireAccount` needs only a signed-in user, for the routes that work without one (`GET /me`, which then reports `workspace: null` or `suspended`, and ee's organization list, create, switch and invitation routes). Every service and query takes the organization from the caller, or from the row it works on (a Bot, a chat, an endpoint) in workers. `ensureWorkspace` remains only as the self-hosted implicit organization (setup, local mode, start-up).
 
 ### 21.3 Scoping rules
 
-- Per-user data is read with both `owner_id` and `workspace_id`, and per-Bot data through a Bot the caller owns in the active organization (`ownership.ts`). Anything else answers 404 with no echo.
-- Workers, BullMQ jobs, Routines and the scheduler work from row ids and read the organization from the Bot or chat; connectors, providers, Skills, files and memories they load are filtered by that organization and owner.
-- Inbound webhooks resolve the organization from the endpoint: on the managed service the URL names the Bot by id (`/hooks/{botId}/...`), since handles are only unique per (organization, user); a self-hosted URL may still use the handle. Rate limits and payload limits come from the endpoint's organization. Outbound event subscriptions match the event's organization and owner.
-- Realtime: user-scoped events (`computer.status`, `connector.updated`) carry `workspace_id`, and a socket gets them only for the organization it authenticated in; chat and Bot subscriptions are ownership-checked as before. Removing or suspending a member closes their sockets in that organization only.
-- The computer is per (user, organization): its container, volume and connector directories are named from both ids. Files and Artifact blobs are stored under keys that include the organization.
+- Per-user data is read with both `owner_id` and `workspace_id`, and per-Bot data through a Bot the caller owns in the active organization (`ownership.ts`). Anything else answers 404 with no echo. `routes/org-isolation.test.ts` walks every route in the OpenAPI document as another organization's owner and as the same user working in another organization.
+- Workers, BullMQ jobs, Routines and the scheduler work from row ids and read the organization from the Bot or chat; connectors, providers, Skills, files and memories they load are filtered by that organization and owner. A run checks that its Bot's provider belongs to the Bot's organization or owner before it starts.
+- Inbound webhooks resolve the organization from the endpoint: on the managed service the URL names the Bot by id (`/hooks/{botId}/...`), since handles are only unique per (organization, user); a self-hosted URL still uses the handle. Rate limits and payload limits come from the endpoint's organization once it is found. Outbound event subscriptions match the event's organization and owner.
+- Realtime: user-scoped events (`computer.status`, `connector.updated`) carry `workspace_id`, and a socket gets them only for the organization it authenticated in; chat and Bot subscriptions are ownership-checked as before. Removing or suspending a member closes their sockets in that organization only (`MEMBERSHIP_ENDED_CHANNEL`).
+- The computer is per (user, organization): its row, and so its container and volume, which are named by the row's id. Filesystem connector folders are `connectors/<organization>_<user>` on the managed service. New files and Artifact blobs are stored under `orgs/<organization>/`; files from before keep their keys.
 - Settings and limits are per organization (`workspaces.settings`); the audit log is per organization and recorded in self-hosted too.
 
 ### 21.4 Model providers at two levels (L6)
 
-A provider row with `owner_id` null belongs to the organization (added by an owner or admin) and every member's Bots may use it; a row with `owner_id` set is that member's own. The picker lists both, the member's first, and when a member has a provider of the same kind or slug as an organization one, theirs is used for their new Bots. Keys stay sealed. On the managed service, keys in `.env` are not seeded into any organization (each organization brings its own); self-hosted seeds them into the implicit organization as before.
+A provider row with `owner_id` null belongs to the organization (added by an owner or admin) and every member's Bots may use it; a row with `owner_id` set is that member's own, which only they see and change. Lists put the member's own first, so a new Bot gets its default model from them when they have one. Settings > Models shows "Organization" and "Yours" on the managed service and one list on a self-hosted install. Keys stay sealed, and only whoever may change a provider sees its key hint. On the managed service, keys in `.env` are not seeded into any organization (each organization brings its own); self-hosted seeds them into the implicit organization as before.
 
 ### 21.5 Code split and composition
 
-The core (`apps/`, `packages/`, BUSL-1.1) owns the schema, the migrations, organization scoping, the active organization resolution and extension points. It never imports `ee/`. `ee/` (proprietary) holds the managed-only parts as workspace packages:
+The core (`apps/`, `packages/`, BUSL-1.1) owns the schema, the migrations, organization scoping, the active organization resolution and extension points. It never imports `ee/` (`scripts/check-licenses.mjs`). `ee/` (proprietary, ee/LICENSE) holds the managed-only parts as private workspace packages, each with a copy of the license:
 
-- `ee/server` (`@openbot/ee-server`): the better-auth organization plugin with its schema mapping, access control (owner, admin, member), the session hook that picks an active organization, sign-up policy, invitations (better-auth's, with email through Resend when `RESEND_API_KEY` and `OPENBOT_EMAIL_FROM` are set, a copyable link otherwise), onboarding (create organization), suspension, organization admin routes under `/api/v1/organizations/*` with their own OpenAPI document, and the managed server entry `ee/server/src/main.ts`.
-- `ee/web` (`@openbot/ee-web`): the managed web entry, which imports the core app and adds the "Create your organization" step, the organization switcher, organization settings (name, members, invites, providers, limits, audit log) and invite acceptance on sign-up and sign-in.
+- `ee/server` (`@openbot/ee-server`): the better-auth organization plugin with its schema mapping and access control (owner, admin, member; `access.ts`), a policy plugin (sign-up mode, invite proof, email verification, the session's active organization, and no `/api/auth/organization/*` over HTTP), invite and verification email through Resend, the routes below with their own OpenAPI document (`ee/server/openapi.json`), and the managed server entry `ee/server/src/main.ts`.
+- `ee/web` (`@openbot/ee-web`): the managed web entry, which starts the core app with its extensions: `/onboarding` (create your organization, join through an invite, or pick another when suspended), the organization switcher, and Settings > Organization, Members and Audit log.
 
-The core server starts through `runServer(extensions)` (`apps/server/src/server.ts`); `apps/server/src/main.ts` passes none, and `ee/server/src/main.ts` passes the managed ones: `authPlugins` (better-auth plugins, which bring their own database hooks), `routes` (mounted on the app) and `webDist` (the ee web build). The core refuses `OPENBOT_DEPLOYMENT=managed` without an organizations extension. The core web app takes its extensions through `configureWeb(extensions)` before it renders: a sidebar slot, extra settings tabs (served by `/settings/$section`), a gate shown in place of the app when the caller has no organization, and a hook after sign-in and sign-up. The core alone has no organization UI. better-auth's own `/api/auth/organization/*` endpoints are not served over HTTP; ee calls them through `auth.api` from its routes, which add the checks below and audit them.
+The core server starts through `runServer(extensions)` (`apps/server/src/server.ts`); `apps/server/src/main.ts` passes none, and `ee/server/src/main.ts` passes the managed ones (`ServerExtensions`): `organizations`, `authPlugins` (better-auth plugins, which bring their own database hooks and options), `routes`, `requireVerifiedEmail`, `limitsCeiling` (for plans, later), `redactPath` and `webDist`. The core refuses `OPENBOT_DEPLOYMENT=managed` without the organizations extension. The core web app takes its extensions through `startWeb(extensions)`: `SidebarHeader`, `settingsTabs` (served at `/settings/$section`) and `Onboarding` (at `/onboarding`, where someone with no active organization lands, and where an invite goes after sign-in or sign-up). The core alone has no organization UI.
+
+The managed routes, under `/api/v1`: `GET/POST /organizations` and `POST /organizations/{id}/activate`; `GET/PATCH /organization`, `POST /organization/leave`, `GET /organization/members`, `PATCH/DELETE /organization/members/{id}`, `GET/POST /organization/invitations`, `DELETE /organization/invitations/{id}`, `GET /organization/audit`; `GET /invitations/{id}` and `POST /invitations/{id}/accept`. Creating, switching and accepting need a session; the rest also take an API key.
 
 ### 21.6 Roles and rules
 
-- Owners and admins invite, remove and suspend members, change roles, manage organization providers, settings and limits, and read the organization's audit log. Only an owner makes or removes owners. The last owner cannot leave, be removed, be suspended or be demoted. Nobody suspends or removes themselves through the admin routes.
-- Admins cannot see or act on members' Bots or other per-user data: U2 holds inside an organization.
+- Owners and admins invite, remove and suspend members, change roles, manage organization providers, settings and limits, and read the organization's audit log. Only an owner makes, demotes, suspends or removes an owner, or invites one. The last owner who is not suspended cannot leave, be removed, be suspended or be demoted. Nobody suspends or removes themselves through the admin routes.
+- Admins cannot see or act on members' Bots or other per-user data: U2 holds inside an organization. Their trust and local marks on connectors reach only their own connectors on the managed service.
 - Suspension (`suspended_at`) applies to one organization: requests and API keys in it are refused, its sockets close, and the member's other organizations are untouched.
-- Onboarding: a sign-up without an invite creates an organization (its name) and becomes its owner; a sign-up or sign-in with an invite joins that organization. A signed-in user can create more organizations (up to 10) and switch between them. `OPENBOT_SIGNUP_MODE=open` lets anyone sign up; `invite` (and `first_user_admin`, its old name) lets only the first user and people with a pending invitation sign up.
-- Invitations are for one email address, expire after 7 days, are accepted once (a conditional update), can be revoked, and are capped per organization (100 pending, 30 sent per hour).
+- Limits: on the managed service the operator's limits (`OPENBOT_LIMITS_*`) are every organization's ceiling, or a plan's through `limitsCeiling`. Owners and admins may lower limits, never raise them above it (400 `ABOVE_PLAN_LIMIT`), and a higher number stored in a row counts as the ceiling. A self-hosted owner has no ceiling.
+- Custom stdio connectors and endpoints marked local (providers, connectors, event subscriptions) are off on the managed service unless the operator turns them on (`OPENBOT_CUSTOM_STDIO`, `OPENBOT_LOCAL_ENDPOINTS`): every organization shares the server and its network.
+- Sign-up: every managed account verifies its email before it signs in (better-auth's email verification, through Resend; without email, a development server may log the link with `OPENBOT_DEV_LOG_EMAIL_LINKS`, which production refuses). `OPENBOT_SIGNUP_MODE=open` lets anyone sign up; `invite` (and `first_user_admin`, its old name) lets only the first user and someone who brings the invitation from their link, for the address they sign up with.
+- Onboarding: after verification, a sign-up without an invite creates an organization (its name) and becomes its owner; one with an invite joins that organization. A signed-in user can create more organizations (up to 10 memberships, 5 an hour) and switch between them.
+- Invitations are for one email address, expire after 7 days, are accepted once by that verified address (a conditional update), can be revoked, and are capped per organization (100 pending, 30 sent an hour). Their id is the link's secret: request logs redact it, and logs never hold an emailed link or token.
+
+### 21.7 Build, images and CI
+
+- The self-hosted image (`docker/server.Dockerfile`) builds the core and holds no `ee/` code. The managed image (`ee/server/Dockerfile`) builds `@openbot/ee-server` and `@openbot/ee-web` and starts `ee/server/dist/main.js` through the same entrypoint (`OPENBOT_MAIN`), with `OPENBOT_DEPLOYMENT=managed`.
+- CI checks both OpenAPI documents are current, lints and builds both images, and runs the e2e specs on the managed server (`ee/server`, serving `ee/web`) except the self-hosted job, which runs the core server. `e2e/organizations.spec.ts` covers onboarding, invites, switching, isolation and suspension; specs verify email through the link the server logs in CI.
+
+### 21.8 Decisions
+
+- Mapping onto the existing tables rather than the plugin's own (21.1).
+- Only creating an organization, switching and accepting an invitation go through the plugin's endpoints; member and invitation changes are done in `ee/server/src/organizations.ts` on the same tables, so the last-owner rule can hold under a lock and API keys work for them.
+- Sign-up on the managed service is instance-wide (`OPENBOT_SIGNUP_MODE`), not an organization setting.
+- Every invitation names one address; a link without an address is no longer offered.
+- An organization's audit log shows what its members did, Bot actions included, as a security record; it gives no access to the Bots.
+- Organization deletion is not offered yet (`disableOrganizationDeletion`).

@@ -23,7 +23,10 @@ test('create a Routine, run it now, and see its run record', async ({ page }) =>
     return res.status() === 204 ? null : ((await res.json()) as unknown);
   };
   const me = (await request('/api/v1/me')) as { role: string };
-  test.skip(me.role !== 'admin', 'needs a fresh database so this user is the admin');
+  test.skip(
+    me.role !== 'owner' && me.role !== 'admin',
+    'needs this user to own their organization',
+  );
   const name = `Briefer ${Date.now() % 10_000}`;
   const bot = (await request('/api/v1/bots', { method: 'POST', body: { name } })) as { id: string };
   model = await startFakeModel({ wordDelayMs: 10 });

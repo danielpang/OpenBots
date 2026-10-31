@@ -40,7 +40,7 @@ OpenBot adopts the following principles from the essay as product requirements:
 ## 3. Users
 
 - **Individual self-hoster.** Runs OpenBot with Docker on a Mac or a VPS, uses the Mac app or the web app, exposes it through a tunnel for webhooks and connector OAuth. A self-hosted install has one account, its owner, who owns all Bots and sets every setting. There is no admin concept: no members, invites, roles or audit log screens, and sign-up closes once the owner exists.
-- **Small team on the managed service (later).** The hosted OpenBots service has several members, each owning their own Bots, computer, connectors, and Skills library. An admin controls signups and which connectors are allowed. Members can share Bot templates. Admins, members, invites and the audit log are for this service only (`OPENBOT_DEPLOYMENT=managed`).
+- **Teams on the managed service.** The hosted OpenBots service is one server shared by many organizations. People sign up, create an organization or join one through an invite, and can belong to several. In each organization every member owns their own Bots, computer, connectors, Skills library and providers; owners and admins invite, suspend and remove members, set the organization's providers, limits and connector policy, and read its audit log, but never see members' Bots. Nothing crosses between organizations, even for someone in two of them. Organizations, roles, invites and the audit log are for this service only (`OPENBOT_DEPLOYMENT=managed`, built from `ee/`).
 - **Integrator.** Wires external systems (GitHub, Slack, cron, scripts) to Bots through Routines and webhook endpoints, and reads Bot output through outbound events and Artifacts.
 
 ---
@@ -183,16 +183,20 @@ Grok Bot exposes webhooks only as a Routine trigger. OpenBot keeps that and adds
 
 ### 4.13 Accounts, sharing, and administration
 
-Self-hosted (the default) is single-owner: the setup wizard creates the one account, sign-up is then closed, and the admin controls below that only matter with members (signup mode, audit log retention) keep their defaults. The owner still sets the limits (Settings > Limits) and the connector policy. U1 and U3 as written are for the managed service.
+Self-hosted (the default) is single-owner, one implicit organization: the setup wizard creates the one account, sign-up is then closed, and the admin controls below that only matter with members (audit log retention) keep their defaults. The owner still sets the limits (Settings > Limits) and the connector policy. U1, U3 and U5 to U8 as written are for the managed service.
 
-The Mac app running OpenBots on This Mac has no sign-in at all. It is one person on their own computer, so there is no account concept in the UI: no sign-up, no account step in the setup wizard, no sign-in, no sign-out and no Account settings. The app opens signed in as the install's owner, and Settings starts with General, which holds the name Bots use to address the owner, notifications and API keys. A self-hosted server reached over the network or from a browser keeps the usual sign-in. Admins, members and organizations come later with the managed service, likely through better-auth's organization plugin.
+The Mac app running OpenBots on This Mac has no sign-in at all. It is one person on their own computer, so there is no account concept in the UI: no sign-up, no account step in the setup wizard, no sign-in, no sign-out and no Account settings. The app opens signed in as the install's owner, and Settings starts with General, which holds the name Bots use to address the owner, notifications and API keys. A self-hosted server reached over the network or from a browser keeps the usual sign-in. Organizations, roles and invites are the managed service's (U5 to U8), through better-auth's organization plugin.
 
 | ID | Requirement | Priority |
 | --- | --- | --- |
-| U1 | First user becomes admin; signup mode is first-user-admin, invite, or open. Optional GitHub and Google sign-in. | Must |
-| U2 | Each member owns their Bots, computer, connectors, and Skills library. | Must |
-| U3 | Admin controls: signup mode, connector allow and block list, limits. | Must |
-| U4 | API keys for programmatic access to the same API the apps use. | Must |
+| U1 | Managed: signing up verifies the email first. Signup mode is open (anyone signs up and creates an organization) or invite (only the first user and people with an invite link). Optional GitHub and Google sign-in. | Must |
+| U2 | Each member owns their Bots, computer, connectors, and Skills library, in each organization they belong to; admins do not see them. | Must |
+| U3 | Organization admin controls: connector allow and block list, limits (up to the service's ceiling), audit log retention. | Must |
+| U4 | API keys for programmatic access to the same API the apps use, each working in the organization it was made in. | Must |
+| U5 | Managed: someone who signs up without an invite creates an organization (one step, its name) and owns it; someone with an invite joins its organization and skips that step. A signed-in user can create more organizations and switch between them; the switcher shows with two or more. | Must |
+| U6 | Managed: roles are owner, admin and member. Owners and admins invite (by email, with a copyable link when the service cannot send email), suspend, restore and remove members and change roles. Only an owner makes or removes an owner, and the last owner cannot leave or be demoted. | Must |
+| U7 | Managed: suspending a member applies to one organization; their other organizations are untouched. Leaving or being removed ends access to that organization's data. | Must |
+| U8 | Managed: an organization's audit log, read by its owners and admins. | Must |
 
 ### 4.14 Platforms and self-hosting
 
@@ -214,7 +218,7 @@ Bots need a model, and self-hosters want to point at whatever they already pay f
 | L3 | Model discovery and test: when the provider supports it, "Discover models" pulls its model list; "Test" sends a small request, checks streaming and tool calling, and reports what works. | Must |
 | L4 | Each model carries capability flags (tools, vision, reasoning, context window) and optional pricing. Presets and the built-in catalog fill them in; users can edit them for custom model providers. The Bot model picker groups models by provider and hides models that lack what the Bot needs (for example vision and tools for a Bot with computer use). Cost estimates use the pricing when present. | Must |
 | L5 | A Bot references a provider and a model; a provider in use cannot be deleted until its Bots are moved. Changing a Bot's model takes effect on its next run. | Must |
-| L6 | Per-account provider keys that override instance keys for a member's Bots. | Later |
+| L6 | Managed: providers at two levels. An organization's providers, added by its admins, serve every member's Bots; a member's own come first for their Bots. A self-hosted install has one list. | Must |
 | L7 | Admin allowlist of models that members may pick. | Later |
 
 ---

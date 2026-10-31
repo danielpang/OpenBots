@@ -35,6 +35,16 @@ jobs:
             echo "::error::packages/api-client is stale; run the three commands above and commit the result"
             exit 1
           fi
+      # The same for the managed routes (ee/server) and ee/web's types.
+      - name: Check the managed OpenAPI document and types are current
+        run: |
+          pnpm --filter @openbot/ee-server openapi
+          pnpm exec prettier --write ee/server/openapi.json
+          pnpm --filter @openbot/ee-web generate
+          if ! git diff --exit-code -- ee/server/openapi.json ee/web/src/schema.ts; then
+            echo "::error::ee/server/openapi.json or ee/web/src/schema.ts is stale; run the three commands above and commit the result"
+            exit 1
+          fi
       - run: pnpm test
       - run: pnpm build
 
@@ -48,7 +58,7 @@ jobs:
         run: >-
           docker run --rm -v "$PWD:/repo:ro" -w /repo hadolint/hadolint:v2.12.0
           hadolint docker/server.Dockerfile docker/computer.Dockerfile
-          docker/sandbox-firewall.Dockerfile
+          docker/sandbox-firewall.Dockerfile ee/server/Dockerfile
       - name: Validate the compose files
         run: |
           cp .env.example .env
@@ -65,6 +75,15 @@ jobs:
           tags: openbot-ci/server:ci
           cache-from: type=gha,scope=server
           cache-to: type=gha,scope=server,mode=max
+      # The managed image (ee/server): built, not published here.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ee/server/Dockerfile
+          push: false
+          tags: openbot-ci/managed-server:ci
+          cache-from: type=gha,scope=managed-server
+          cache-to: type=gha,scope=managed-server,mode=max
       - name: Smoke-test the stack
         run: |
           key="$(docker run --rm openbot-ci/server:ci keygen)"
@@ -79,12 +98,14 @@ jobs:
 
   # The Playwright specs in apps/web/e2e against the built server and web app,
   # with Postgres and Redis as services and the scripted model of
-  # e2e/fake-model.ts. Every spec that adds a provider must be the first
-  # signup (the admin), so each gets a fresh database in its own job; the
-  # others share one. The computer spec skips: there is no Docker provider.
-  # The server runs as the managed service, since specs sign up several
-  # users; a self-hosted install closes sign-up after its owner. The
-  # self-hosted job runs the default deployment on a fresh database.
+  # e2e/fake-model.ts. Each job gets a fresh database. The computer spec
+  # skips: there is no Docker provider. The server is the managed one
+  # (ee/server, serving ee/web), since specs sign up several users and a
+  # self-hosted install closes sign-up after its owner: each user verifies
+  # their email through the link the server logs (OPENBOT_DEV_LOG_EMAIL_LINKS,
+  # read from E2E_SERVER_LOG) and creates an organization. The fake model and
+  # sign-in servers listen on 127.0.0.1, so OPENBOT_LOCAL_ENDPOINTS is on.
+  # The self-hosted job runs the core server on its default deployment.
   e2e:
     name: e2e (${{ matrix.name }})
     runs-on: ubuntu-24.04
@@ -105,6 +126,8 @@ jobs:
             specs: e2e/routines.spec.ts
           - name: artifacts
             specs: e2e/artifacts.spec.ts
+          - name: organizations
+            specs: e2e/organizations.spec.ts
           - name: self-hosted
             specs: e2e/self-hosted.spec.ts
             deployment: self_hosted
@@ -131,6 +154,8 @@ jobs:
       OPENBOT_PUBLIC_URL: http://localhost:3000
       OPENBOT_DEPLOYMENT: ${{ matrix.deployment || 'managed' }}
       OPENBOT_SIGNUP_MODE: open
+      OPENBOT_LOCAL_ENDPOINTS: 'true'
+      OPENBOT_DEV_LOG_EMAIL_LINKS: '1'
       E2E: '1'
       # The server serves the built web app, so Playwright reuses it instead
       # of starting the Vite dev server.
@@ -148,9 +173,12 @@ jobs:
       - name: Start the server
         run: |
           mkdir -p "$RUNNER_TEMP/files"
+          # The managed server from ee/server; the self-hosted job, the core's.
+          main=ee/server/dist/main.js
+          [ "$OPENBOT_DEPLOYMENT" = self_hosted ] && main=apps/server/dist/main.js
           OPENBOT_MASTER_KEY="$(node apps/server/dist/keygen.js)" \
             OPENBOT_FILES_DIR="$RUNNER_TEMP/files" \
-            nohup node apps/server/dist/main.js >"$RUNNER_TEMP/server.log" 2>&1 &
+            nohup node "$main" >"$RUNNER_TEMP/server.log" 2>&1 &
           for _ in $(seq 1 60); do
             curl -fsS http://localhost:3000/readyz && exit 0
             sleep 1
@@ -161,6 +189,7 @@ jobs:
         working-directory: apps/web
         env:
           SPECS: ${{ matrix.specs }}
+          E2E_SERVER_LOG: ${{ runner.temp }}/server.log
         # SPECS is a space-separated list of paths.
         run: |
           read -ra specs <<<"$SPECS"

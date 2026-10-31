@@ -23,7 +23,10 @@ test('a Bot writes a document, the owner edits it, both versions are visible', a
     return res.status() === 204 ? null : ((await res.json()) as unknown);
   };
   const me = (await request('/api/v1/me')) as { role: string };
-  test.skip(me.role !== 'admin', 'needs a fresh database so this user is the admin');
+  test.skip(
+    me.role !== 'owner' && me.role !== 'admin',
+    'needs this user to own their organization',
+  );
   const name = `Writer ${Date.now() % 10_000}`;
   const bot = (await request('/api/v1/bots', { method: 'POST', body: { name } })) as { id: string };
   model = await startFakeModel({ wordDelayMs: 20 });
