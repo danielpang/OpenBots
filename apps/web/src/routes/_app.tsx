@@ -1,26 +1,37 @@
 import { ApiError } from '@openbot/api-client';
 import { createFileRoute, redirect } from '@tanstack/react-router';
 import { meQuery } from '../app/api.js';
-import { loadDeployment } from '../app/deployment.js';
+import { loadAuthMode, loadDeployment } from '../app/deployment.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 import { Shell } from '../app/shell.js';
 
 // Every signed-in page sits under this pathless layout. It loads the caller
 // and the install's deployment (self-hosted or managed), which decides
-// whether anything about admins, members or the audit log shows.
+// whether anything about admins, members or the audit log shows, and its auth
+// mode: with `local` the Mac app signs the owner in, so there is no account
+// and the first-run wizard (providers, then a first Bot) shows until it is done.
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
+    const { queryClient } = context;
+    const authMode = await loadAuthMode(queryClient);
     try {
       const [me, deployment] = await Promise.all([
-        context.queryClient.ensureQueryData(meQuery),
-        loadDeployment(context.queryClient),
+        queryClient.ensureQueryData(meQuery),
+        loadDeployment(queryClient),
       ]);
-      return { me, deployment };
+      if (authMode === 'local') {
+        // Cached once: the wizard's last step clears it.
+        const setup = await setupRequired(() => queryClient.ensureQueryData(setupQuery));
+        if (setup) throw redirect({ to: '/setup' });
+      }
+      return { me, deployment, localAuth: authMode === 'local' };
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
+        // The Mac app signs a local owner in again from /sign-in.
+        if (authMode === 'local') throw redirect({ to: '/sign-in' });
         // A new install has nobody to sign in as: the first-run wizard creates the owner.
-        const setup = await setupRequired(() => context.queryClient.fetchQuery(setupQuery));
+        const setup = await setupRequired(() => queryClient.fetchQuery(setupQuery));
         throw redirect({ to: setup ? '/setup' : '/sign-in' });
       }
       throw error;

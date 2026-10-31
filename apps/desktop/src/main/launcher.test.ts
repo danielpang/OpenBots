@@ -189,7 +189,7 @@ describe('Connect to a self-hosted server', () => {
 });
 
 describe('Run OpenBots on this Mac', () => {
-  it('waits for /readyz, then opens the setup wizard to create the owner account', async () => {
+  it('waits for /readyz, then opens the web app, which the app signs the owner in to', async () => {
     const { launcher, window, stored, fetch } = setup({
       routes: {
         ...openBotsServer(LOCAL, true),
@@ -203,10 +203,8 @@ describe('Run OpenBots on this Mac', () => {
     expect(window.openServer).not.toHaveBeenCalled();
     await launcher.connectLocal();
     expect(fetch.mock.calls.map(([url]) => url)).toContain(`${LOCAL}/readyz`);
-    expect(window.openServer).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'local' }),
-      '/setup',
-    );
+    // Never /sign-in or /setup's account step: the web app goes on to setup itself.
+    expect(window.openServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'local' }));
     expect(stored()).toMatchObject({ activeId: 'local', chosen: true });
   });
 

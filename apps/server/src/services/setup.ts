@@ -1,4 +1,6 @@
+import { eq } from 'drizzle-orm';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { LOCAL_ONLY_MESSAGE, LOCAL_OWNER_EMAIL } from '../auth.js';
 import { CLIENT_IP_HEADER } from '../client-ip.js';
 import type { AppDeps } from '../context.js';
 import { schema, type Db } from '../db/client.js';
@@ -10,10 +12,33 @@ import { computerProvider } from './computer.js';
 // self-hosted install, where it is the only account. The wizard then asks for a
 // provider key through the providers API, starts the sandbox image pull and
 // creates a first Bot through the Bots API.
+//
+// The Mac app's local mode (OPENBOT_LOCAL_TOKEN) has no account step: the app
+// creates the owner as it signs them in (routes/local.ts). Its wizard starts at
+// the providers and shows until the first Bot exists.
 
 export async function setupRequired(db: Db): Promise<boolean> {
   const [anyUser] = await db.select({ id: schema.users.id }).from(schema.users).limit(1);
   return !anyUser;
+}
+
+/**
+ * Whether the web app shows the first-run wizard: while no user exists, and
+ * in local mode while the owner the Mac app created has no Bot yet. An owner
+ * from before local mode, with a real email, is set up already.
+ */
+export async function wizardRequired(deps: Pick<AppDeps, 'db' | 'config'>): Promise<boolean> {
+  const { db, config } = deps;
+  if (await setupRequired(db)) return true;
+  if (!config.localToken) return false;
+  const [localOwner] = await db
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .where(eq(schema.users.email, LOCAL_OWNER_EMAIL))
+    .limit(1);
+  if (!localOwner) return false;
+  const [bot] = await db.select({ id: schema.bots.id }).from(schema.bots).limit(1);
+  return !bot;
 }
 
 export const setupComplete = () =>
@@ -41,6 +66,8 @@ export async function createAdmin(
   requestOrigin: string | undefined,
   clientAddress: string | null = null,
 ): Promise<Response> {
+  // In local mode only the Mac app makes the owner (routes/local.ts).
+  if (deps.config.localToken) throw new DomainError(403, 'LOCAL_ONLY', LOCAL_ONLY_MESSAGE);
   const origin = new URL(deps.config.publicUrl).origin;
   if (requestOrigin !== undefined && requestOrigin !== origin) {
     throw forbidden('Create the first account from the OpenBot page itself');

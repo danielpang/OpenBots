@@ -14,11 +14,15 @@ const TAB_CLASS =
 /**
  * The tabs a caller gets. Admin and Audit log are for the managed service's
  * admins. A self-hosted install has one owner and neither tab; its owner
- * changes the limits, which managed admins find under Admin, in Limits.
+ * changes the limits, which managed admins find under Admin, in Limits. In
+ * the Mac app's local mode there is no account: General, with the owner's
+ * name, takes Account's place.
  */
-function settingsTabs(admin: boolean, managed: boolean) {
+function settingsTabs(admin: boolean, managed: boolean, localAuth: boolean) {
   return [
-    { to: '/settings/account', label: 'Account' },
+    localAuth
+      ? ({ to: '/settings/general', label: 'General' } as const)
+      : ({ to: '/settings/account', label: 'Account' } as const),
     { to: '/settings/models', label: 'Models' },
     { to: '/settings/events', label: 'Events' },
     ...(admin && !managed ? ([{ to: '/settings/limits', label: 'Limits' }] as const) : []),
@@ -32,8 +36,8 @@ function settingsTabs(admin: boolean, managed: boolean) {
 }
 
 function Settings() {
-  const { me, deployment } = Route.useRouteContext();
-  const tabs = settingsTabs(me.role === 'admin', deployment === 'managed');
+  const { me, deployment, localAuth } = Route.useRouteContext();
+  const tabs = settingsTabs(me.role === 'admin', deployment === 'managed', localAuth);
 
   return (
     <Page title="Settings">

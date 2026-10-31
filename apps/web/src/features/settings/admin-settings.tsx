@@ -3,6 +3,7 @@ import { Button, Input } from '@openbot/ui';
 import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { FormEvent } from 'react';
 import { api, meQuery } from '../../app/api.js';
+import { useLocalAuth } from '../../app/deployment.js';
 
 // Admin controls (U3): signup mode, public template links, limits and how
 // long the audit log keeps its rows, on the managed service. A self-hosted
@@ -37,6 +38,16 @@ export const LIMIT_LABELS: Record<keyof Limits, string> = {
   webhookEndpointRatePerMin: 'Webhook endpoint default rate (a minute)',
   uploadBytes: 'Upload size (bytes)',
 };
+
+/** In the Mac app's local mode there are no accounts to count per. */
+const LOCAL_LIMIT_LABELS: Partial<Record<keyof Limits, string>> = {
+  botsPerAccount: 'Bots',
+  skillsPerAccount: 'Skills',
+};
+
+export function limitLabel(key: keyof Limits, localAuth: boolean): string {
+  return (localAuth && LOCAL_LIMIT_LABELS[key]) || LIMIT_LABELS[key];
+}
 
 /**
  * The limits a submitted form changes. Only limits that differ from the
@@ -75,12 +86,13 @@ function useSaveSettings() {
 }
 
 function LimitFields({ limits }: { limits: Limits }) {
+  const localAuth = useLocalAuth();
   return (
     <fieldset className="grid grid-cols-2 gap-4">
       <legend className="mb-2 text-sm font-medium">Limits</legend>
       {(Object.keys(LIMIT_LABELS) as (keyof Limits)[]).map((key) => (
         <label key={key} className="flex flex-col gap-1.5 text-sm">
-          {LIMIT_LABELS[key]}
+          {limitLabel(key, localAuth)}
           <Input name={key} type="number" min={1} step={1} defaultValue={limits[key]} required />
         </label>
       ))}

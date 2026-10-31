@@ -7988,7 +7988,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description The request came from another origin */
+        /** @description The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY) */
         403: {
           headers: {
             [name: string]: unknown;
@@ -8091,6 +8091,87 @@ export interface paths {
         };
         /** @description Not an admin */
         403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/local/session': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Sign in the owner of the Mac app’s local stack (its main process only)
+     * @description Needs OPENBOT_LOCAL_TOKEN in the `x-openbot-local-token` header. Creates the owner when there is none, then sets an ordinary session cookie. Browsers are refused.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: {
+          'x-openbot-local-token'?: string;
+        };
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          'application/json': components['schemas']['LocalSessionRequest'];
+        };
+      };
+      responses: {
+        /** @description The owner, with the session cookie set */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['LocalSession'];
+          };
+        };
+        /** @description The local token is missing or wrong */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The request came from a browser */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description This install has no local token */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Too many attempts */
+        429: {
           headers: {
             [name: string]: unknown;
           };
@@ -8451,6 +8532,11 @@ export interface components {
        * @enum {string}
        */
       deployment: 'self_hosted' | 'managed';
+      /**
+       * @description `local`: the Mac app on This Mac signs its owner in itself (OPENBOT_LOCAL_TOKEN), so there is no sign-in, sign-up or sign-out. `password`: the usual sign-in.
+       * @enum {string}
+       */
+      auth?: 'password' | 'local';
     };
     Bot: {
       /** Format: uuid */
@@ -10835,7 +10921,7 @@ export interface components {
       createdAt: string;
     };
     SetupStatus: {
-      /** @description No user exists yet */
+      /** @description Show the first-run wizard: no user exists yet, or (Mac app local mode) its owner has no Bot yet */
       setupRequired: boolean;
     };
     SetupAdmin: {
@@ -10859,6 +10945,16 @@ export interface components {
       status: 'not_configured' | 'idle' | 'pulling' | 'ready' | 'error';
       image: string;
       error: string | null;
+    };
+    LocalSession: {
+      user: {
+        id: string;
+        name: string;
+      };
+    };
+    LocalSessionRequest: {
+      /** @description The owner’s name, used only when this call creates the owner */
+      name?: string;
     };
   };
   responses: never;

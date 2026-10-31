@@ -91,7 +91,7 @@ export interface Launcher {
   connectCloud(): Promise<void>;
   checkServer(input: string): Promise<ServerCheckResult>;
   connectServer(input: string): Promise<void>;
-  /** After the start page started the stack: waits for /readyz, then opens setup or sign-in. */
+  /** After the start page started the stack: waits for /readyz, then opens the web app. */
   connectLocal(): Promise<void>;
   info(): Promise<ConnectionInfo>;
   /** This Mac only: the web app's Start, Stop and Show logs. */
@@ -176,9 +176,10 @@ export function createLauncher(options: LauncherOptions): Launcher {
       const local = view.profiles.find((p) => p.id === LOCAL_PROFILE_ID)!;
       try {
         await waitUntilReady(fetch, local.url, options.wait);
-        const result = await checkServer(fetch, local.url);
+        await checkServer(fetch, local.url);
         const profile = await profiles.setActive(LOCAL_PROFILE_ID);
-        await window.openServer(profile, entryPath(result.setupRequired));
+        // The app signs the owner in itself, and the web app goes on to setup if it is needed.
+        await window.openServer(profile);
       } catch (error) {
         readable(error);
       }

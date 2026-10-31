@@ -13,6 +13,7 @@ import { connectorRoutes } from './connectors.js';
 import { fileRoutes } from './files.js';
 import { healthRoutes } from './health.js';
 import { inviteRoutes } from './invites.js';
+import { localRoutes } from './local.js';
 import { meRoutes } from './me.js';
 import { memberRoutes } from './members.js';
 import { memoryRoutes } from './memories.js';
@@ -57,5 +58,6 @@ export function mountRoutes(app: OpenAPIHono<AppEnv>) {
   app.route('/api/v1', skillRoutes);
   app.route('/api/v1', webhookRoutes);
   app.route('/api/v1', setupRoutes);
+  app.route('/api/v1', localRoutes);
   app.route('/', hookIngressRoutes);
 }

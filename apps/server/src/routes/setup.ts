@@ -5,18 +5,22 @@ import { adminProblems, authenticated, createRouter, problemResponse } from '../
 import {
   createAdmin,
   sandboxImageState,
-  setupRequired,
   startSandboxPull,
+  wizardRequired,
 } from '../services/setup.js';
 
 // The first-run wizard (plan 16.3, D1). `GET /setup` is public and cheap: the
 // web app asks it before sign-in to decide whether to show the wizard.
 // `POST /setup/admin` creates the first user, and refuses once one exists.
+// In the Mac app's local mode the app creates that user instead (local.ts).
 // That user is the admin internally; a self-hosted install calls it the owner.
 
 const SetupStatusSchema = z
   .object({
-    setupRequired: z.boolean().openapi({ description: 'No user exists yet' }),
+    setupRequired: z.boolean().openapi({
+      description:
+        'Show the first-run wizard: no user exists yet, or (Mac app local mode) its owner has no Bot yet',
+    }),
   })
   .openapi('SetupStatus');
 
@@ -58,7 +62,7 @@ export const setupRoutes = createRouter()
         },
       },
     }),
-    async (c) => c.json({ setupRequired: await setupRequired(c.var.deps.db) }, 200),
+    async (c) => c.json({ setupRequired: await wizardRequired(c.var.deps) }, 200),
   )
   .openapi(
     createRoute({
@@ -75,7 +79,9 @@ export const setupRoutes = createRouter()
           content: { 'application/json': { schema: SetupAdminSchema } },
         },
         400: problemResponse('Invalid account details'),
-        403: problemResponse('The request came from another origin'),
+        403: problemResponse(
+          'The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY)',
+        ),
         409: problemResponse('Setup is complete: a user already exists'),
       },
     }),

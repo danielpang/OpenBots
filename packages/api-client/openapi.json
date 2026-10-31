@@ -920,6 +920,11 @@
             "type": "string",
             "enum": ["self_hosted", "managed"],
             "description": "`self_hosted`: one account, its owner, with sign-up closed once it exists and no members, invites or audit log. `managed`: the hosted service, with admins and members."
+          },
+          "auth": {
+            "type": "string",
+            "enum": ["password", "local"],
+            "description": "`local`: the Mac app on This Mac signs its owner in itself (OPENBOT_LOCAL_TOKEN), so there is no sign-in, sign-up or sign-out. `password`: the usual sign-in."
           }
         },
         "required": ["oauth", "deployment"]
@@ -7213,7 +7218,7 @@
         "properties": {
           "setupRequired": {
             "type": "boolean",
-            "description": "No user exists yet"
+            "description": "Show the first-run wizard: no user exists yet, or (Mac app local mode) its owner has no Bot yet"
           }
         },
         "required": ["setupRequired"]
@@ -7276,6 +7281,36 @@
           }
         },
         "required": ["status", "image", "error"]
+      },
+      "LocalSession": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"]
+          }
+        },
+        "required": ["user"]
+      },
+      "LocalSessionRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "The owner’s name, used only when this call creates the owner"
+          }
+        },
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -16254,7 +16289,7 @@
             }
           },
           "403": {
-            "description": "The request came from another origin",
+            "description": "The request came from another origin, or the Mac app signs the owner in (LOCAL_ONLY)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -16355,6 +16390,85 @@
           },
           "403": {
             "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/local/session": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Sign in the owner of the Mac app’s local stack (its main process only)",
+        "description": "Needs OPENBOT_LOCAL_TOKEN in the `x-openbot-local-token` header. Creates the owner when there is none, then sets an ordinary session cookie. Browsers are refused.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "x-openbot-local-token",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The owner, with the session cookie set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalSession"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The local token is missing or wrong",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The request came from a browser",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This install has no local token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
             "content": {
               "application/problem+json": {
                 "schema": {

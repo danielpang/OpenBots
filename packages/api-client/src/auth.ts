@@ -35,5 +35,7 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
       errorCallbackURL?: string;
     }) => (await post<{ url: string }>('/sign-in/social', input)).url,
     signOut: () => post<unknown>('/sign-out', {}),
+    /** Changes the signed-in user's own name. */
+    updateUser: (input: { name: string }) => post<unknown>('/update-user', input),
   };
 }

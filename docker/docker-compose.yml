@@ -49,7 +49,9 @@ services:
       OPENBOT_SANDBOX_NETWORK: ${OPENBOT_SANDBOX_NETWORK:-openbot-sandbox}
       OPENBOT_SANDBOX_BRIDGE: ${OPENBOT_SANDBOX_BRIDGE:-${OPENBOT_SANDBOX_NETWORK:-openbot-sandbox}}
     ports:
-      - '${OPENBOT_HTTP_PORT:-3000}:3000'
+      # OPENBOT_HTTP_BIND is empty (every interface) unless set to an address
+      # and a colon: the Mac app sets 127.0.0.1: so only This Mac reaches it.
+      - '${OPENBOT_HTTP_BIND:-}${OPENBOT_HTTP_PORT:-3000}:3000'
     volumes:
       # OPENBOT_FILES_DIR
       - files:/data/files

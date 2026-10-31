@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
-import { auth } from '../app/api.js';
-import { loadDeployment } from '../app/deployment.js';
+import { auth, meQuery } from '../app/api.js';
+import { loadAuthMode, loadDeployment } from '../app/deployment.js';
 import { AuthCard, AuthForm, Field } from '../features/auth/auth-form.js';
+import { LocalOnly } from '../features/auth/local-only.js';
 import { authErrorMessage } from '../features/auth/messages.js';
 import { OAuthButtons } from '../features/auth/oauth-buttons.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
@@ -17,13 +18,26 @@ export const Route = createFileRoute('/sign-in')({
     signup: search.signup === 'closed' ? 'closed' : undefined,
   }),
   beforeLoad: async ({ context }) => {
+    if ((await loadAuthMode(context.queryClient)) === 'local') {
+      // The Mac app signs the owner in: a signed-in window goes on to the app.
+      const signedIn = await context.queryClient.fetchQuery({ ...meQuery, staleTime: 0 }).then(
+        () => true,
+        () => false,
+      );
+      if (signedIn) throw redirect({ to: '/' });
+      return { local: true as const, deployment: 'self_hosted' as const };
+    }
     if (await setupRequired(() => context.queryClient.fetchQuery(setupQuery))) {
       throw redirect({ to: '/setup' });
     }
-    return { deployment: await loadDeployment(context.queryClient) };
+    return { local: false as const, deployment: await loadDeployment(context.queryClient) };
   },
-  component: SignIn,
+  component: SignInPage,
 });
+
+function SignInPage() {
+  return Route.useRouteContext().local ? <LocalOnly /> : <SignIn />;
+}
 
 function SignIn() {
   const search = Route.useSearch();

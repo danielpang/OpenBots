@@ -33,6 +33,19 @@ describe('loadConfig', () => {
     expect(config.sandboxNetwork).toEqual({ name: 'openbot-sandbox', bridge: 'openbot-sandbox' });
   });
 
+  it('takes the Mac app local token on a self-hosted install only', () => {
+    const token = 'k'.repeat(43);
+    expect(loadConfig(base).localToken).toBeUndefined();
+    expect(loadConfig({ ...base, OPENBOT_LOCAL_TOKEN: '' }).localToken).toBeUndefined();
+    expect(loadConfig({ ...base, OPENBOT_LOCAL_TOKEN: token }).localToken).toBe(token);
+    expect(() =>
+      loadConfig({ ...base, OPENBOT_DEPLOYMENT: 'managed', OPENBOT_LOCAL_TOKEN: token }),
+    ).toThrow(/OPENBOT_LOCAL_TOKEN: only a self-hosted install/);
+    expect(() => loadConfig({ ...base, OPENBOT_LOCAL_TOKEN: 'short' })).toThrow(
+      /OPENBOT_LOCAL_TOKEN: must be 32 characters or more/,
+    );
+  });
+
   it('reads the sandbox network and its bridge, the bridge named like the network by default', () => {
     expect(loadConfig({ ...base, OPENBOT_SANDBOX_NETWORK: 'openbot-dev' }).sandboxNetwork).toEqual({
       name: 'openbot-dev',

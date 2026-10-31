@@ -1,11 +1,16 @@
 import { Button } from '@openbot/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router';
 import { auth } from '../../../app/api.js';
 import { NotificationSettings } from '../../../features/notifications/web-notifications.js';
 import { ApiKeys } from '../../../features/settings/api-keys.js';
 
+// The Mac app's local mode has no account: General takes this tab's place.
+
 export const Route = createFileRoute('/_app/settings/account')({
+  beforeLoad: ({ context }) => {
+    if (context.localAuth) throw redirect({ to: '/settings/general' });
+  },
   component: Account,
 });
 

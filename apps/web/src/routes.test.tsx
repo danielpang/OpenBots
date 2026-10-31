@@ -25,6 +25,18 @@ const capabilities = (deployment: 'self_hosted' | 'managed') => ({
 });
 const managed = capabilities('managed');
 const selfHosted = capabilities('self_hosted');
+// The Mac app on This Mac, which signs its owner in itself.
+const local = {
+  '/api/v1/capabilities': {
+    ...selfHosted['/api/v1/capabilities'],
+    auth: 'local',
+  },
+};
+const localOwner = () => {
+  const owner = me('admin');
+  return { ...owner, user: { ...owner.user, email: 'owner@openbots.local', name: 'Ada' } };
+};
+const text = (html: string) => html.replace(/<[^>]*>/g, ' ');
 
 describe('routes', () => {
   it('sends a signed-out visitor to sign in', async () => {
@@ -188,5 +200,83 @@ describe('routes', () => {
     server.routes = { ...managed, '/api/v1/setup': { setupRequired: false } };
     expect((await renderPath('/sign-up')).pathname).toBe('/sign-up');
     expect((await renderPath('/sign-in')).html).toContain('href="/sign-up"');
+  });
+});
+
+describe('routes in the Mac app local mode (auth: local)', () => {
+  const signedIn = () => ({
+    ...local,
+    '/api/v1/me': localOwner(),
+    '/api/v1/setup': { setupRequired: false },
+  });
+
+  it('opens the app signed in, with no sign out, account or email anywhere', async () => {
+    server.routes = signedIn();
+    for (const path of [
+      '/',
+      '/settings',
+      '/settings/general',
+      '/settings/models',
+      '/settings/limits',
+    ]) {
+      const { html } = await renderPath(path);
+      expect(text(html), path).not.toMatch(/sign out|sign in|account|password/i);
+      expect(html, path).not.toContain('owner@openbots.local');
+      expect(html, path).not.toContain('href="/settings/account"');
+    }
+  });
+
+  it('puts General, with the name Bots use, where Account was', async () => {
+    server.routes = signedIn();
+    expect((await renderPath('/settings')).pathname).toBe('/settings/general');
+    expect((await renderPath('/settings/account')).pathname).toBe('/settings/general');
+    expect((await renderPath('/settings/admin')).pathname).toBe('/settings/general');
+    const { html } = await renderPath('/settings/general');
+    expect(html).toMatch(/href="\/settings\/general"[^>]*>General</);
+    expect(html).toContain('Your name');
+    expect(html).toContain('Bots use it to address you.');
+    expect(html).toContain('value="Ada"');
+    expect(html).toContain('API keys');
+  });
+
+  it('keeps General to local mode and Account to the rest', async () => {
+    server.routes = { ...selfHosted, '/api/v1/me': me('admin') };
+    expect((await renderPath('/settings/general')).pathname).toBe('/settings/account');
+    expect((await renderPath('/settings/account')).html).toContain('Sign out');
+  });
+
+  it('shows a line instead of the sign-in and sign-up forms', async () => {
+    server.routes = { ...local, '/api/v1/setup': { setupRequired: false } };
+    for (const path of ['/sign-in', '/sign-up']) {
+      const { pathname, html } = await renderPath(path);
+      expect(pathname).toBe(path);
+      expect(html).toContain('Open OpenBots from the Mac app');
+      expect(html).not.toContain('<form');
+      expect(text(html)).not.toMatch(/password|email/i);
+    }
+  });
+
+  it('sends a signed-out window to /sign-in, where the Mac app signs it in again', async () => {
+    // Setup would be required for a signed-out visitor elsewhere; here sign-in is the app's.
+    server.routes = { ...local, '/api/v1/setup': { setupRequired: true } };
+    for (const path of ['/', '/settings/general', '/setup']) {
+      expect((await renderPath(path)).pathname, path).toBe('/sign-in');
+    }
+  });
+
+  it('takes a signed-in window from /sign-in and /sign-up into the app', async () => {
+    server.routes = signedIn();
+    expect((await renderPath('/sign-in')).pathname).toBe('/');
+    expect((await renderPath('/sign-up')).pathname).toBe('/');
+  });
+
+  it('starts the setup wizard at the providers, skipping the account step', async () => {
+    server.routes = { ...signedIn(), '/api/v1/setup': { setupRequired: true } };
+    for (const path of ['/', '/settings/models', '/setup']) {
+      const { pathname, html } = await renderPath(path);
+      expect(pathname, path).toBe('/setup');
+      expect(html).toContain('Add a model provider');
+      expect(text(html)).not.toMatch(/account|password|email/i);
+    }
   });
 });

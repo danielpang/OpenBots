@@ -26,6 +26,7 @@ import { Route as AppSettingsAccountRouteImport } from './routes/_app/settings/a
 import { Route as AppSettingsAdminRouteImport } from './routes/_app/settings/admin';
 import { Route as AppSettingsAuditRouteImport } from './routes/_app/settings/audit';
 import { Route as AppSettingsEventsRouteImport } from './routes/_app/settings/events';
+import { Route as AppSettingsGeneralRouteImport } from './routes/_app/settings/general';
 import { Route as AppSettingsLimitsRouteImport } from './routes/_app/settings/limits';
 import { Route as AppSettingsModelsRouteImport } from './routes/_app/settings/models';
 import { Route as AppBotsBotIdIndexRouteImport } from './routes/_app/bots/$botId/index';
@@ -118,6 +119,11 @@ const AppSettingsEventsRoute = AppSettingsEventsRouteImport.update({
   path: '/events',
   getParentRoute: () => AppSettingsRoute,
 } as any);
+const AppSettingsGeneralRoute = AppSettingsGeneralRouteImport.update({
+  id: '/general',
+  path: '/general',
+  getParentRoute: () => AppSettingsRoute,
+} as any);
 const AppSettingsLimitsRoute = AppSettingsLimitsRouteImport.update({
   id: '/limits',
   path: '/limits',
@@ -170,6 +176,7 @@ export interface FileRoutesByFullPath {
   '/settings/admin': typeof AppSettingsAdminRoute;
   '/settings/audit': typeof AppSettingsAuditRoute;
   '/settings/events': typeof AppSettingsEventsRoute;
+  '/settings/general': typeof AppSettingsGeneralRoute;
   '/settings/limits': typeof AppSettingsLimitsRoute;
   '/settings/models': typeof AppSettingsModelsRoute;
   '/settings/': typeof AppSettingsIndexRoute;
@@ -193,6 +200,7 @@ export interface FileRoutesByTo {
   '/settings/admin': typeof AppSettingsAdminRoute;
   '/settings/audit': typeof AppSettingsAuditRoute;
   '/settings/events': typeof AppSettingsEventsRoute;
+  '/settings/general': typeof AppSettingsGeneralRoute;
   '/settings/limits': typeof AppSettingsLimitsRoute;
   '/settings/models': typeof AppSettingsModelsRoute;
   '/settings': typeof AppSettingsIndexRoute;
@@ -220,6 +228,7 @@ export interface FileRoutesById {
   '/_app/settings/admin': typeof AppSettingsAdminRoute;
   '/_app/settings/audit': typeof AppSettingsAuditRoute;
   '/_app/settings/events': typeof AppSettingsEventsRoute;
+  '/_app/settings/general': typeof AppSettingsGeneralRoute;
   '/_app/settings/limits': typeof AppSettingsLimitsRoute;
   '/_app/settings/models': typeof AppSettingsModelsRoute;
   '/_app/settings/': typeof AppSettingsIndexRoute;
@@ -247,6 +256,7 @@ export interface FileRouteTypes {
     | '/settings/admin'
     | '/settings/audit'
     | '/settings/events'
+    | '/settings/general'
     | '/settings/limits'
     | '/settings/models'
     | '/settings/'
@@ -270,6 +280,7 @@ export interface FileRouteTypes {
     | '/settings/admin'
     | '/settings/audit'
     | '/settings/events'
+    | '/settings/general'
     | '/settings/limits'
     | '/settings/models'
     | '/settings'
@@ -296,6 +307,7 @@ export interface FileRouteTypes {
     | '/_app/settings/admin'
     | '/_app/settings/audit'
     | '/_app/settings/events'
+    | '/_app/settings/general'
     | '/_app/settings/limits'
     | '/_app/settings/models'
     | '/_app/settings/'
@@ -434,6 +446,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsEventsRouteImport;
       parentRoute: typeof AppSettingsRoute;
     };
+    '/_app/settings/general': {
+      id: '/_app/settings/general';
+      path: '/general';
+      fullPath: '/settings/general';
+      preLoaderRoute: typeof AppSettingsGeneralRouteImport;
+      parentRoute: typeof AppSettingsRoute;
+    };
     '/_app/settings/limits': {
       id: '/_app/settings/limits';
       path: '/limits';
@@ -491,6 +510,7 @@ interface AppSettingsRouteChildren {
   AppSettingsAdminRoute: typeof AppSettingsAdminRoute;
   AppSettingsAuditRoute: typeof AppSettingsAuditRoute;
   AppSettingsEventsRoute: typeof AppSettingsEventsRoute;
+  AppSettingsGeneralRoute: typeof AppSettingsGeneralRoute;
   AppSettingsLimitsRoute: typeof AppSettingsLimitsRoute;
   AppSettingsModelsRoute: typeof AppSettingsModelsRoute;
   AppSettingsIndexRoute: typeof AppSettingsIndexRoute;
@@ -501,6 +521,7 @@ const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsAdminRoute: AppSettingsAdminRoute,
   AppSettingsAuditRoute: AppSettingsAuditRoute,
   AppSettingsEventsRoute: AppSettingsEventsRoute,
+  AppSettingsGeneralRoute: AppSettingsGeneralRoute,
   AppSettingsLimitsRoute: AppSettingsLimitsRoute,
   AppSettingsModelsRoute: AppSettingsModelsRoute,
   AppSettingsIndexRoute: AppSettingsIndexRoute,

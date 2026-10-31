@@ -106,6 +106,9 @@ const envSchema = z.object({
   OPENBOT_COMPUTER_AGENT_TOKEN: optional(z.string()),
   OPENBOT_COMPUTER_AGENT_SHARED: withDefault(z.stringbool(), 'false'),
   OPENBOT_DEPLOYMENT: withDefault(z.enum(['self_hosted', 'managed']), 'self_hosted'),
+  OPENBOT_LOCAL_TOKEN: optional(
+    z.string().min(32, { message: 'must be 32 characters or more (the Mac app generates one)' }),
+  ),
   OPENBOT_SIGNUP_MODE: withDefault(
     z.enum(['first_user_admin', 'invite', 'open']),
     'first_user_admin',
@@ -178,6 +181,13 @@ export interface Config {
    * manage members.
    */
   deployment: Deployment;
+  /**
+   * The Mac app's local owner token (OPENBOT_LOCAL_TOKEN), self-hosted only.
+   * With it the Mac app that runs this stack signs its owner in through
+   * `POST /api/v1/local/session` instead of a password: the install has no
+   * sign-in, sign-up or sign-out. Only the app's main process holds it.
+   */
+  localToken?: string;
   /** Who may sign up after the first user. Managed only; self-hosted is always closed. */
   signupMode: 'first_user_admin' | 'invite' | 'open';
   filesDir: string;
@@ -224,6 +234,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       'invalid configuration:\n  OPENBOT_MASTER_KEY_PREVIOUS: holds OPENBOT_MASTER_KEY itself; list only the keys being replaced',
     );
   }
+  if (e.OPENBOT_LOCAL_TOKEN && e.OPENBOT_DEPLOYMENT !== 'self_hosted') {
+    throw new Error(
+      'invalid configuration:\n  OPENBOT_LOCAL_TOKEN: only a self-hosted install signs in with the Mac app; unset it for managed',
+    );
+  }
   let sandboxNetwork: SandboxNetwork;
   try {
     sandboxNetwork = resolveSandboxNetwork(e.OPENBOT_SANDBOX_NETWORK, e.OPENBOT_SANDBOX_BRIDGE);
@@ -264,6 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         }
       : undefined,
     deployment: e.OPENBOT_DEPLOYMENT,
+    localToken: e.OPENBOT_LOCAL_TOKEN,
     signupMode: e.OPENBOT_SIGNUP_MODE,
     filesDir: e.OPENBOT_FILES_DIR,
     mcpCatalog: { dir: e.OPENBOT_MCP_DIR, allowNpx: e.OPENBOT_MCP_NPX_FALLBACK },

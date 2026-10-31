@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 import { bundledStackPaths } from './compose.js';
 import type { DockerStatus } from './docker.js';
 import { localServerUrl } from '../main/profiles.js';
@@ -18,11 +19,14 @@ import {
   portTakenMessage,
   pullFailureMessage,
   releaseImagePrefix,
+  generateLocalToken,
   renderEnv,
   setEnvValue,
   StackError,
   upFailureMessage,
   withDatabasePassword,
+  withLocalToken,
+  withLoopbackPort,
   withPort,
   type StackFiles,
   type StackManagerOptions,
@@ -102,9 +106,10 @@ const projects = (exec: ReturnType<typeof composeExec>) =>
     .map((args) => args[2]);
 
 const allFree = async () => true;
-/** The project and the sandbox network an install from this version of the app records in `.env`. */
+
+/** The project, the sandbox network, the local token and the loopback port this version of the app records in `.env`. */
 const RECORDED =
-  'COMPOSE_PROJECT_NAME=openbot-app\nOPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\n';
+  'COMPOSE_PROJECT_NAME=openbot-app\nOPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
 /** The project alone, as an install from before the app named its network has it. */
 const PROJECT_ONLY = 'COMPOSE_PROJECT_NAME=openbot-app\n';
 /** `compose config --images` and `image inspect` replies for images this Mac has. */
@@ -140,6 +145,93 @@ function fakeChild() {
   });
   return child as typeof child & ChildLike;
 }
+
+describe('the local owner token (OPENBOT_LOCAL_TOKEN)', () => {
+  it('is 32 random bytes in base64url, a new one each time', () => {
+    const token = generateLocalToken();
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(Buffer.from(token, 'base64url')).toHaveLength(32);
+    expect(generateLocalToken()).not.toBe(token);
+  });
+
+  it('fills in a missing or empty token and keeps one that is there', () => {
+    expect(withLocalToken('A=1\n', () => 'new')).toBe('A=1\nOPENBOT_LOCAL_TOKEN=new\n');
+    expect(withLocalToken('OPENBOT_LOCAL_TOKEN=\nA=1\n', () => 'new')).toBe(
+      'OPENBOT_LOCAL_TOKEN=new\nA=1\n',
+    );
+    const kept = 'OPENBOT_LOCAL_TOKEN=old\nA=1\n';
+    expect(withLocalToken(kept, () => 'new')).toBe(kept);
+  });
+
+  it('goes into a new .env, with the web port on loopback only', () => {
+    const env = renderEnv(TEMPLATE, { masterKey: 'KEY', databasePassword: 'p', localToken: 'tok' });
+    expect(envValue(env, 'OPENBOT_LOCAL_TOKEN')).toBe('tok');
+    expect(envValue(env, 'OPENBOT_HTTP_BIND')).toBe('127.0.0.1:');
+  });
+
+  it('publishes the web port on loopback unless the owner chose an address', () => {
+    expect(withLoopbackPort('A=1\n')).toBe('A=1\nOPENBOT_HTTP_BIND=127.0.0.1:\n');
+    const chosen = 'OPENBOT_HTTP_BIND=192.168.1.5:\n';
+    expect(withLoopbackPort(chosen)).toBe(chosen);
+  });
+
+  it('is published by compose on the address OPENBOT_HTTP_BIND names, every interface without it', () => {
+    const compose = readFileSync(
+      new URL('../../../../docker/docker-compose.yml', import.meta.url),
+      'utf8',
+    );
+    const server = (parse(compose) as { services: { openbot: { ports: string[] } } }).services
+      .openbot;
+    expect(server.ports).toEqual(['${OPENBOT_HTTP_BIND:-}${OPENBOT_HTTP_PORT:-3000}:3000']);
+    // Compose's `${NAME:-default}`, as `docker compose` resolves it.
+    const resolve = (text: string, env: Record<string, string>) =>
+      text.replace(/\$\{(\w+):-([^}]*)\}/g, (_, name: string, fallback: string) =>
+        env[name] ? env[name]! : fallback,
+      );
+    const port = server.ports[0]!;
+    expect(resolve(port, {})).toBe('3000:3000');
+    expect(resolve(port, { OPENBOT_HTTP_PORT: '3001' })).toBe('3001:3000');
+    const local = renderEnv(TEMPLATE, {
+      masterKey: 'KEY',
+      databasePassword: 'p',
+      localToken: 'tok',
+      port: 3002,
+    });
+    const env = {
+      OPENBOT_HTTP_BIND: envValue(local, 'OPENBOT_HTTP_BIND')!,
+      OPENBOT_HTTP_PORT: envValue(local, 'OPENBOT_HTTP_PORT')!,
+    };
+    expect(resolve(port, env)).toBe('127.0.0.1:3002:3000');
+  });
+
+  it('is generated on first start, kept after, and read back only by localToken()', async () => {
+    const { manager, files } = makeManager();
+    expect(await manager.localToken()).toBeNull();
+    await manager.start();
+    const first = envValue(files.data.get(paths.envFile)!, 'OPENBOT_LOCAL_TOKEN')!;
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await manager.localToken()).toBe(first);
+    await manager.start();
+    await manager.upgrade();
+    expect(envValue(files.data.get(paths.envFile)!, 'OPENBOT_LOCAL_TOKEN')).toBe(first);
+    // Status crosses the preload bridge to the start page: never the token.
+    expect(JSON.stringify(await manager.status())).not.toContain(first);
+  });
+
+  it('gives an install from before it a token on its next start, keeping everything else', async () => {
+    const existing = `OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\n# mine\nX=1\nCOMPOSE_PROJECT_NAME=openbot-app\nOPENBOT_SANDBOX_NETWORK=openbot-app-sandbox-254\n`;
+    const { manager, files } = makeManager({
+      files: memoryFiles({ [paths.envTemplate]: TEMPLATE, [paths.envFile]: existing }),
+    });
+    expect(await manager.localToken()).toBeNull();
+    await manager.start();
+    const env = files.data.get(paths.envFile)!;
+    const token = envValue(env, 'OPENBOT_LOCAL_TOKEN')!;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(env).toBe(`${existing}OPENBOT_LOCAL_TOKEN=${token}\nOPENBOT_HTTP_BIND=127.0.0.1:\n`);
+    expect(await manager.localToken()).toBe(token);
+  });
+});
 
 describe('renderEnv', () => {
   it('fills the master key and the database password, and pins the image tag', () => {
@@ -542,7 +634,8 @@ describe('createStackManager', () => {
 
 describe('the Compose project', () => {
   const legacy = (stdout: string) => ({ 'container ls': { code: 0, stdout, stderr: '' } });
-  const older = 'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\n';
+  const older =
+    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
 
   it('runs a new install as openbot-app, never the openbot of a source checkout', async () => {
     // The owner's checkout runs project openbot from another directory.
@@ -1016,7 +1109,8 @@ describe('the sandbox network', () => {
     ['openbot_default', '192.168.156.0/24'],
     ['openbot-sandbox', '172.30.255.0/24'],
   ];
-  const older = 'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\n';
+  const older =
+    'OPENBOT_MASTER_KEY=keep\nPOSTGRES_PASSWORD=pw\nOPENBOT_LOCAL_TOKEN=held\nOPENBOT_HTTP_BIND=127.0.0.1:\n';
   const sandboxOf = (env: string) =>
     Object.fromEntries(
       [

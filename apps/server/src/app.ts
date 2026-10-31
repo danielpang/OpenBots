@@ -18,6 +18,7 @@ import { httpMetrics } from './metrics.js';
 import { apiKeyFrom } from './middleware/auth.js';
 import { OPENAPI_PATH, openApiDocument } from './openapi.js';
 import { mountRoutes } from './routes/index.js';
+import { LOCAL_SESSION_PATH } from './routes/local.js';
 
 /** `apps/web/dist`, from both `src/` and `dist/`. Leaf 0.5 builds it. */
 export const WEB_DIST = fileURLToPath(new URL('../../web/dist', import.meta.url));
@@ -50,7 +51,9 @@ export function createApp(deps: AppDeps, { webDist = WEB_DIST }: AppOptions = {}
     );
   });
   app.use(httpMetrics);
-  app.use('/api/*', cors({ origin, credentials: true, maxAge: 600 }));
+  // No CORS for the Mac app's local sign-in (routes/local.ts): no page may read it.
+  const apiCors = cors({ origin, credentials: true, maxAge: 600 });
+  app.use('/api/*', (c, next) => (c.req.path === LOCAL_SESSION_PATH ? next() : apiCors(c, next)));
   app.use('/api/*', async (c, next) => {
     if (UNSAFE_METHODS.has(c.req.method) && crossOriginWithCookie(c.req.raw.headers, origin)) {
       throw new DomainError(403, 'ORIGIN_NOT_ALLOWED', `This request must come from ${origin}`);

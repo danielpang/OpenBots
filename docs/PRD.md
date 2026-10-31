@@ -185,6 +185,8 @@ Grok Bot exposes webhooks only as a Routine trigger. OpenBot keeps that and adds
 
 Self-hosted (the default) is single-owner: the setup wizard creates the one account, sign-up is then closed, and the admin controls below that only matter with members (signup mode, public template links, audit log retention) keep their defaults. The owner still sets the limits (Settings > Limits) and the connector policy. U1 and U3 as written are for the managed service.
 
+The Mac app running OpenBots on This Mac has no sign-in at all. It is one person on their own computer, so there is no account concept in the UI: no sign-up, no account step in the setup wizard, no sign-in, no sign-out and no Account settings. The app opens signed in as the install's owner, and Settings starts with General, which holds the name Bots use to address the owner, notifications and API keys. A self-hosted server reached over the network or from a browser keeps the usual sign-in. Admins, members and organizations come later with the managed service, likely through better-auth's organization plugin.
+
 | ID | Requirement | Priority |
 | --- | --- | --- |
 | U1 | First user becomes admin; signup mode is first-user-admin, invite, or open. Optional GitHub and Google sign-in. | Must |
@@ -197,7 +199,7 @@ Self-hosted (the default) is single-owner: the setup wizard creates the one acco
 | ID | Requirement | Priority |
 | --- | --- | --- |
 | D1 | Docker Compose self-host is the default install: one command, a first-run wizard, migrations on start, backup and upgrade docs. | Must |
-| D2 | Web app served by the server. Mac app (Apple silicon and Intel) with notifications, Keychain, deep links, menu bar, auto-update, and local stack management. On first launch the Mac app asks how to connect: sign in to an OpenBots account, connect to a self-hosted server, or run OpenBots on this Mac in Docker. It remembers the choice, offers "Change connection…" in the app and tray menus, and shows one small icon in the sidebar for how it is connected and whether that connection is up. | Must |
+| D2 | Web app served by the server. Mac app (Apple silicon and Intel) with notifications, Keychain, deep links, menu bar, auto-update, and local stack management. On first launch the Mac app asks how to connect: sign in to an OpenBots account, connect to a self-hosted server, or run OpenBots on this Mac in Docker (which needs no sign-in, see 4.13). It remembers the choice, offers "Change connection…" in the app and tray menus, and shows one small icon in the sidebar for how it is connected and whether that connection is up. | Must |
 | D3 | README documents exposing the instance through ngrok and Cloudflare Tunnel, including setting the public URL and protecting the UI while leaving webhook paths reachable. | Must |
 | D4 | Windows and Linux desktop builds, PWA, mobile. | Later |
 

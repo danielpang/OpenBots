@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { access, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -43,6 +44,7 @@ import {
 } from './deep-links.js';
 import { registerDesktopIpc } from './ipc.js';
 import { connectionHeader, createLauncher } from './launcher.js';
+import { createLocalSignIn, needsLocalSignIn, ownerName } from './local-session.js';
 import { fileMenu } from './menu.js';
 import { navigationVerdict, serverPath } from './navigation.js';
 import { createOAuthBrowser } from './oauth.js';
@@ -157,6 +159,25 @@ const gate = createServerGate({
       // A development server named by OPENBOT_DESKTOP_LOCAL_URL is not the stack's.
       stack: process.env.OPENBOT_DESKTOP_LOCAL_URL ? null : stack,
     }),
+});
+
+// This Mac has no sign-in: the main process signs the owner in with the
+// stack's local token (./local-session.ts), which stays in this process.
+const localSignIn = createLocalSignIn({
+  fetch: (url, init) => fetch(url, init),
+  // A development server named by OPENBOT_DESKTOP_LOCAL_URL takes its token from the environment.
+  token: async () =>
+    process.env.OPENBOT_DESKTOP_LOCAL_URL
+      ? (process.env.OPENBOT_LOCAL_TOKEN ?? null)
+      : stack.localToken(),
+  name: () =>
+    ownerName(
+      () =>
+        new Promise((done, fail) =>
+          execFile('id', ['-F'], (error, stdout) => (error ? fail(error) : done(stdout))),
+        ),
+    ),
+  log: (message) => console.error(message),
 });
 
 let mainWindow: BrowserWindow | null = null;
@@ -324,6 +345,31 @@ async function restoreToken(profile: ServerProfile, ses: Session): Promise<void>
   connect(profile, token);
 }
 
+/**
+ * This Mac's sign-in: the saved session while the server takes it, else a
+ * fresh one for the owner, put into the window's session before it loads.
+ */
+async function signInLocally(profile: ServerProfile): Promise<void> {
+  try {
+    const token = await localSignIn.ensure(profile.url, await tokens.get(profile.id));
+    if (token) await tokens.set(profile.id, token);
+  } catch (error) {
+    console.error('could not sign in on This Mac', error);
+  }
+  await restoreToken(profile, profileSession(profile));
+}
+
+/** The window reached /sign-in on This Mac, or the session ended: sign in again and reload. */
+async function renewLocally(profile: ServerProfile, reload: boolean): Promise<void> {
+  const token = await localSignIn.renew(profile.url).catch(() => null);
+  if (!token) return;
+  await tokens.set(profile.id, token).catch(() => undefined);
+  await restoreToken(profile, profileSession(profile));
+  if (reload && mainWindow && activeProfile?.id === profile.id) {
+    await mainWindow.loadURL(new URL('/', profile.url).toString()).catch(() => undefined);
+  }
+}
+
 // The main process's own connection: notifications and the tray.
 
 function connect(profile: ServerProfile, token: SessionToken) {
@@ -346,6 +392,7 @@ function connect(profile: ServerProfile, token: SessionToken) {
     onUnauthorized: () => {
       void tokens.clear(profile.id);
       disconnect();
+      if (profile.kind === 'local') void renewLocally(profile, false);
     },
   });
   connection = current;
@@ -455,6 +502,15 @@ async function createMainWindow(profile: ServerProfile): Promise<BrowserWindow> 
   contents.on('will-redirect', (event) => {
     if (event.isMainFrame) guard(event, event.url);
   });
+  // This Mac never shows sign-in: on /sign-in or /sign-up (an expired session) sign in again.
+  const relogin = (url: string) => {
+    const current = activeProfile?.id === profile.id ? activeProfile : profile;
+    if (needsLocalSignIn(current, url)) void renewLocally(current, true);
+  };
+  contents.on('did-navigate', (_event, url) => relogin(url));
+  contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+    if (isMainFrame) relogin(url);
+  });
   contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is an aborted load (a new navigation replaced it), not a failure; -20
     // is one the gate refused, which shows the start page itself.
@@ -520,7 +576,10 @@ const opener = createOpener<BrowserWindow>({
       const contents = window.webContents;
       return !contents.isLoading() && serverPath(contents.getURL(), profile.url) != null;
     },
-    signIn: (profile) => restoreToken(profile, profileSession(profile)),
+    signIn: (profile) =>
+      profile.kind === 'local'
+        ? signInLocally(profile)
+        : restoreToken(profile, profileSession(profile)),
     signOut: (profile) => {
       if (activeProfile?.id === profile.id) disconnect();
     },

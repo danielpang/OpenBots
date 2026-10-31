@@ -200,6 +200,12 @@ export interface StackManager {
   /** Reads only `.env`, so it needs no Docker. */
   pendingUpgrade(): Promise<StackUpgrade | null>;
   /**
+   * OPENBOT_LOCAL_TOKEN from `.env`, which the main process signs the owner
+   * in with (main/local-session.ts); null before a start wrote one. Main
+   * process only: it never crosses the preload bridge.
+   */
+  localToken(): Promise<string | null>;
+  /**
    * Moves a stack that is not running to the first free port (and its
    * localhost OPENBOT_PUBLIC_URL with it), for when another app took its port.
    */
@@ -260,6 +266,34 @@ export function withDatabasePassword(env: string, generate: () => string): strin
         : line,
     );
   return setEnvValue(lines.join('\n'), 'POSTGRES_PASSWORD', password);
+}
+
+/**
+ * The Mac app's local owner token (OPENBOT_LOCAL_TOKEN): with it the main
+ * process signs the owner in, so This Mac has no sign-in (main/local-session.ts).
+ * An existing one is kept; a `.env` without one, new or from before, gets one.
+ */
+export function withLocalToken(env: string, generate: () => string): string {
+  if (envValue(env, 'OPENBOT_LOCAL_TOKEN')?.trim()) return env;
+  return setEnvValue(env, 'OPENBOT_LOCAL_TOKEN', generate());
+}
+
+/**
+ * The address the stack's web port is published on (OPENBOT_HTTP_BIND in
+ * docker/docker-compose.yml): this Mac's loopback, so other machines on the
+ * network cannot reach a server that signs its owner in without a password.
+ */
+export const LOOPBACK_BIND = '127.0.0.1:';
+
+/** Publishes the web port on loopback only, unless the owner set an address themselves. */
+export function withLoopbackPort(env: string): string {
+  if (envValue(env, 'OPENBOT_HTTP_BIND') != null) return env;
+  return setEnvValue(env, 'OPENBOT_HTTP_BIND', LOOPBACK_BIND);
+}
+
+/** 32 random bytes, base64url: nothing to quote in `.env`. */
+export function generateLocalToken(): string {
+  return randomBytes(32).toString('base64url');
 }
 
 /** 24 random bytes in hex, like install.sh: nothing to escape in DATABASE_URL. */
@@ -326,6 +360,8 @@ export function renderEnv(
   values: {
     masterKey: string;
     databasePassword: string;
+    /** OPENBOT_LOCAL_TOKEN; left as the template has it when omitted. */
+    localToken?: string;
     serverVersion?: string;
     /** The free port the stack publishes, with the matching OPENBOT_PUBLIC_URL. */
     port?: number;
@@ -338,6 +374,10 @@ export function renderEnv(
 ): string {
   let env = setEnvValue(template, 'OPENBOT_MASTER_KEY', values.masterKey);
   env = withDatabasePassword(env, () => values.databasePassword);
+  if (values.localToken != null) {
+    env = withLocalToken(env, () => values.localToken!);
+    env = withLoopbackPort(env);
+  }
   if (values.serverVersion != null) env = setEnvValue(env, 'OPENBOT_VERSION', values.serverVersion);
   if (values.port != null) {
     env = setEnvValue(env, 'OPENBOT_HTTP_PORT', String(values.port));
@@ -628,13 +668,17 @@ export function createStackManager(options: StackManagerOptions): StackManager {
    * own. An existing one is kept, except that one written before the app
    * generated the database password gets it now (with it missing, Postgres
    * never started, so there is no database to mismatch), one from before the
-   * app named its sandbox network gets one (sandboxFor), and the project and
-   * any development images are recorded in it.
+   * app named its sandbox network gets one (sandboxFor), one from before the
+   * app signed its owner in gets a local token (withLocalToken) and a web
+   * port on loopback only (withLoopbackPort), and the
+   * project and any development images are recorded in it.
    */
   async function ensureEnv(cli: string, name: string): Promise<string> {
     if (await files.exists(paths.envFile)) {
       const current = await files.readFile(paths.envFile);
       let fixed = withDatabasePassword(current, generateDatabasePassword);
+      fixed = withLocalToken(fixed, generateLocalToken);
+      fixed = withLoopbackPort(fixed);
       if (envValue(fixed, 'COMPOSE_PROJECT_NAME')?.trim() !== name) {
         fixed = setEnvValue(fixed, 'COMPOSE_PROJECT_NAME', name);
       }
@@ -648,6 +692,7 @@ export function createStackManager(options: StackManagerOptions): StackManager {
     const created = renderEnv(template, {
       masterKey: randomBytes(32).toString('base64'),
       databasePassword: generateDatabasePassword(),
+      localToken: generateLocalToken(),
       serverVersion: options.serverVersion,
       port: await freePort(),
       project: name,
@@ -818,6 +863,11 @@ export function createStackManager(options: StackManagerOptions): StackManager {
     upgrade: (onPhase) => up(true, onPhase),
 
     pendingUpgrade: pendingUpgradeHere,
+
+    async localToken() {
+      if (!(await files.exists(paths.envFile))) return null;
+      return envValue(await files.readFile(paths.envFile), 'OPENBOT_LOCAL_TOKEN')?.trim() || null;
+    },
 
     async changePort() {
       const docker = await requireReady();

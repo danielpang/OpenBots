@@ -1,10 +1,12 @@
 import { hkdfSync } from 'node:crypto';
 import { apiKey } from '@better-auth/api-key';
-import { betterAuth } from 'better-auth';
+import { betterAuth, type BetterAuthPlugin } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { APIError } from 'better-auth/api';
+import { APIError, createAuthEndpoint } from 'better-auth/api';
+import { setSessionCookie } from 'better-auth/cookies';
 import { symmetricEncrypt } from 'better-auth/crypto';
-import { eq, isNotNull, or } from 'drizzle-orm';
+import { asc, eq, isNotNull, or } from 'drizzle-orm';
+import { z } from 'zod';
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
@@ -39,11 +41,40 @@ import { effectiveSettings, ensureWorkspace, lockWorkspace, type Role } from './
 // the sign-in that follows a signup), signing out is `auth.sign_out`, and a
 // refused email sign-in is `auth.sign_in_failed` with the address tried.
 //
+// The Mac app's local mode (OPENBOT_LOCAL_TOKEN, routes/local.ts) has no
+// sign-in at all: `createLocalSession`, a server-only endpoint (no HTTP path),
+// makes the owner if there is none yet, through the same user hooks as the
+// setup wizard, and gives them an ordinary session. That owner has a
+// placeholder email and no password, so nobody can sign in as them. Its
+// session is audited as `auth.local_session` rather than `auth.sign_in`.
+// With a local token configured nothing else makes a user or a session:
+// email and OAuth sign-up and sign-in answer 403 LOCAL_ONLY (here and in the
+// hooks below), so nobody who reaches the port can make the owner first with
+// a password they know. An owner from before local mode keeps their account,
+// and is signed in by the app; their password no longer works.
+//
 // Sign-in providers' access and refresh tokens are encrypted at rest with the
 // better-auth secret (`encryptOAuthTokens`, S-9); rows from before are
 // encrypted at start-up by `encryptStoredOAuthTokens`.
 
 export const API_KEY_PREFIX = 'obk_';
+
+/**
+ * The email of an owner the Mac app created (routes/local.ts). It is never
+ * shown, and with no password nobody signs in with it.
+ */
+export const LOCAL_OWNER_EMAIL = 'owner@openbots.local';
+
+/** better-auth's path for `createLocalSession`, which no HTTP request reaches. */
+const LOCAL_SESSION_PATH = '/openbot/local-session';
+
+/** Every way in but the Mac app's, refused when it signs the owner in (see the top). */
+const SIGN_IN_PATHS = /^\/api\/auth\/(sign-up|sign-in|callback|oauth2)(\/|$)/;
+
+export const LOCAL_ONLY_MESSAGE = 'This OpenBots signs in from the Mac app only.';
+
+const localOnly = () =>
+  new APIError('FORBIDDEN', { code: 'LOCAL_ONLY', message: LOCAL_ONLY_MESSAGE });
 
 /**
  * The part of the better-auth instance the server uses. Spelled out because the
@@ -66,6 +97,15 @@ export interface Auth {
       createdAt: Date;
       expiresAt: Date | null;
     }>;
+    /**
+     * Signs the install's owner in, creating them first (named `name`) when
+     * there is no user yet. The response carries the session cookie.
+     */
+    createLocalSession(input: {
+      body: { name: string };
+      headers: Headers;
+      asResponse: true;
+    }): Promise<Response>;
   };
 }
 
@@ -134,6 +174,7 @@ export function createAuth({
         // routes, not the key.
         rateLimit: { enabled: false },
       }),
+      localSessionPlugin(db),
     ],
     databaseHooks: {
       user: {
@@ -141,6 +182,7 @@ export function createAuth({
           // The invite is checked here and spent in `after`, once the user row
           // exists, so a signup that fails in between does not burn it (U1).
           before: async (user, ctx) => {
+            if (config.localToken && ctx?.path !== LOCAL_SESSION_PATH) throw localOnly();
             const workspace = await ensureWorkspace(db);
             const [anyUser] = await db.select({ id: schema.users.id }).from(schema.users).limit(1);
             if (!anyUser) return;
@@ -214,7 +256,8 @@ export function createAuth({
         create: {
           // A member an admin disabled cannot sign in again (U3), and on a
           // self-hosted install nobody but the owner can.
-          before: async (session) => {
+          before: async (session, ctx) => {
+            if (config.localToken && ctx?.path !== LOCAL_SESSION_PATH) throw localOnly();
             const [member] = await db
               .select({
                 disabledAt: schema.workspaceMembers.disabledAt,
@@ -236,6 +279,12 @@ export function createAuth({
             }
           },
           after: async (session, ctx) => {
+            if (ctx?.path === LOCAL_SESSION_PATH) {
+              await auditAuth(db, 'auth.local_session', session.userId, {
+                ip: session.ipAddress ?? null,
+              });
+              return;
+            }
             await auditAuth(db, 'auth.sign_in', session.userId, {
               via: ctx?.path ?? null,
               ip: session.ipAddress ?? null,
@@ -263,7 +312,15 @@ export function createAuth({
           headers: { 'content-type': 'application/problem+json' },
         });
       }
-      if (request.method !== 'POST' || new URL(request.url).pathname !== SIGN_IN_EMAIL) {
+      const { pathname } = new URL(request.url);
+      if (config.localToken && SIGN_IN_PATHS.test(pathname)) {
+        const body = problem(403, LOCAL_ONLY_MESSAGE, { code: 'LOCAL_ONLY' });
+        return Response.json(body, {
+          status: 403,
+          headers: { 'content-type': 'application/problem+json' },
+        });
+      }
+      if (request.method !== 'POST' || pathname !== SIGN_IN_EMAIL) {
         return instance.handler(request);
       }
       const body = (await request
@@ -282,9 +339,61 @@ export function createAuth({
 
 const SIGN_IN_EMAIL = '/api/auth/sign-in/email';
 
+/** The owner: the first admin of the workspace (self-hosted has only them). */
+async function findOwner(db: Db): Promise<string | undefined> {
+  const [owner] = await db
+    .select({ id: schema.workspaceMembers.userId })
+    .from(schema.workspaceMembers)
+    .where(eq(schema.workspaceMembers.role, 'admin'))
+    .orderBy(asc(schema.workspaceMembers.createdAt))
+    .limit(1);
+  return owner?.id;
+}
+
+/** `createLocalSession` (see the top of this file). */
+function localSessionPlugin(db: Db) {
+  return {
+    id: 'openbot-local-session',
+    endpoints: {
+      createLocalSession: createAuthEndpoint(
+        LOCAL_SESSION_PATH,
+        {
+          method: 'POST',
+          body: z.object({ name: z.string().min(1).max(100) }),
+          // Called from routes/local.ts only, never routed.
+          metadata: { SERVER_ONLY: true },
+        },
+        async (ctx) => {
+          const adapter = ctx.context.internalAdapter;
+          let ownerId = await findOwner(db);
+          if (!ownerId) {
+            try {
+              // The user hooks above make the first user the admin, as for setup.
+              const user = await adapter.createUser(
+                { email: LOCAL_OWNER_EMAIL, name: ctx.body.name, emailVerified: false },
+                { method: 'openbot-local' },
+              );
+              ownerId = user.id;
+            } catch (error) {
+              // Two first calls at once: the other one made the owner.
+              ownerId = await findOwner(db);
+              if (!ownerId) throw error;
+            }
+          }
+          const user = await adapter.findUserById(ownerId);
+          if (!user) throw new APIError('NOT_FOUND', { message: 'The owner is gone' });
+          const session = await adapter.createSession(user.id);
+          await setSessionCookie(ctx, { session, user });
+          return ctx.json({ user: { id: user.id, name: user.name } });
+        },
+      ),
+    },
+  } satisfies BetterAuthPlugin;
+}
+
 async function auditAuth(
   db: Db,
-  action: 'auth.sign_in' | 'auth.sign_out',
+  action: 'auth.sign_in' | 'auth.sign_out' | 'auth.local_session',
   userId: string,
   metadata: Record<string, unknown>,
 ) {

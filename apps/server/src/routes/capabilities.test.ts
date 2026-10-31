@@ -17,6 +17,7 @@ describe('capabilities route', () => {
       oauth: { github: false, google: false },
       computer: false,
       deployment: 'self_hosted',
+      auth: 'password',
     });
   });
 
@@ -32,6 +33,15 @@ describe('capabilities route', () => {
       oauth: { github: true, google: false },
       computer: false,
       deployment: 'self_hosted',
+      auth: 'password',
     });
+  });
+
+  it('reports local sign-in when the Mac app set a local token', async () => {
+    const config = { ...t.deps.config, localToken: 'k'.repeat(43) };
+    const res = await createApp({ ...t.deps, config }, { webDist: '' }).request(
+      '/api/v1/capabilities',
+    );
+    expect(((await res.json()) as { auth: string }).auth).toBe('local');
   });
 });

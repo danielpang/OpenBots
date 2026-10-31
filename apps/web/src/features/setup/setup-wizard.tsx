@@ -12,7 +12,7 @@ import {
 } from '@openbot/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { api, capabilitiesQuery } from '../../app/api.js';
 import { AuthCard, AuthForm, Field } from '../auth/auth-form.js';
 import { authErrorMessage } from '../auth/messages.js';
@@ -44,7 +44,8 @@ import {
 // working provider key (L1), the sandbox image pull in the background, and a
 // first Bot. Each step after the first uses the ordinary APIs as the new
 // owner (an admin internally); reloading part way lands in the app, where
-// Settings does the rest.
+// Settings does the rest. With `skipAccount` (the Mac app's local mode, which
+// signed the owner in already) it starts at the provider step.
 
 type Step = 'account' | 'provider' | 'bot';
 
@@ -54,16 +55,29 @@ const STEP_TITLES: Record<Step, string> = {
   bot: 'Create your first Bot',
 };
 
-export function SetupWizard() {
-  const [step, setStep] = useState<Step>('account');
+export function SetupWizard({ skipAccount = false }: { skipAccount?: boolean }) {
+  const [step, setStep] = useState<Step>(skipAccount ? 'provider' : 'account');
   return (
     <AuthCard title={STEP_TITLES[step]}>
       {step === 'account' && <AccountStep onDone={() => setStep('provider')} />}
       {step === 'provider' && <ProviderStep onDone={() => setStep('bot')} />}
       {step === 'bot' && <BotStep />}
       {step !== 'account' && <SandboxStatus />}
+      {skipAccount && <StartSandboxPull />}
     </AuthCard>
   );
+}
+
+/** Starts the image pull the account step would have, once. Renders nothing. */
+function StartSandboxPull() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    void startSandboxPull().then(
+      (state) => queryClient.setQueryData(sandboxImageQuery.queryKey, state),
+      () => undefined,
+    );
+  }, [queryClient]);
+  return null;
 }
 
 function AccountStep({ onDone }: { onDone: () => void }) {

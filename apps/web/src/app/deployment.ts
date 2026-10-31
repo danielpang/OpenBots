@@ -37,6 +37,31 @@ export function useManaged(): boolean {
   return deploymentOf(data) === 'managed';
 }
 
+/**
+ * How the owner signs in (`auth` in the capabilities). `local` is the Mac app
+ * running the stack on This Mac: the app signs its owner in itself, so there
+ * is no sign-in, sign-up, sign-out or account anywhere, only the owner's name.
+ */
+export type AuthMode = Capabilities['auth'];
+
+const authModeOf = (capabilities: Capabilities | undefined): AuthMode =>
+  capabilities?.auth ?? 'password';
+
+/** The auth mode, for route guards; a server that cannot be asked counts as `password`. */
+export async function loadAuthMode(queryClient: QueryClient): Promise<AuthMode> {
+  try {
+    return authModeOf(await queryClient.ensureQueryData(capabilitiesQuery));
+  } catch {
+    return 'password';
+  }
+}
+
+/** Whether the Mac app signs the owner in (see AuthMode). Reads loaded capabilities only, like useManaged. */
+export function useLocalAuth(): boolean {
+  const { data } = useQuery({ ...capabilitiesQuery, enabled: false });
+  return authModeOf(data) === 'local';
+}
+
 /** What a blocked connector or tool says: on a self-hosted install the owner set the policy. */
 export const blockedText = (managed: boolean) =>
   managed ? 'Disabled by admin' : 'Blocked by policy';
