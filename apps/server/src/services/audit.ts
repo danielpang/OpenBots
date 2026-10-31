@@ -118,7 +118,7 @@ export async function trimAuditLog(
   const workspaces = await deps.db.select().from(schema.workspaces);
   let trimmed = 0;
   for (const workspace of workspaces) {
-    const days = effectiveSettings(deps.config, workspace).auditRetentionDays;
+    const days = effectiveSettings(deps.config, workspace, null).auditRetentionDays;
     const cutoff = new Date(now.getTime() - days * 86_400_000);
     const deleted = await deps.db
       .delete(schema.auditLog)

@@ -208,10 +208,7 @@ export async function createRoutine(
   const enabled = input.enabled ?? true;
   const create = async (tx: Db) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`routines:${botId}`}))`);
-    const { limits } = await organizationSettings(
-      { config: deps.config, db: tx },
-      owner.workspaceId,
-    );
+    const { limits } = await organizationSettings({ ...deps, db: tx }, owner.workspaceId);
     const [row] = await tx
       .select({ n: count() })
       .from(schema.routines)
@@ -585,10 +582,7 @@ export async function claimRoutineRun(
     .update(schema.routines)
     .set({ lastRunAt: new Date() })
     .where(eq(schema.routines.id, routine.id));
-  const { limits } = await organizationSettings(
-    { config: deps.config, db: tx },
-    routine.workspaceId,
-  );
+  const { limits } = await organizationSettings({ ...deps, db: tx }, routine.workspaceId);
   await trimRoutineRuns(tx, routine.id, limits.runRecordsPerRoutine);
   return { routineRun: routineRun!, run };
 }
@@ -627,10 +621,7 @@ async function skipRoutineRun(
     .onConflictDoNothing({ target: [schema.routineRuns.routineId, schema.routineRuns.slot] })
     .returning();
   if (!record) return null;
-  const { limits } = await organizationSettings(
-    { config: deps.config, db: tx },
-    routine.workspaceId,
-  );
+  const { limits } = await organizationSettings({ ...deps, db: tx }, routine.workspaceId);
   await trimRoutineRuns(tx, routine.id, limits.runRecordsPerRoutine);
   const repeated = previous && !previous.runId && previous.exception === problem;
   if (repeated) return { skipped: problem, routineRun: record, message: null };

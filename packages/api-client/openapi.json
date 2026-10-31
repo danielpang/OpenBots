@@ -283,9 +283,72 @@
           "customStdioEnabled": {
             "type": "boolean",
             "description": "Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)"
+          },
+          "ceilings": {
+            "type": ["object", "null"],
+            "properties": {
+              "botsPerAccount": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "botsPerGroup": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "routinesPerBot": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "skillsPerAccount": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "runRecordsPerRoutine": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookPayloadBytes": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "syncWebhookWaitSeconds": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookIpRatePerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookFailedAuthPerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "webhookEndpointRatePerMin": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "uploadBytes": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              }
+            },
+            "required": [
+              "botsPerAccount",
+              "botsPerGroup",
+              "routinesPerBot",
+              "skillsPerAccount",
+              "runRecordsPerRoutine",
+              "webhookPayloadBytes",
+              "syncWebhookWaitSeconds",
+              "webhookIpRatePerMin",
+              "webhookFailedAuthPerMin",
+              "webhookEndpointRatePerMin",
+              "uploadBytes"
+            ],
+            "description": "The most each limit may be on the managed service; null on a self-hosted install, which has none"
           }
         },
-        "required": ["limits", "auditRetentionDays", "customStdioEnabled"]
+        "required": ["limits", "auditRetentionDays", "customStdioEnabled", "ceilings"]
       },
       "Limits": {
         "type": "object",
@@ -6614,7 +6677,7 @@
             }
           },
           "400": {
-            "description": "Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service",
+            "description": "Invalid settings, a managed-only setting on a self-hosted install, custom stdio on the managed service, or a limit above its ceiling (`ABOVE_PLAN_LIMIT`)",
             "content": {
               "application/problem+json": {
                 "schema": {

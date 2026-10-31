@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { currentUserOf, requireAccount } from '../middleware/auth.js';
 import { authenticated, authProblems, createRouter } from '../openapi.js';
-import { effectiveSettings, getOrganization } from '../workspace.js';
+import { getOrganization, organizationSettings } from '../workspace.js';
 import { LimitsSchema, RoleSchema } from '../schemas.js';
 
 // The caller. On the managed service someone may be signed in with no
@@ -60,6 +60,9 @@ export const meRoutes = createRouter().openapi(
     if (config.deployment === 'self_hosted') currentUserOf(c.var.deps, account);
     const membership = account.membership;
     const workspace = membership ? await getOrganization(db, membership.workspaceId) : null;
+    const settings = membership
+      ? await organizationSettings(c.var.deps, membership.workspaceId)
+      : null;
     return c.json(
       {
         user: {
@@ -75,7 +78,7 @@ export const meRoutes = createRouter().openapi(
           workspace && membership
             ? { id: workspace.id, name: workspace.name, suspended: membership.suspended }
             : null,
-        limits: workspace ? effectiveSettings(config, workspace).limits : null,
+        limits: settings?.limits ?? null,
       },
       200,
     );

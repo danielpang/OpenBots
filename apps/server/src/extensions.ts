@@ -5,6 +5,8 @@ import type { AppEnv } from './context.js';
 import type { Db } from './db/client.js';
 import type { Infra } from './infra/index.js';
 import type { Logger } from './logger.js';
+import type { Limits } from '@openbot/shared';
+import type { Workspace } from './workspace.js';
 
 // Extension points for the managed build (plan 21.5). The core never imports
 // ee/: `ee/server` imports the core and passes these to `runServer`, the
@@ -30,4 +32,11 @@ export interface ServerExtensions {
   routes?(app: OpenAPIHono<AppEnv>): void;
   /** The web build to serve instead of `apps/web/dist`. */
   webDist?: string;
+  /**
+   * The most an organization's limits may be (plan 21.6): its plan's, when
+   * billing comes. Without it the operator's limits (OPENBOT_LIMITS_*) are
+   * every organization's ceiling. Owners and admins may lower limits under
+   * it, never raise them above it.
+   */
+  limitsCeiling?(workspace: Workspace, config: Config): Limits;
 }

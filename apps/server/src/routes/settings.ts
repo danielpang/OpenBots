@@ -5,17 +5,25 @@ import { LimitsSchema } from '../schemas.js';
 import { DomainError } from '../errors.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { stopCustomStdio } from '../services/connectors.js';
+import type { Limits } from '@openbot/shared';
+import type { AppDeps } from '../context.js';
 import {
   effectiveSettings,
   getOrganization,
+  limitsCeiling,
   MANAGED_ONLY_SETTINGS,
   updateSettings,
+  type Workspace,
 } from '../workspace.js';
 
 // Organization settings (U3, plan 21.3), persisted on the organization's row
 // and read and changed by its owners and admins. A self-hosted install has
 // one owner, who changes the limits and custom stdio here; audit retention is
-// managed only and keeps its default there (see workspace.ts).
+// managed only and keeps its default there (see workspace.ts). On the
+// managed service an organization's limits stay under a ceiling, the
+// operator's (OPENBOT_LIMITS_*) or its plan's: owners and admins may lower
+// them, never raise them above it (400 ABOVE_PLAN_LIMIT), and a higher
+// number in the row counts as the ceiling.
 
 const SettingsSchema = z
   .object({
@@ -26,6 +34,10 @@ const SettingsSchema = z
     customStdioEnabled: z.boolean().openapi({
       description:
         'Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)',
+    }),
+    ceilings: z.object(LimitsSchema.shape).nullable().openapi({
+      description:
+        'The most each limit may be on the managed service; null on a self-hosted install, which has none',
     }),
   })
   .openapi('Settings');
@@ -43,6 +55,12 @@ const settingsResponse = {
   content: { 'application/json': { schema: SettingsSchema } },
 };
 
+/** The settings in effect for the organization, with the ceilings its limits stay under. */
+function settingsOf(deps: AppDeps, workspace: Workspace) {
+  const ceilings = limitsCeiling(deps, workspace);
+  return { ...effectiveSettings(deps.config, workspace, ceilings), ceilings };
+}
+
 export const settingsRoutes = createRouter()
   .openapi(
     createRoute({
@@ -55,11 +73,8 @@ export const settingsRoutes = createRouter()
       responses: { 200: settingsResponse, ...adminProblems },
     }),
     async (c) => {
-      const { db, config } = c.var.deps;
-      return c.json(
-        effectiveSettings(config, await getOrganization(db, c.var.user.workspaceId)),
-        200,
-      );
+      const { db } = c.var.deps;
+      return c.json(settingsOf(c.var.deps, await getOrganization(db, c.var.user.workspaceId)), 200);
     },
   )
   .openapi(
@@ -76,7 +91,7 @@ export const settingsRoutes = createRouter()
       responses: {
         200: settingsResponse,
         400: problemResponse(
-          'Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service',
+          'Invalid settings, a managed-only setting on a self-hosted install, custom stdio on the managed service, or a limit above its ceiling (`ABOVE_PLAN_LIMIT`)',
         ),
         ...adminProblems,
       },
@@ -102,11 +117,19 @@ export const settingsRoutes = createRouter()
           'Command (stdio) servers are not available on the hosted service',
         );
       }
-      const workspace = await updateSettings(
-        db,
-        await getOrganization(db, c.var.user.workspaceId),
-        patch,
-      );
+      const current = await getOrganization(db, c.var.user.workspaceId);
+      const ceilings = limitsCeiling(c.var.deps, current);
+      for (const [key, value] of Object.entries(patch.limits ?? {})) {
+        const ceiling = ceilings?.[key as keyof Limits];
+        if (ceiling !== undefined && value > ceiling) {
+          throw new DomainError(
+            400,
+            'ABOVE_PLAN_LIMIT',
+            `That is above your plan's limit of ${ceiling}.`,
+          );
+        }
+      }
+      const workspace = await updateSettings(db, current, patch);
       await recordAudit(db, {
         workspaceId: workspace.id,
         actor: userActor(c.var.user),
@@ -117,6 +140,6 @@ export const settingsRoutes = createRouter()
       });
       // Their calls are refused from now on; their running children stop too (S-1).
       if (patch.customStdioEnabled === false) await stopCustomStdio(c.var.deps, workspace.id);
-      return c.json(effectiveSettings(config, workspace), 200);
+      return c.json(settingsOf(c.var.deps, workspace), 200);
     },
   );

@@ -404,7 +404,7 @@ export interface paths {
             'application/json': components['schemas']['Settings'];
           };
         };
-        /** @description Invalid settings, a managed-only setting on a self-hosted install, or custom stdio on the managed service */
+        /** @description Invalid settings, a managed-only setting on a self-hosted install, custom stdio on the managed service, or a limit above its ceiling (`ABOVE_PLAN_LIMIT`) */
         400: {
           headers: {
             [name: string]: unknown;
@@ -7509,6 +7509,20 @@ export interface components {
       auditRetentionDays: number;
       /** @description Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may) */
       customStdioEnabled: boolean;
+      /** @description The most each limit may be on the managed service; null on a self-hosted install, which has none */
+      ceilings: {
+        botsPerAccount: number;
+        botsPerGroup: number;
+        routinesPerBot: number;
+        skillsPerAccount: number;
+        runRecordsPerRoutine: number;
+        webhookPayloadBytes: number;
+        syncWebhookWaitSeconds: number;
+        webhookIpRatePerMin: number;
+        webhookFailedAuthPerMin: number;
+        webhookEndpointRatePerMin: number;
+        uploadBytes: number;
+      } | null;
     };
     Limits: {
       botsPerAccount: number;

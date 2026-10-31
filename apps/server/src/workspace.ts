@@ -4,6 +4,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
+import type { ServerExtensions } from './extensions.js';
 import { notFound } from './errors.js';
 
 // Organizations (plan section 21). A `workspaces` row is an organization and
@@ -129,12 +130,31 @@ export async function getOrganization(db: Db, workspaceId: string): Promise<Work
   return row;
 }
 
-/** The settings in effect for an organization (see `effectiveSettings`). */
+type SettingsDeps = { db: Db; config: Config; extensions?: ServerExtensions };
+
+/**
+ * The most an organization's limits may be (plan 21.6), or null where there
+ * is no ceiling. On the managed service the operator's limits
+ * (OPENBOT_LIMITS_*) are the ceiling, unless the managed build sets one per
+ * organization (`ServerExtensions.limitsCeiling`, for plans). Owners and
+ * admins may only lower their organization's limits under it. A self-hosted
+ * owner is the operator and has none.
+ */
+export function limitsCeiling(
+  deps: Pick<SettingsDeps, 'config' | 'extensions'>,
+  workspace: Workspace,
+): Limits | null {
+  if (deps.config.deployment !== 'managed') return null;
+  return deps.extensions?.limitsCeiling?.(workspace, deps.config) ?? deps.config.limits;
+}
+
+/** The settings in effect for an organization, under its ceiling (see `effectiveSettings`). */
 export async function organizationSettings(
-  deps: { db: Db; config: Config },
+  deps: SettingsDeps,
   workspaceId: string,
 ): Promise<Settings> {
-  return effectiveSettings(deps.config, await getOrganization(deps.db, workspaceId));
+  const workspace = await getOrganization(deps.db, workspaceId);
+  return effectiveSettings(deps.config, workspace, limitsCeiling(deps, workspace));
 }
 
 export function storedSettings(workspace: Workspace): StoredSettings {
@@ -143,7 +163,16 @@ export function storedSettings(workspace: Workspace): StoredSettings {
   return parsed.success ? parsed.data : {};
 }
 
-export function effectiveSettings(config: Config, workspace: Workspace): Settings {
+/**
+ * The settings in effect: what is stored over the environment's defaults.
+ * On the managed service each limit is capped at `ceiling` (the operator's
+ * by default), whatever the row holds.
+ */
+export function effectiveSettings(
+  config: Config,
+  workspace: Workspace,
+  ceiling: Limits | null = config.deployment === 'managed' ? config.limits : null,
+): Settings {
   const stored = storedSettings(workspace);
   if (config.deployment === 'self_hosted') {
     return {
@@ -152,8 +181,12 @@ export function effectiveSettings(config: Config, workspace: Workspace): Setting
       customStdioEnabled: stored.customStdioEnabled ?? false,
     };
   }
+  const limits: Limits = { ...config.limits, ...stored.limits };
+  if (ceiling) {
+    for (const key of limitKeys) limits[key] = Math.min(limits[key], ceiling[key]);
+  }
   return {
-    limits: { ...config.limits, ...stored.limits },
+    limits,
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     customStdioEnabled: stored.customStdioEnabled ?? false,
   };

@@ -313,6 +313,50 @@ describe('settings', () => {
     }
   });
 
+  it("lets an admin lower a limit but never raise it above the operator's (plan 21.6)", async () => {
+    // OPENBOT_LIMITS_BOTS_PER_ACCOUNT is 20 here, and Bots per group defaults to 6.
+    const raised = await patch({ limits: { botsPerAccount: 21 } });
+    expect(raised.status).toBe(400);
+    expect(await raised.json()).toMatchObject({ code: 'ABOVE_PLAN_LIMIT' });
+    expect((await patch({ limits: { botsPerGroup: 7 } })).status).toBe(400);
+    const lowered = await patch({ limits: { botsPerAccount: 5 } });
+    expect(lowered.status).toBe(200);
+    expect(await lowered.json()).toMatchObject({
+      limits: { botsPerAccount: 5 },
+      ceilings: { botsPerAccount: 20, botsPerGroup: 6 },
+    });
+    // A higher number in the row counts as the ceiling, wherever limits are read.
+    const home = await t.defaultOrganization();
+    await t.testDb.db
+      .update(schema.workspaces)
+      .set({ settings: { limits: { botsPerAccount: 500, botsPerGroup: 99 } } })
+      .where(eq(schema.workspaces.id, home));
+    const settings = await t.app.request('/api/v1/settings', { headers: { cookie } });
+    expect(await settings.json()).toMatchObject({
+      limits: { botsPerAccount: 20, botsPerGroup: 6 },
+    });
+    const me = await t.app.request('/api/v1/me', { headers: { cookie } });
+    expect(await me.json()).toMatchObject({ limits: { botsPerAccount: 20, botsPerGroup: 6 } });
+    const { organizationSettings } = await import('./workspace.js');
+    expect((await organizationSettings(t.deps, home)).limits.botsPerAccount).toBe(20);
+    await t.testDb.db
+      .update(schema.workspaces)
+      .set({ settings: { limits: { botsPerGroup: 4 } } })
+      .where(eq(schema.workspaces.id, home));
+  });
+
+  it("caps limits at a ceiling the managed build sets per organization (its plan's)", async () => {
+    const home = await t.defaultOrganization();
+    const deps = {
+      ...t.deps,
+      extensions: {
+        limitsCeiling: () => ({ ...t.deps.config.limits, botsPerAccount: 3 }),
+      },
+    };
+    const { organizationSettings } = await import('./workspace.js');
+    expect((await organizationSettings(deps, home)).limits.botsPerAccount).toBe(3);
+  });
+
   it('refuses custom stdio on the managed service (S-1)', async () => {
     const res = await patch({ customStdioEnabled: true });
     expect(res.status).toBe(400);
