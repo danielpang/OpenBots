@@ -15,6 +15,7 @@ const MESSAGES: Record<string, string> = {
   OTP_EXPIRED: 'That code expired. Send a new one.',
   TOO_MANY_ATTEMPTS: 'Too many tries. Send a new code.',
   TOO_MANY_CODES: 'Too many codes sent. Wait a while, then try again.',
+  TOO_MANY_FAILURES: 'Too many wrong codes. Try again in an hour.',
   TOO_MANY_REQUESTS: 'Too many tries. Wait a while, then try again.',
   ACCOUNT_EXISTS: 'This email has an account. Sign in instead.',
   ACCOUNT_IN_USE: 'This email cannot sign up here. Contact support.',

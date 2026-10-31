@@ -10,7 +10,7 @@ import { z } from '@hono/zod-openapi';
 import type { BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
-import { and, count, eq } from 'drizzle-orm';
+import { and, count, desc, eq, gt, lte } from 'drizzle-orm';
 import type { ExtensionContext } from '@openbot/server';
 import type { Config } from '@openbot/server/config';
 import { schema, type Db } from '@openbot/server/db/client';
@@ -41,11 +41,18 @@ import { invitationProof } from './invitations.js';
 //    so nothing linked to it keeps access.
 //
 // Nothing an unauthenticated request does deletes or replaces an account.
-// Limits: per IP before anything else; per address (10 sends an hour) only
-// for a request that passed the policy checks, before anything is made or
-// sent; 5 tries per code, after which that code is dead. Nobody can spend
-// another person's tries, and guessing stays bounded: 5 tries times 10 codes
-// an hour against a million codes. Codes last 10 minutes, are stored as an
+// Limits, and why these numbers:
+// - Per IP first: 20 sign-ups and 50 code tries an hour.
+// - Sends per address: 10 an hour and 20 a day, counted only for a request
+//   that passed the policy checks, before anything is made or sent.
+// - Tries: 5 per code, then that code is dead; and 15 failed tries per
+//   address in a rolling hour across all its codes, after which the address
+//   cannot verify until the hour clears. A correct code never counts.
+// So guessing one address is bounded by its sends: at most 20 codes times 5
+// tries, 100 guesses a day, about 3,000 a month against a million codes
+// (about 0.3% a month in the worst case). The worst lockout from failed
+// tries is one hour after the last of 15; spending an address's sends
+// blocks new codes for it for up to a day. Codes last 10 minutes, are stored as an
 // HMAC bound to their request, and compared in constant time. A code
 // reaches a log only on a development server without email that sets
 // OPENBOT_DEV_LOG_EMAIL_LINKS (refused in production). The invite of
@@ -56,8 +63,11 @@ export const CODE_LENGTH = 6;
 export const CODE_MINUTES = 10;
 /** Tries per code; then the code is dead. */
 export const CODE_TRIES = 5;
-/** Codes (or notices) one address may be sent in an hour. */
+/** Codes (or notices) one address may be sent in an hour, and in a day. */
 export const SENDS_PER_HOUR = 10;
+export const SENDS_PER_DAY = 20;
+/** Failed tries one address may make in a rolling hour, across its codes. */
+export const FAILS_PER_HOUR = 15;
 /** Sign-ups one IP may start in an hour. */
 export const STARTS_PER_IP = 20;
 /** Code tries one IP may make in an hour. */
@@ -213,6 +223,13 @@ export function signUpPlugin(
           if (!sends.allowed) {
             throw tooMany('TOO_MANY_CODES', 'Too many codes for this email', sends.retryAfter);
           }
+          const daily = await infra.limiter.consume(`sign-up-send-day:${address}`, {
+            window: 86_400,
+            max: SENDS_PER_DAY,
+          });
+          if (!daily.allowed) {
+            throw tooMany('TOO_MANY_CODES', 'Too many codes for this email', daily.retryAfter);
+          }
           const [user] = await db
             .select({ verified: schema.users.emailVerified })
             .from(schema.users)
@@ -259,6 +276,10 @@ export function signUpPlugin(
               );
             }
           }
+          const locked = await lockedFor(db, pending.email);
+          if (locked !== null) {
+            throw tooMany('TOO_MANY_FAILURES', 'Too many wrong codes. Try again later', locked);
+          }
           if (pending.tries >= CODE_TRIES) throw dead();
           // The try counts before the comparison, once: only the row as read is updated.
           const counted: Pending = { ...pending, tries: pending.tries + 1 };
@@ -267,7 +288,10 @@ export function signUpPlugin(
           const right =
             pending.mac !== null &&
             sameMac(codeMac(config, identifier, ctx.body.code), pending.mac);
-          if (!right) throw counted.tries >= CODE_TRIES ? dead() : invalidCode();
+          if (!right) {
+            await recordFailure(db, pending.email);
+            throw counted.tries >= CODE_TRIES ? dead() : invalidCode();
+          }
           // Used once: the code is gone, and the request is confirmed.
           const used = await swap(
             db,
@@ -336,6 +360,45 @@ export function signUpPlugin(
   };
 }
 
+/** One row per failed try of an address, kept for an hour. */
+const failuresOf = (email: string) => `sign-up-fail:${sha256(email)}`;
+
+/**
+ * Seconds until the address may try again, when its failed tries in the
+ * last hour reached FAILS_PER_HOUR; else null.
+ */
+async function lockedFor(db: Db, email: string): Promise<number | null> {
+  const rows = await db
+    .select({ expiresAt: schema.verifications.expiresAt })
+    .from(schema.verifications)
+    .where(
+      and(
+        eq(schema.verifications.identifier, failuresOf(email)),
+        gt(schema.verifications.expiresAt, new Date()),
+      ),
+    )
+    .orderBy(desc(schema.verifications.expiresAt))
+    .limit(FAILS_PER_HOUR);
+  if (rows.length < FAILS_PER_HOUR) return null;
+  // Open again when the oldest of the last FAILS_PER_HOUR expires.
+  return Math.max(1, Math.ceil((rows.at(-1)!.expiresAt.getTime() - Date.now()) / 1000));
+}
+
+async function recordFailure(db: Db, email: string) {
+  const identifier = failuresOf(email);
+  await db
+    .delete(schema.verifications)
+    .where(
+      and(
+        eq(schema.verifications.identifier, identifier),
+        lte(schema.verifications.expiresAt, new Date()),
+      ),
+    );
+  await db
+    .insert(schema.verifications)
+    .values({ identifier, value: '', expiresAt: new Date(Date.now() + 3_600_000) });
+}
+
 /** Replaces the row as read with `next`; the new value, or null when it changed meanwhile. */
 async function swap(db: Db, id: string, value: string, next: Pending, renew = false) {
   const text = JSON.stringify(next);
@@ -389,14 +452,12 @@ async function createConfirmed(db: Db, email: string, name: string, hash: string
         .insert(schema.users)
         .values({ email, name, emailVerified: true })
         .returning({ id: schema.users.id });
-      await tx
-        .insert(schema.accounts)
-        .values({
-          userId: user!.id,
-          providerId: 'credential',
-          accountId: user!.id,
-          password: hash,
-        });
+      await tx.insert(schema.accounts).values({
+        userId: user!.id,
+        providerId: 'credential',
+        accountId: user!.id,
+        password: hash,
+      });
       return user!.id;
     });
   } catch (error) {

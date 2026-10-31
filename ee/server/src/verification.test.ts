@@ -5,7 +5,13 @@ import { schema } from '@openbot/server/db/client';
 import { createTestApp, type TestApp } from '@openbot/server/test-app';
 import { emailFromEnv, managedExtensions } from './index.js';
 import { readInviteCookie, signInviteCookie } from './plugin.js';
-import { CODE_TRIES, SENDS_PER_HOUR, STARTS_PER_IP, TRIES_PER_IP } from './sign-up.js';
+import {
+  CODE_TRIES,
+  SENDS_PER_DAY,
+  SENDS_PER_HOUR,
+  STARTS_PER_IP,
+  TRIES_PER_IP,
+} from './sign-up.js';
 import {
   PASSWORD,
   completeSignUp,
@@ -262,6 +268,54 @@ describe('email sign-up', () => {
     expect(res.status).toBe(400);
     const forged = await verifyCode(t, 'openbot_sign_up=forged', mail.code('bound@example.com')!);
     expect(forged.status).toBe(400);
+  });
+
+  it('refuses an address after 15 failed tries in an hour, and never counts a right code', async () => {
+    // 14 failures across codes, then the right code: fine.
+    const tryWrong = async (address: string, times: number) => {
+      const start = await startSignUp(t, address);
+      for (let i = 0; i < times; i++) {
+        await verifyCode(t, start.request, wrong(mail.code(address)!));
+      }
+    };
+    for (const n of [5, 5, 4]) await tryWrong('near@example.com', n);
+    const near = await startSignUp(t, 'near@example.com');
+    expect((await verifyCode(t, near.request, mail.code('near@example.com')!)).status).toBe(200);
+
+    // 15: even a new, right code is refused until the hour clears.
+    for (const n of [5, 5, 5]) await tryWrong('over@example.com', n);
+    const over = await startSignUp(t, 'over@example.com');
+    const locked = await verifyCode(t, over.request, mail.code('over@example.com')!);
+    expect(locked.status).toBe(429);
+    expect(await locked.json()).toMatchObject({ code: 'TOO_MANY_FAILURES' });
+    expect(Number(locked.headers.get('x-retry-after'))).toBeGreaterThan(3000);
+    await t.deps.db
+      .update(schema.verifications)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(like(schema.verifications.identifier, 'sign-up-fail:%'));
+    expect((await verifyCode(t, over.request, mail.code('over@example.com')!)).status).toBe(200);
+  });
+
+  it('sends one address at most 20 codes a day', async () => {
+    const consume = t.deps.infra.limiter.consume.bind(t.deps.infra.limiter);
+    // As if the hours went by: only the daily cap is left.
+    const spy = vi
+      .spyOn(t.deps.infra.limiter, 'consume')
+      .mockImplementation((key, rule) =>
+        key.startsWith('sign-up-send:')
+          ? Promise.resolve({ allowed: true, retryAfter: null })
+          : consume(key, rule),
+      );
+    try {
+      for (let i = 0; i < SENDS_PER_DAY; i++) {
+        expect((await startSignUp(t, 'daily@example.com')).res.status).toBe(200);
+      }
+      const over = await startSignUp(t, 'daily@example.com');
+      expect(over.res.status).toBe(429);
+      expect(await over.res.json()).toMatchObject({ code: 'TOO_MANY_CODES' });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('limits sign-ups and tries per IP', async () => {
