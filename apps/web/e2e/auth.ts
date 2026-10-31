@@ -27,9 +27,15 @@ export async function signUp(
     await page.goto('/');
   } else {
     await signUpAt(page, '/sign-up', name, email);
-    if (new URL(page.url()).pathname === '/onboarding') {
+    // The app redirects to /onboarding on its own, after the page loads, so
+    // wait for where it settles rather than reading the URL now.
+    const create = page.getByRole('heading', { name: 'Create your organization' });
+    const shell = page.getByRole('button', { name: /New/ });
+    await expect(create.or(shell)).toBeVisible();
+    if (await create.isVisible()) {
       await page.getByLabel('Name').fill(organization ?? `${name} Org`);
-      await page.getByRole('button', { name: 'Create' }).click();
+      await page.getByRole('button', { name: 'Create', exact: true }).click();
+      await expect(shell).toBeVisible();
     }
   }
   await expect(page).toHaveURL('/');
