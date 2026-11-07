@@ -321,39 +321,41 @@ repositories.
 
 ### Connect GitHub
 
-Coding agents reach GitHub through the GitHub card on the Connectors page. The GitHub App is the
-best way in. Each repository then gets its own short-lived token, which can only read until you
-approve a push, so a push you did not approve is refused by GitHub itself.
+Coding agents use **Connectors → GitHub → Repositories for coding agents**. This is separate
+from the GitHub MCP connector.
 
-- **On the managed service** there is one shared App. Press Install the OpenBots app, pick the
-  account or organization and its repositories on GitHub, and authorize when GitHub asks.
-- **On a self-hosted install** an admin makes the install's own App in one click: Create a GitHub
-  App for this install, on your personal account or an organization (the App is private, so only
-  that account can install it). This needs `OPENBOTS_PUBLIC_URL` to be an https address GitHub can
-  reach (see "Exposing your OpenBots server to the internet" below); the card says so otherwise.
-  GitHub creates the App with its webhook at `<OPENBOTS_PUBLIC_URL>/api/v1/github/app/webhook`,
-  and then any member installs it. To use an App you made yourself, set `GITHUB_APP_*` in `.env`
-  (see `.env.example`): it needs "Request user authorization (OAuth) during installation" on, its
-  callback URL at `<OPENBOTS_PUBLIC_URL>/api/v1/git-connections/github-app/callback`, its webhook
-  at the URL above, and its client id and secret set.
-- **What your access means.** GitHub asks you to authorize the App while you install it, and
-  OpenBots keeps the list of the installation's repositories your own GitHub account can reach,
-  then forgets that authorization. Your Bots read only those repositories, and push only where you
-  can push. Someone else in your organization who connects the same installation is held to their
-  own access. Re-check access reads the list again after your access on GitHub changes.
-- **The picker.** After an install the card opens the picker: check the repositories to keep and
-  press Keep on the computer, and each is cloned. Sync lists again.
-- **Who it acts as.** Commits are by the Bot, as "<Bot name> (OpenBots)", with you as co-author. Act
-  as on an App connection says who opens pull requests: The Bot (OpenBots app) or Me, which needs
-  your GitHub sign-in on the GitHub connector.
-- **A token instead.** Paste a token instead takes a fine-grained personal access token. GitHub
-  cannot narrow it, so a session gets it only for a push you approved; limit it to the repositories
-  you add. With no connection at all, the GitHub connector's token or the GitHub built-in's is used
-  the same way.
-- **Routines.** A Bot's Routines tab starts with three coding templates: Fix issues labeled bot,
-  Review new pull requests and Weekly dependency update. Pick the repository (and the label). On a
-  repository the App reaches, its webhook delivers the events and there is nothing to set up on
-  GitHub; otherwise the Routine shows a webhook URL and secret, once, to add on the repository.
+1. Press **Connect GitHub**. OpenBots opens the shared
+   [OpenBots GitHub App](https://github.com/apps/openbots-github).
+2. Install it on your account or organization and select repositories. Organization approval
+   may be required.
+3. Back in OpenBots, choose **Authorize on GitHub** and enter the displayed device code.
+4. Pick repositories and press **Keep on the computer**. OpenBots clones them when the computer
+   is running. **Sync** refreshes access; **Manage repositories** changes the App's selection.
+
+This works on a Mac or localhost without a public HTTPS URL, callback, client secret or App
+private key. **Use a different GitHub App** accepts your own App's public client ID and slug
+with Device Flow enabled. `OPENBOTS_GITHUB_CLIENT_ID` and `OPENBOTS_GITHUB_APP_SLUG` override
+the shared defaults on the server. OpenBots account sign-in is unchanged.
+
+**Security and identity.** The shared flow uses an encrypted GitHub App **user token**, limited
+by both the App's selected repositories and your GitHub permissions. It cannot be narrowed to
+one repository or read-only per request. The server's isolated runner clones/fetches; the coding
+sandbox gets no token until you approve its push, and then only through that repository's push
+credential request. Once exposed for an approved push, the token can reach other repositories
+selected for that App: select only repositories you intend to trust. PRs are opened as you;
+commits still name the Bot and request you as co-author.
+
+**Optional server-managed App.** Existing `GITHUB_APP_*` and one-click manifest Apps remain
+supported under **Advanced: server-managed GitHub App**. Only this mode requires the App's
+private key and OAuth client secret on the server, and public HTTPS for callbacks/webhooks.
+It mints per-repository installation tokens, read-only until an approved push, supports acting
+as the App, and routes the App's webhooks to Routines. A local device connection does not receive
+those centralized webhooks; use a reachable repository webhook for event-triggered Routines.
+
+**A token instead** still accepts a fine-grained PAT. With no git connection, OpenBots falls
+back to the GitHub connector's token or GitHub built-in token, with the same approved-push sandbox boundary.
+
+See [GitHub coding repository setup and verification](docs/GITHUB_REPOSITORIES.md) for details.
 
 ## Upgrade
 
