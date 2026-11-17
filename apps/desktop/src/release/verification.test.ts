@@ -43,9 +43,13 @@ const checks = await load<{
     options?: { read?: (dir: string) => string | null; exists?: (path: string) => boolean },
   ): { name: string; command?: string[]; shell?: string }[];
   decide(
-    state: { rounds?: number; tree?: string | null },
+    state: { rounds?: number; tree?: string | null; failed?: { tree: string } },
     result: { failed: boolean; tree: string },
-  ): { action: string; rounds?: number; state: { rounds: number; tree: string | null } };
+  ): {
+    action: string;
+    rounds?: number;
+    state: { rounds: number; tree: string | null; failed?: { tree: string } };
+  };
   MAX_ROUNDS: number;
 }>('agent-checks.mjs');
 const api = await load<{
@@ -309,10 +313,12 @@ describe('cheap checks', () => {
   });
 
   it('sends a failure back for three rounds, then hands off to the person', () => {
-    let state: { rounds?: number; tree?: string | null } = {};
+    let state: { rounds?: number; tree?: string | null; failed?: { tree: string } } = {};
     for (let round = 1; round <= checks.MAX_ROUNDS; round++) {
       const outcome = checks.decide(state, { failed: true, tree: 't' });
       expect(outcome).toMatchObject({ action: 'block', rounds: round });
+      // The failed tree is remembered, so an unchanged tree is not checked again.
+      expect(outcome.state).toMatchObject({ tree: null, failed: { tree: 't' } });
       state = outcome.state;
     }
     const last = checks.decide(state, { failed: true, tree: 't' });

@@ -87,20 +87,22 @@ export function planChecks(paths, { read = readPackageName, exists = () => true 
 
 /**
  * What the hook does after a run of the checks. `state` is this session's:
- * `{ rounds, tree }`. A pass clears the rounds; a failure counts one, and at
- * MAX_ROUNDS the turn is allowed to end with a note for the person.
+ * `{ rounds, tree, failed }`. A pass clears the rounds; a failure counts one,
+ * and at MAX_ROUNDS the turn is allowed to end with a note for the person.
+ * `tree` is the tree the hook is done with (passed, or handed off); `failed`
+ * is the last tree that failed and what failed on it.
  */
 export function decide(state, { failed, tree }) {
   if (!failed) return { action: 'pass', state: { rounds: 0, tree } };
   const rounds = (state.rounds ?? 0) + 1;
   if (rounds > MAX_ROUNDS) return { action: 'handoff', state: { rounds, tree } };
-  return { action: 'block', rounds, state: { rounds, tree: null } };
+  return { action: 'block', rounds, state: { rounds, tree: null, failed: { tree } } };
 }
 
 const git = (...args) =>
   execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 
-function changedPaths() {
+export function changedPaths() {
   let base = 'HEAD';
   for (const ref of ['origin/main', 'main']) {
     try {
@@ -116,7 +118,7 @@ function changedPaths() {
 }
 
 /** A digest of the tree's state: the same value means nothing changed since. */
-function treeDigest(paths) {
+export function treeDigest(paths) {
   const hash = createHash('sha256').update(git('rev-parse', 'HEAD'));
   hash.update(git('diff', 'HEAD'));
   for (const path of paths) {
@@ -172,6 +174,18 @@ function main() {
   const state = (session && all[session]) || {};
   const tree = treeDigest(paths);
   if (state.tree === tree) return 0; // Already passed, or handed off, on exactly this tree.
+  if (state.failed?.tree === tree) {
+    // The agent ended its turn without changing anything since the failure:
+    // it has nothing more to try, so running the same checks again would
+    // only spend minutes to learn the same thing. Hand off now.
+    writeFileSync(STATE_FILE, JSON.stringify({ ...all, [session]: { ...state, tree } }, null, 2));
+    process.stdout.write(
+      JSON.stringify({
+        systemMessage: `The ${state.failed.name ?? 'last'} check still fails and nothing has changed since, so the agent stopped. Run: ${state.failed.command ?? 'node scripts/agent-checks.mjs'}`,
+      }),
+    );
+    return 0;
+  }
 
   let failure = null;
   for (const step of steps) {
@@ -186,7 +200,13 @@ function main() {
   const outcome = decide(state, { failed: Boolean(failure), tree });
   if (session) {
     mkdirSync(dirname(STATE_FILE), { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify({ ...all, [session]: outcome.state }, null, 2));
+    const saved = outcome.state.failed
+      ? {
+          ...outcome.state,
+          failed: { tree, name: failure.step.name, command: shown(failure.step) },
+        }
+      : outcome.state;
+    writeFileSync(STATE_FILE, JSON.stringify({ ...all, [session]: saved }, null, 2));
   }
   if (outcome.action === 'pass') {
     if (!session) console.error('All checks passed.');
@@ -214,7 +234,7 @@ function main() {
     `${report}\nRound ${outcome.rounds} of ${MAX_ROUNDS}. ` +
       (last
         ? 'This was the last round. Do not try another fix: end the turn by telling the person what fails, what you tried and what you think the cause is.'
-        : 'Fix the cause, not the check: do not skip or delete a test, add a sleep or a retry, or loosen a rule to get past this.'),
+        : 'Fix the cause, not the check: do not skip or delete a test, add a sleep or a retry, or loosen a rule to get past this. If the cause is outside the change (the machine, the network), say so to the person and end the turn: the checks do not run again until something changes.'),
   );
   return 2; // Exit 2 from a Stop hook sends stderr back to the agent.
 }
