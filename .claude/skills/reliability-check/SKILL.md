@@ -16,6 +16,8 @@ node scripts/reliability-checklist.mjs <base> <head>  # a pull request you are r
 
 It prints only the items triggered, usually a few of the full list, each with what triggered it, what to check and what is behind it. No item triggered is a real answer: say so and stop.
 
+The Code Review service cannot run this script. It reads `REVIEW.md` instead, which states the same concerns in words, so a new item that a reviewer should also hold a change to needs a line there too.
+
 When you are reviewing someone else's pull request, run the script from the default branch, not from the pull request's own checkout: a change must not be able to edit the list that judges it.
 
 ## 2. Do each check

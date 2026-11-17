@@ -6,16 +6,16 @@ How a change to OpenBots is shown to work, what checks it, and when each check r
 
 ## What runs when
 
-| When                                   | What runs                                                                                                                       | Where it lives                                                       | If it fails                                                     |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------- |
-| An agent finishes a turn               | Cheap checks: format, then types, lint and tests for the packages that changed, and the OpenAPI document when a route changed   | `scripts/agent-checks.mjs`, the Stop hook in `.claude/settings.json` | Sent back to the agent, three rounds, then handed to the person |
-| Before a commit                        | The `verify` skill for what changed: the app, running                                                                           | `.claude/skills/verify`, and one beside each app                     | Fix and run again, three rounds, then stop and ask              |
-| At the commit                          | Commit gate: is there a `Verified:` trailer, and did the session do what it claims                                              | `scripts/agent-commit-gate.mjs`, the PreToolUse hook                 | Observe mode logs. Enforce mode blocks, at most twice a session |
-| Before a pull request                  | Reliability checklist, only the items the diff triggers                                                                         | `scripts/reliability-checklist.mjs`, the `reliability-check` skill   | Fix, or say why the item does not apply                         |
-| On every pull request                  | Verification gates job: checklist summary, stamps, API diff against the base branch, a flag when the checks themselves changed  | `gates` in `.github/workflows/ci.yml`                                | Observe mode warns. Enforce mode fails `CI result`              |
-| On every pull request and push to main | Unit, property and differential tests, real Postgres, browser specs, image and lifecycle smoke tests, selected by changed paths | `.github/workflows/ci.yml`, `scripts/ci-scope.mjs`                   | Fails `CI result`                                               |
-| At review                              | `REVIEW.md` from the default branch, on one commit                                                                              | `REVIEW.md`, `.github/CODEOWNERS`                                    | Findings labelled Important, Nit or Pre-existing                |
-| Monthly, and after a revert            | Review of the checks: stamps, misses, size of the rules                                                                         | `.github/workflows/verification-review.yml`, the `tidy-checks` skill | An issue to work through                                        |
+| When                                   | What runs                                                                                                                           | Where it lives                                                              | If it fails                                                     |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| An agent finishes a turn               | Cheap checks: format, then types, lint and tests for the packages that changed, and the OpenAPI document when a route changed       | `scripts/agent-checks.mjs`, the Stop hook in `.claude/settings.json`        | Sent back to the agent, three rounds, then handed to the person |
+| Before a commit                        | The `verify` skill for what changed: the app, running                                                                               | `.claude/skills/verify`, and one beside each app                            | Fix and run again, three rounds, then stop and ask              |
+| At the commit                          | Commit gate: is there a `Verified:` trailer, and did the session do what it claims                                                  | `scripts/agent-commit-gate.mjs`, the PreToolUse hook                        | Observe mode logs. Enforce mode blocks, at most twice a session |
+| Before a pull request                  | Reliability checklist, only the items the diff triggers                                                                             | `scripts/reliability-checklist.mjs`, the `reliability-check` skill          | Fix, or say why the item does not apply                         |
+| On every pull request                  | Verification gates job: checklist summary, stamps, API diff against the base branch, a flag when the checks themselves changed      | `gates` in `.github/workflows/ci.yml`                                       | Observe mode warns. Enforce mode fails `CI result`              |
+| On every pull request and push to main | Unit, property and differential tests, real Postgres, browser specs, image and lifecycle smoke tests, selected by changed paths     | `.github/workflows/ci.yml`, `scripts/ci-scope.mjs`                          | Fails `CI result`                                               |
+| At review                              | Code Review reads `REVIEW.md` (the root one, and the one beside the changed code) and `CLAUDE.md` from the protected default branch | `REVIEW.md`, `apps/*/REVIEW.md`, `packages/*/REVIEW.md`, `docker/REVIEW.md` | Findings marked Important, Nit or Pre-existing                  |
+| Monthly, and after a revert            | Review of the checks: stamps, misses, size of the rules                                                                             | `.github/workflows/verification-review.yml`, the `tidy-checks` skill        | An issue to work through                                        |
 
 The order is deliberate. Cheap checks run first and locally, so a mistake an agent could have caught does not spend shared CI time or a reviewer's attention.
 
@@ -83,21 +83,32 @@ A gate that is wrong blocks honest work, so each one has three modes:
 
 Move a gate to enforce when its log has shown no false positive for about a month. In enforce mode the commit gate blocks a session at most twice, then lets the next commit through and says so: an agent must never be stuck behind a gate that is wrong. A commit that cannot be verified still commits, with `Verified: none: <reason>`.
 
+## What a review reads
+
+`REVIEW.md` follows the shape Code Review documents for it ([Customize Code Review](https://code.claude.com/docs/en/code-review-customize)): what Important means here, a cap on Nits, what not to report, the evidence a finding needs, and what to always check. It holds instructions that change a review and nothing else. Project context lives in `CLAUDE.md`.
+
+- The root `REVIEW.md` applies to every pull request.
+- A `REVIEW.md` beside an area's code (`apps/server`, `apps/relay`, `apps/mobile`, `packages/agent`, `packages/router`, `packages/tunnel`, `packages/computer`, `docker`) adds checks when a pull request changes files under it. This is the review's own diff trigger.
+- `CLAUDE.md` is read by the review service and by the local `/code-review` command. The local command does not read `REVIEW.md`, so a rule that both must hold a change to goes in `CLAUDE.md`.
+- A review cannot run a script. What the reliability checklist checks by script, `REVIEW.md` states in words.
+
+The service reads these files from the base or default branch, never from the pull request. It honours lowered severities, exclusions, the Nit cap and the files beside the code only when that branch is protected.
+
 ## Protected checks
 
 If a change can edit the check that judges it, the check is worth nothing. So:
 
 - The `gates` job takes its scripts and the base API document from the base branch, not from the pull request.
-- A review reads `REVIEW.md` from the default branch, and reviews one commit. A push during the review makes the result out of date.
-- `.github/CODEOWNERS` names every check as needing an owner's review: `REVIEW.md`, `CLAUDE.md`, `.claude/`, `.github/`, the gate scripts and the approved-changes list. The `gates` job warns when a pull request touches any of them.
+- A review reads `REVIEW.md` from the default branch, never from the pull request, and reviews one commit. A push during the review makes the result out of date.
+- `.github/CODEOWNERS` names every check as needing an owner's review: every `REVIEW.md`, `CLAUDE.md`, `.claude/`, `.github/`, the gate scripts and the approved-changes list. The `gates` job warns when a pull request touches any of them.
 
-One thing the repository cannot do for itself: CODEOWNERS only binds when the branch protection for `main` requires review from code owners, and `CI result` only gates a merge when it is a required check. Both are repository settings on GitHub.
+One thing the repository cannot do for itself: `main` has to be protected on GitHub. Without that, Code Review reads only the root `REVIEW.md` and ignores its exclusions and Nit cap, CODEOWNERS does not bind (it also needs review from code owners required), and `CI result` does not gate a merge unless it is a required check.
 
 ## Turning misses into rules
 
 When something gets past the checks, the lesson is written down once, where the next change will meet it.
 
-1. **From review and reverts.** A pattern is a candidate rule when it has shown up in at least two pull requests and a diff can show it. Try to disprove it against merged, healthy changes: if the rule would have flagged them too, it is wrong or too wide. What survives becomes an item in `scripts/reliability-checklist.mjs` (when a path or a line can trigger it) or a line under the right area in `REVIEW.md`, in a pull request an owner approves.
+1. **From review and reverts.** A pattern is a candidate rule when it has shown up in at least two pull requests and a diff can show it. Try to disprove it against merged, healthy changes: if the rule would have flagged them too, it is wrong or too wide. What survives becomes an item in `scripts/reliability-checklist.mjs` (when a path or a line can trigger it) or a line under Always check in the `REVIEW.md` beside that area's code, in a pull request an owner approves.
 2. **From incidents.** Check out the commit before the fix and run the checklist and a review on the change that caused it. If they miss a bug that is visible in a small diff, that gap is the rule to write.
 
 The people who own an area write its rules, and refine them until they flag what the owner would flag.

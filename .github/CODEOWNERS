@@ -10,6 +10,7 @@
 
 # The checks.
 /REVIEW.md                                  @danielpang
+**/REVIEW.md                                @danielpang
 /CLAUDE.md                                  @danielpang
 /docs/VERIFICATION.md                       @danielpang
 /.claude/                                   @danielpang

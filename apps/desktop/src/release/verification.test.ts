@@ -120,6 +120,7 @@ describe('reliability checklist', () => {
   it('flags a change to the checks themselves, at the root or beside an app', () => {
     for (const path of [
       'REVIEW.md',
+      'apps/server/REVIEW.md',
       '.claude/settings.json',
       'apps/web/.claude/skills/verify/SKILL.md',
       '.github/workflows/ci.yml',
@@ -528,10 +529,74 @@ describe('where the gates are wired', () => {
     }
   });
 
+  it('keeps REVIEW.md in the shape Code Review documents, within its limits', () => {
+    // https://code.claude.com/docs/en/code-review-customize
+    const rootFile = readFileSync(join(root, 'REVIEW.md'), 'utf8');
+    for (const heading of [
+      '# Review instructions',
+      '## What Important means here',
+      '## Cap the nits',
+      '## Do not report',
+      '## Always check',
+    ]) {
+      expect(rootFile, heading).toContain(`${heading}\n`);
+    }
+    expect(rootFile).toMatch(/Report at most \w+ Nits per review\./);
+    // A review cannot run a command, so the file must not ask for one.
+    expect(rootFile).not.toMatch(/\b(run|execute) `?(node|pnpm|bash|git) /i);
+
+    const beside = execFileSync('git', ['ls-files', '--', '*/REVIEW.md'], {
+      cwd: root,
+      encoding: 'utf8',
+    })
+      .split('\n')
+      .filter(Boolean);
+    expect(beside.length).toBeGreaterThan(0);
+    // Directory names under which Code Review applies no REVIEW.md.
+    const ignored = new Set(
+      (
+        'test tests __tests__ testdata fixtures __fixtures__ golden corpus snapshots __snapshots__ ' +
+        'example examples sample samples demo demos generated vendor third_party third-party ' +
+        'thirdparty node_modules bower_components external extern deps godeps pods carthage ' +
+        'site-packages contrib'
+      ).split(' '),
+    );
+    let bytes = 0;
+    let links = (rootFile.match(/\]\((?!https?:|mailto:|#)/g) ?? []).length;
+    for (const file of beside) {
+      const text = readFileSync(join(root, file), 'utf8');
+      expect(text, file).toMatch(/^# Review instructions/);
+      expect(text, file).toContain('## Always check\n');
+      for (const part of dirname(file).split('/')) {
+        expect(ignored.has(part.toLowerCase()), `${file} is under ${part}`).toBe(false);
+      }
+      // An include line works only in the root file.
+      expect(text, file).not.toMatch(/^@\S+$/m);
+      bytes += Buffer.byteLength(text);
+      links += (text.match(/\]\((?!https?:|mailto:|#)/g) ?? []).length;
+    }
+    expect(Buffer.byteLength(rootFile)).toBeLessThan(150_000);
+    expect(bytes).toBeLessThan(150_000);
+    expect(links).toBeLessThanOrEqual(64);
+  });
+
+  it('skips only generated files that exist', () => {
+    const rootFile = readFileSync(join(root, 'REVIEW.md'), 'utf8');
+    const section = rootFile.slice(
+      rootFile.indexOf('## Do not report'),
+      rootFile.indexOf('## Require'),
+    );
+    const line = section.split('\n- ').find((item) => item.startsWith('Generated files'))!;
+    const paths = [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]!);
+    expect(paths.length).toBeGreaterThan(3);
+    for (const path of paths) expect(existsSync(join(root, path)), path).toBe(true);
+  });
+
   it('names every protected path in CODEOWNERS', () => {
     const owners = readFileSync(join(root, '.github/CODEOWNERS'), 'utf8');
     for (const path of [
       '/REVIEW.md',
+      '**/REVIEW.md',
       '/CLAUDE.md',
       '/.claude/',
       '**/.claude/',

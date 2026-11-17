@@ -22,7 +22,7 @@ For each revert or follow-up fix in the report, and each thing a person had to p
 1. Could a diff have shown it? If not, it is not a rule. Consider a test instead.
 2. Has it happened in at least two pull requests? Once is an anecdote. Note it in the issue and move on.
 3. Try to disprove it. Find three merged, healthy changes that the proposed trigger would also have matched. If it would have flagged them, the trigger is too wide or the rule is wrong.
-4. If it survives, add it where it will be read: an item in `scripts/reliability-checklist.mjs` when a path or a line pattern can trigger it, else one line under the right area in `REVIEW.md`. Cite the pull requests behind it.
+4. If it survives, add it where it will be read: an item in `scripts/reliability-checklist.mjs` when a path or a line pattern can trigger it, else one line under Always check in the `REVIEW.md` beside that area's code, or in the root one when it applies everywhere. Cite the pull requests behind it in the commit, not in the file: `REVIEW.md` holds instructions only.
 
 Then replay: check out the commit before the fix and run `node scripts/reliability-checklist.mjs <before>~1 <before>`. The new item must be printed for the change that caused the bug.
 

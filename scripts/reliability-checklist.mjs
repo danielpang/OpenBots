@@ -9,7 +9,9 @@
 //   node scripts/reliability-checklist.mjs --all           # every item
 //
 // The reliability-check skill (.claude/skills/reliability-check) runs it
-// before a pull request, and REVIEW.md has the reviewer run it on the diff.
+// before a pull request, and CI's gates job prints it on each one. A review
+// by the Code Review service cannot run a script, so what a reviewer must
+// check is also written, in words, in REVIEW.md and the ones beside each area.
 //
 // An item is:
 //   id       short and stable; reviews and commit messages cite it
@@ -190,7 +192,7 @@ export const CHECKLIST = [
     id: 'container-hardening',
     title: 'The docker guard, the sandbox firewall and the compose files still isolate computers',
     paths: [
-      /^docker\//,
+      /^docker\/(?!.*\.md$)/,
       /^compose\.yaml$/,
       /^packages\/computer\/src\//,
       /^apps\/computer-agent\/src\//,
@@ -293,7 +295,7 @@ export const CHECKLIST = [
     id: 'checks-changed',
     title: 'A change to the checks themselves is reviewed as one',
     paths: [
-      /^REVIEW\.md$/,
+      /(^|\/)REVIEW\.md$/,
       /^CLAUDE\.md$/,
       /^\.claude\//,
       /\/\.claude\//,

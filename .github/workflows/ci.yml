@@ -99,7 +99,7 @@ jobs:
       - name: Flag a change to the checks themselves
         run: |
           changed="$(git diff --name-only --no-renames "$MERGE_BASE" "$HEAD_SHA" | grep -E \
-            '^(REVIEW\.md|CLAUDE\.md|docs/VERIFICATION\.md|\.github/|(.*/)?\.claude/|scripts/(ci-scope|agent-checks|agent-commit-gate|reliability-checklist|openapi-diff|verification-stamps)\.mjs|packages/api-client/openapi-approved-changes\.json)' || true)"
+            '^((.*/)?REVIEW\.md|CLAUDE\.md|docs/VERIFICATION\.md|\.github/|(.*/)?\.claude/|scripts/(ci-scope|agent-checks|agent-commit-gate|reliability-checklist|openapi-diff|verification-stamps)\.mjs|packages/api-client/openapi-approved-changes\.json)' || true)"
           if [ -n "$changed" ]; then
             echo "::warning::This pull request changes the checks that judge it. A code owner must review: $(echo "$changed" | tr '\n' ' ')"
           fi
