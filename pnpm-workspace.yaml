@@ -131,6 +131,16 @@ auditConfig:
     # keys in both source and target; tooling.test.ts verifies the installed CJS
     # and UMD entries. Audit cannot recognize local patches. Remove on upstream fix.
     - GHSA-gcqx-w48m-w2h4
+    # picomatch <= 4.0.7 (regular expression denial of service through repeated
+    # extglobs such as `+(a)+(a)`). No fixed release exists: 4.0.7 is the latest,
+    # and the 2.x line micromatch needs has none either, so no override can
+    # clear it. Only build and test tools reach picomatch here (Jest, Metro and
+    # the Expo CLI through apps/mobile, Vite's file watcher): nothing under
+    # apps/, packages/ or ee/ imports it or a glob matcher, and the patterns
+    # those tools match come from this repository, not from users. Remove this
+    # entry and add an override as soon as a fixed picomatch ships
+    # (micromatch/picomatch pull request 235).
+    - GHSA-fc5q-39xc-vjpf
 
 patchedDependencies:
   deepmerge@4.3.1: patches/deepmerge@4.3.1.patch
