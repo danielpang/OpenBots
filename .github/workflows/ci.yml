@@ -35,6 +35,75 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node scripts/ci-scope.mjs "$BASE_SHA" "$HEAD_SHA" >>"$GITHUB_OUTPUT"
 
+  # The checks that judge the change rather than build it. On a pull request
+  # the gate scripts and their lists come from the base branch, never from the
+  # change: a change that could edit the check that judges it would make the
+  # check worthless (docs/VERIFICATION.md, "Protected checks"). Each gate has
+  # an observe mode that reports and an enforce mode that fails the job.
+  gates:
+    name: Verification gates
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      VERIFICATION_STAMPS: observe
+      API_DIFF: observe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Take the gate scripts from the base branch
+        run: |
+          base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          echo "MERGE_BASE=$base" >>"$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/gates" "$RUNNER_TEMP/api"
+          # A script the base branch does not have yet (the pull request that
+          # adds it) is taken from the change, and the summary says so.
+          for script in agent-commit-gate reliability-checklist openapi-diff verification-stamps; do
+            if ! git show "$base:scripts/$script.mjs" >"$RUNNER_TEMP/gates/$script.mjs" 2>/dev/null; then
+              git show "$HEAD_SHA:scripts/$script.mjs" >"$RUNNER_TEMP/gates/$script.mjs"
+              echo "::notice::scripts/$script.mjs is new in this pull request, so its own version ran"
+            fi
+          done
+          git show "$base:packages/api-client/openapi.json" >"$RUNNER_TEMP/api/openapi.base.json"
+          git show "$HEAD_SHA:packages/api-client/openapi.json" >"$RUNNER_TEMP/api/openapi.json"
+          # The approved list is the one file the change may add to; a code
+          # owner reviews it (.github/CODEOWNERS).
+          git show "$HEAD_SHA:packages/api-client/openapi-approved-changes.json" \
+            >"$RUNNER_TEMP/api/openapi-approved-changes.json" 2>/dev/null || echo '[]' \
+            >"$RUNNER_TEMP/api/openapi-approved-changes.json"
+      - name: List the reliability checklist items this diff triggers
+        run: |
+          {
+            echo '## Reliability checklist'
+            echo '```'
+            node "$RUNNER_TEMP/gates/reliability-checklist.mjs" "$MERGE_BASE" "$HEAD_SHA"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report how the commits were verified
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node "$RUNNER_TEMP/gates/verification-stamps.mjs" check "$MERGE_BASE" "$HEAD_SHA"
+      - name: Compare the API with the base branch
+        run: |
+          if ! node "$RUNNER_TEMP/gates/openapi-diff.mjs" \
+            "$RUNNER_TEMP/api/openapi.base.json" "$RUNNER_TEMP/api/openapi.json"; then
+            if [ "$API_DIFF" = enforce ]; then exit 1; fi
+            echo "::warning::This change breaks the API for an app that is already installed. Observe mode: not failing. See the job log."
+          fi
+      - name: Flag a change to the checks themselves
+        run: |
+          changed="$(git diff --name-only --no-renames "$MERGE_BASE" "$HEAD_SHA" | grep -E \
+            '^(REVIEW\.md|CLAUDE\.md|docs/VERIFICATION\.md|\.github/|(.*/)?\.claude/|scripts/(ci-scope|agent-checks|agent-commit-gate|reliability-checklist|openapi-diff|verification-stamps)\.mjs|packages/api-client/openapi-approved-changes\.json)' || true)"
+          if [ -n "$changed" ]; then
+            echo "::warning::This pull request changes the checks that judge it. A code owner must review: $(echo "$changed" | tr '\n' ' ')"
+          fi
+
   mobile:
     name: iOS unit tests and bundle
     needs: scope
@@ -454,7 +523,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [scope, mobile, check, server-postgres, server-image, standalone-image, e2e]
+    needs: [scope, gates, mobile, check, server-postgres, server-image, standalone-image, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
