@@ -84,6 +84,7 @@
     "@types/ws": "catalog:",
     "drizzle-kit": "catalog:",
     "eslint": "catalog:",
+    "fast-check": "catalog:",
     "smtp-server": "^3.21.1",
     "tsx": "catalog:",
     "typescript": "catalog:",

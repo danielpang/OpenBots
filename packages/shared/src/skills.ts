@@ -43,14 +43,18 @@ export function skillSummary(content: string, max = 300): string {
 
 /** A lowercase slug for a Skill name, unique per owner once suffixed. */
 export function skillSlug(name: string): string {
+  // Lowercase after the decomposition, which can itself yield capitals (a
+  // styled letter such as U+1D400 decomposes to "A"), and trim the dash a cut
+  // at 48 characters can leave at the end.
   const slug = name
-    .toLowerCase()
     .normalize('NFKD')
+    .toLowerCase()
     .replace(/[^\w\s-]/g, '')
     .trim()
     .replace(/[\s_]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 48);
+    .slice(0, 48)
+    .replace(/-$/, '');
   return slug || 'skill';
 }
