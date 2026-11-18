@@ -6,13 +6,16 @@ import { defineConfig } from '@playwright/test';
 // and signup mode `open`, as CI does: the specs sign up several users, and a
 // self-hosted install closes sign-up after its owner.
 // Browsers are not installed with the dependencies; run
-// `pnpm --filter @openbots/web exec playwright install chromium` once.
+// `pnpm --filter @openbots/web exec playwright install chromium` once, or set
+// E2E_CHROMIUM_PATH to a Chromium already on the machine (a cloud container's,
+// say, where the pinned build cannot be downloaded).
 
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
+const executablePath = process.env.E2E_CHROMIUM_PATH;
 
 export default defineConfig({
   testDir: 'e2e',
-  use: { baseURL },
+  use: { baseURL, ...(executablePath ? { launchOptions: { executablePath } } : {}) },
   webServer: process.env.E2E
     ? { command: 'pnpm dev', url: baseURL, reuseExistingServer: true }
     : undefined,

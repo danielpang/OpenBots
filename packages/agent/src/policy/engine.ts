@@ -9,7 +9,7 @@ import {
 } from '@openbots/shared';
 import type { Policy, PolicyEvaluation, PolicyTraceStep } from './policy.js';
 import { hostAllowed } from '../tools/builtin.js';
-import { defaultRule, type ToolFacts } from './rules.js';
+import { defaultRule, ownEntry, type ToolFacts } from './rules.js';
 
 // The policy engine (plan 8, T5). A pure function of the tool, its arguments,
 // the run's trigger and the owner's settings, returning the decision and the
@@ -58,7 +58,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyEvaluation {
       why: `Bot setting for the ${facts.connector!.slug} connector`,
     });
   }
-  const own = policy.tools[toolName];
+  const own = ownEntry(policy.tools, toolName);
   if (own) set({ rule: 'tool', decision: own, why: `Bot setting for ${toolName}` });
 
   const source = input.source ?? sourceOfTrigger(input.trigger);
@@ -108,7 +108,7 @@ function triggerFloor(
   sideEffects: boolean,
 ): PolicyDecision | undefined {
   return (
-    rules.tools?.[toolName] ??
+    (rules.tools ? ownEntry(rules.tools, toolName) : undefined) ??
     rules.groups?.[facts.group] ??
     (sideEffects ? rules.default : undefined)
   );

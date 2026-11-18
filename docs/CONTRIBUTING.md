@@ -25,9 +25,21 @@ pnpm exec prettier --write packages/api-client/openapi.json
 pnpm --filter @openbots/api-client generate
 ```
 
+## Showing that a change works
+
+Passing tests are not the whole evidence. [VERIFICATION.md](VERIFICATION.md) says how a change is
+verified by running it, how each commit records that (`Verified:` at the end of its message), and
+which checks run when. The reliability checklist prints only the items your diff triggers:
+
+```sh
+bash scripts/verify-stack.sh start        # the server and web app from source, fresh database
+node scripts/reliability-checklist.mjs    # what has broken before, for this diff
+```
+
 ## CI scope and build reuse
 
-CI runs on pull requests and pushes to `main`, not nightly. The **Select affected checks** job
+CI runs on pull requests and pushes to `main`, not nightly. On a pull request the **Verification
+gates** job also runs: it reads the diff, not the build (see [VERIFICATION.md](VERIFICATION.md)). The **Select affected checks** job
 compares changed paths (including deleted and renamed ones) against the merge-base using
 `scripts/ci-scope.mjs`:
 
