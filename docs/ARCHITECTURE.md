@@ -19,6 +19,10 @@ use another prefix.
 | **`relay`**            | Intermediary carrying encrypted connections between a paired phone and a server.     | Lets the phone reach a server behind a router or firewall without port forwarding or a public server address. Usually runs on shared infrastructure. Also published for self-hosting.                                                                                                                   |
 | **`standalone`**       | Server, Postgres, Redis and the computer agent/browser environment in one container. | For personal hosting on platforms that run one container but not a Compose stack or sibling computer containers, including Fly Machines and Sprites. Persistent state lives under `/data`.                                                                                                              |
 
+On the hosted service a user's computer can also run on a Fly Sprite, which cannot boot an image:
+[docker/sprites](../docker/sprites/README.md) installs what the `computer` image holds into a
+stock Sprite by script, and describes where that differs from the container.
+
 ## The Mac app's This Mac setup
 
 The Mac app is an Electron shell around the web UI. **This Mac** starts a local Compose stack

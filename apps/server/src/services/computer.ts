@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { labelFor, OwnerHasScreen, type ComputerServices, type StepRecord } from '@openbots/agent';
 import {
   AgentError,
@@ -6,11 +8,13 @@ import {
   cdpPortFor,
   createDockerProvider,
   createRemoteProvider,
+  createSpritesProvider,
   nextDisplay,
   SANDBOX_NETWORK,
   SCREEN_SIZE,
   ScreenLocks,
   screenNumber,
+  spritesEgressPolicy,
   volumeName,
   type ComputerAgentClient,
   type ComputerProvider,
@@ -51,11 +55,19 @@ import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 
 // The account's computer (plan 4.5, 9; K1 to K7). One `computers` row per
 // owner, created on first use through the configured provider (`remote` when
-// OPENBOTS_COMPUTER_AGENT_URL is set, else `docker` when DOCKER_HOST is set,
-// else none: the computer tools are not offered). Starting it brings the
-// machine up and waits for its control agent; the idle sweep stops it after
+// OPENBOTS_COMPUTER_AGENT_URL is set, else `sprites` when
+// OPENBOTS_SPRITES_TOKEN is set, else `docker` when DOCKER_HOST is set, else
+// none: the computer tools are not offered). Starting it brings the machine
+// up and waits for its control agent; the idle sweep stops it after
 // `idle_timeout_min` (default 30) unless `always_on`, and the home volume
 // stays. Status changes publish `computer.status` to the owner.
+//
+// A Sprite pauses itself about 30 seconds after its last activity and wakes
+// on the next request to its URL, which is how every agent call reaches it,
+// so the provider reads a paused Sprite as `running` and its `stop` only
+// releases holds. The idle sweep still marks the row stopped, which ends the
+// stdio connectors and coding sessions whose open connections would keep the
+// Sprite awake; the next start wakes it and waits for its agent.
 //
 // Each Bot gets a screen (`bot_screens`, K2): display `:10+n`, its own CDP
 // port and Chromium profile, started on the agent the first time the Bot
@@ -169,7 +181,7 @@ export const computerOff = () =>
   new DomainError(409, COMPUTER_OFF, 'The computer is off. Start it first.');
 
 const NO_PROVIDER =
-  'This install has no computer: set DOCKER_HOST (the docker guard) or OPENBOTS_COMPUTER_AGENT_URL';
+  'This install has no computer: set DOCKER_HOST (the docker guard), OPENBOTS_COMPUTER_AGENT_URL or OPENBOTS_SPRITES_TOKEN';
 
 const REMOTE_TAKEN =
   "This install's computer is one remote machine, and another account already uses it. " +
@@ -184,9 +196,14 @@ export function setComputerProvider(deps: AppDeps, provider: ComputerProvider | 
   providers.set(deps.config, provider);
 }
 
+/**
+ * The configured provider: `remote` when OPENBOTS_COMPUTER_AGENT_URL is set,
+ * else `sprites` when OPENBOTS_SPRITES_TOKEN is, else `docker` when
+ * DOCKER_HOST is, else none.
+ */
 export function computerProvider(deps: AppDeps): ComputerProvider | null {
   if (!providers.has(deps.config)) {
-    const { computerAgent, dockerHost } = deps.config;
+    const { computerAgent, sprites, dockerHost } = deps.config;
     if (computerAgent?.shared) {
       deps.logger.warn(
         'OPENBOTS_COMPUTER_AGENT_SHARED is on: every account shares the remote computer, its files and its logins',
@@ -196,12 +213,40 @@ export function computerProvider(deps: AppDeps): ComputerProvider | null {
       deps.config,
       computerAgent
         ? createRemoteProvider(computerAgent)
-        : dockerHost
-          ? createDockerProvider({ dockerHost, network: deps.config.sandboxNetwork })
-          : null,
+        : sprites
+          ? spritesProvider(deps, sprites)
+          : dockerHost
+            ? createDockerProvider({ dockerHost, network: deps.config.sandboxNetwork })
+            : null,
     );
   }
   return providers.get(deps.config) ?? null;
+}
+
+/**
+ * The sprites provider from its configuration. The provisioning files are
+ * read when a Sprite is made; VERSION is read here, once per process, so a
+ * new release's files provision each Sprite again at its next start.
+ */
+function spritesProvider(
+  deps: AppDeps,
+  sprites: NonNullable<AppDeps['config']['sprites']>,
+): ComputerProvider {
+  const dir = sprites.provisionDir;
+  const version = readFileSync(join(dir, 'VERSION'), 'utf8').trim();
+  if (!version) throw new Error(`${join(dir, 'VERSION')} is empty`);
+  return createSpritesProvider({
+    token: sprites.token,
+    namePrefix: sprites.namePrefix,
+    urlAuth: sprites.urlAuth,
+    egress: spritesEgressPolicy(sprites.egress),
+    provision: {
+      scriptPath: join(dir, 'provision.sh'),
+      bundlePath: join(dir, 'agent-bundle.tgz'),
+      version,
+    },
+    timezone: deps.config.timezone,
+  });
 }
 
 export function computerAvailable(deps: AppDeps) {
@@ -688,8 +733,8 @@ export interface DestroyComputerOptions {
  * end with it), then removes the container and its home volume through the
  * provider, and the state volume only with `signIns`. The row stays,
  * `stopped`, with no machine, so the next start makes a fresh one with the
- * same volume name. Docker only: the remote machine is not the server's to
- * remove (409 `RESET_UNSUPPORTED`). A stop that fails does not stop the reset,
+ * same volume name. Docker and Sprites only: the remote machine is not the
+ * server's to remove (409 `RESET_UNSUPPORTED`). A stop that fails does not stop the reset,
  * since removing the container stops it anyway.
  */
 export async function destroyComputer(
@@ -740,9 +785,14 @@ export async function destroyComputer(
   });
 }
 
-/** Refuses a reset where the server cannot remove the machine (the remote provider). */
+/**
+ * Refuses a reset where the server cannot remove the machine (the remote
+ * provider). A Sprite is reset by the provider's `destroy`: deleted with the
+ * sign-ins, or its home cleared in place without them, then made or
+ * provisioned again at the next start.
+ */
 export function assertResettable(deps: AppDeps) {
-  if (provider(deps).name !== 'docker') {
+  if (provider(deps).name === 'remote') {
     throw new DomainError(
       409,
       'RESET_UNSUPPORTED',

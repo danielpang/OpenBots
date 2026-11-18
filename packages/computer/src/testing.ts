@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mcpStdioSession } from '@openbots/computer-agent/mcp-stdio';
 import {
+  AGENT_TOKEN_HEADER,
   BROWSER_ACTIONS,
   BrowserActionSchemas,
   CoderClientMessageSchema,
@@ -25,6 +26,15 @@ import {
 import type Docker from 'dockerode';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { GUARD_NAME, GUARD_PATH, type DockerApi } from './docker.js';
+import type {
+  SpriteExecOptions,
+  SpriteExecResult,
+  SpriteInfo,
+  SpritesApi,
+  SpriteStatus,
+  SpriteUrlAuth,
+} from './sprites-api.js';
+import type { ComputerCheckpoint, EgressPolicy } from './types.js';
 
 // Test doubles: an in-process control agent speaking
 // `@openbots/computer-agent/protocol` (requests are validated with the agent's
@@ -218,8 +228,14 @@ export async function startFakeAgent({ token = 'agent-token' } = {}): Promise<Fa
     });
   });
 
+  // As the real agent: `Authorization: Bearer`, or X-OpenBots-Agent-Token
+  // behind a proxy that keeps `Authorization` (a private Sprite URL).
+  const authorized = (req: IncomingMessage) =>
+    req.headers.authorization === `Bearer ${agent.token}` ||
+    req.headers[AGENT_TOKEN_HEADER] === agent.token;
+
   async function handle(req: IncomingMessage, res: ServerResponse) {
-    if (req.headers.authorization !== `Bearer ${agent.token}`) {
+    if (!authorized(req)) {
       return problem(res, 401, 'Send the agent token', 'UNAUTHORIZED');
     }
     const url = new URL(req.url ?? '/', 'http://agent');
@@ -357,7 +373,7 @@ export async function startFakeAgent({ token = 'agent-token' } = {}): Promise<Fa
       path === '/mcp/stdio' ||
       path === '/coder' ||
       (vnc && agent.screens.has(Number(vnc[1])));
-    if (req.headers.authorization !== `Bearer ${agent.token}` || !known) {
+    if (!authorized(req) || !known) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -577,4 +593,215 @@ export function mockDocker(): MockDocker {
     },
   };
   return docker;
+}
+
+/** One Sprite in `fakeSpritesApi`: its files, policy, holds and checkpoints. */
+export interface FakeSprite {
+  name: string;
+  url: string;
+  status: SpriteStatus;
+  urlAuth: SpriteUrlAuth;
+  files: Map<string, Uint8Array>;
+  policy: EgressPolicy | null;
+  /** Live Tasks API tasks by name, with their expiry in seconds. */
+  tasks: Map<string, number>;
+  checkpoints: (ComputerCheckpoint & { files: Map<string, Uint8Array> })[];
+}
+
+export interface FakeSpritesCall {
+  op: keyof SpritesApi;
+  name: string;
+  args: unknown[];
+}
+
+export interface FakeSpritesApi extends SpritesApi {
+  sprites: Map<string, FakeSprite>;
+  calls: FakeSpritesCall[];
+  /**
+   * What the provision script does; by default it records its version in
+   * /opt/openbots/provision.version, as docker/sprites/provision.sh does.
+   * `token` is what it read on stdin.
+   */
+  provisionScript: (
+    sprite: FakeSprite,
+    run: { token: string; env: Record<string, string>; script: string; bundle: string },
+  ) => SpriteExecResult;
+  /** Each provision run, in order. */
+  provisions: { name: string; token: string; env: Record<string, string> }[];
+  /** Answers an exec before the built-in commands; return undefined to fall through. */
+  execHook?: (
+    sprite: FakeSprite,
+    argv: string[],
+    options: SpriteExecOptions,
+  ) => SpriteExecResult | undefined;
+  /** The url each new Sprite gets; a test points it at a fake agent. */
+  urlFor: (name: string) => string;
+}
+
+/**
+ * A stand-in for the Sprites API (packages/computer/src/sprites-api.ts), so
+ * the sprites provider is tested without Fly. Exec understands the commands
+ * the provider runs: mkdir, rm, the upload join, the provision script, the
+ * Tasks API curl calls and the home wipe; anything else exits 0 silently.
+ */
+export function fakeSpritesApi(): FakeSpritesApi {
+  const ok = (stdout = ''): SpriteExecResult => ({ exitCode: 0, stdout, stderr: '' });
+  const missing = (name: string) =>
+    Object.assign(new Error(`Sprites API: 404 no sprite ${name}`), { status: 404 });
+  const info = (sprite: FakeSprite): SpriteInfo => ({
+    name: sprite.name,
+    url: sprite.url,
+    status: sprite.status,
+    urlAuth: sprite.urlAuth,
+  });
+  const decode = (data: Uint8Array | string | undefined) =>
+    typeof data === 'string' ? data : data ? new TextDecoder().decode(data) : '';
+  let checkpoints = 0;
+
+  const api: FakeSpritesApi = {
+    sprites: new Map(),
+    calls: [],
+    provisions: [],
+    urlFor: (name) => `https://${name}-abc123.sprites.app`,
+    provisionScript: (sprite, run) => {
+      sprite.files.set(
+        '/opt/openbots/provision.version',
+        new TextEncoder().encode(`${run.env.OPENBOTS_PROVISION_VERSION ?? ''}\n`),
+      );
+      return ok('provisioned');
+    },
+    async create(name, { urlAuth }) {
+      api.calls.push({ op: 'create', name, args: [{ urlAuth }] });
+      if (api.sprites.has(name)) throw Object.assign(new Error('409 taken'), { status: 409 });
+      const sprite: FakeSprite = {
+        name,
+        url: api.urlFor(name),
+        status: 'running',
+        urlAuth,
+        files: new Map(),
+        policy: null,
+        tasks: new Map(),
+        checkpoints: [],
+      };
+      api.sprites.set(name, sprite);
+      return info(sprite);
+    },
+    async get(name) {
+      api.calls.push({ op: 'get', name, args: [] });
+      const sprite = api.sprites.get(name);
+      return sprite ? info(sprite) : null;
+    },
+    async delete(name) {
+      api.calls.push({ op: 'delete', name, args: [] });
+      api.sprites.delete(name);
+    },
+    async setUrlAuth(name, auth) {
+      api.calls.push({ op: 'setUrlAuth', name, args: [auth] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      sprite.urlAuth = auth;
+    },
+    async setNetworkPolicy(name, policy) {
+      api.calls.push({ op: 'setNetworkPolicy', name, args: [policy] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      sprite.policy = structuredClone(policy);
+    },
+    async exec(name, argv, options = {}) {
+      api.calls.push({ op: 'exec', name, args: [argv, options] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      // A request wakes a paused Sprite.
+      sprite.status = 'running';
+      const hooked = api.execHook?.(sprite, argv, options);
+      if (hooked) return hooked;
+      const [command, ...args] = argv;
+      if (command === 'curl' && args.includes('/.sprite/api.sock')) {
+        const method = args[args.indexOf('-X') + 1];
+        const url = args.find((arg) => arg.startsWith('http://sprite'))!;
+        const task = url.replace('http://sprite/v1/tasks', '').replace(/^\//, '');
+        if (method === 'GET') {
+          return ok(JSON.stringify({ tasks: [...sprite.tasks.keys()].map((n) => ({ name: n })) }));
+        }
+        if (method === 'PUT') {
+          const body = JSON.parse(args[args.indexOf('-d') + 1]!) as { expire: number };
+          const created = !sprite.tasks.has(task);
+          sprite.tasks.set(task, body.expire);
+          return ok(created ? '201' : '200');
+        }
+        if (method === 'DELETE') return ok(sprite.tasks.delete(task) ? '204' : '404');
+      }
+      if (command === 'bash' && args[1]?.includes('read -r OPENBOTS_AGENT_TOKEN')) {
+        const token = decode(options.stdin).replace(/\n$/, '');
+        const env = options.env ?? {};
+        api.provisions.push({ name, token, env });
+        return api.provisionScript(sprite, { token, env, script: args[2]!, bundle: args[3]! });
+      }
+      if (command === 'bash' && args[2] === 'join') {
+        const [out, ...parts] = args.slice(3);
+        const joined = Buffer.concat(
+          parts.map((part) => sprite.files.get(part) ?? new Uint8Array()),
+        );
+        for (const part of parts) sprite.files.delete(part);
+        sprite.files.set(out!, new Uint8Array(joined));
+        return ok();
+      }
+      if (command === 'bash' && args[2] === 'as-root') {
+        const home = /^find (\S+) -mindepth 1 -delete$/.exec(args[3] ?? '')?.[1];
+        if (home) {
+          for (const path of [...sprite.files.keys()]) {
+            if (path.startsWith(`${home}/`)) sprite.files.delete(path);
+          }
+        }
+        return ok();
+      }
+      if (command === 'rm') {
+        const target = args[args.length - 1]!;
+        for (const path of [...sprite.files.keys()]) {
+          if (path === target || path.startsWith(`${target}/`)) sprite.files.delete(path);
+        }
+      }
+      return ok();
+    },
+    async writeFile(name, path, data, options) {
+      api.calls.push({ op: 'writeFile', name, args: [path, data.byteLength, options] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      sprite.files.set(path, new Uint8Array(data));
+    },
+    async readFile(name, path) {
+      api.calls.push({ op: 'readFile', name, args: [path] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      sprite.status = 'running';
+      return sprite.files.get(path) ?? null;
+    },
+    async createCheckpoint(name, comment) {
+      api.calls.push({ op: 'createCheckpoint', name, args: [comment] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      const id = `v${++checkpoints}`;
+      sprite.checkpoints.push({
+        id,
+        createdAt: new Date().toISOString(),
+        ...(comment ? { comment } : {}),
+        files: new Map(sprite.files),
+      });
+      return id;
+    },
+    async listCheckpoints(name) {
+      api.calls.push({ op: 'listCheckpoints', name, args: [] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      return sprite.checkpoints.map(({ files: _, ...checkpoint }) => checkpoint);
+    },
+    async restoreCheckpoint(name, id) {
+      api.calls.push({ op: 'restoreCheckpoint', name, args: [id] });
+      const sprite = api.sprites.get(name);
+      const checkpoint = sprite?.checkpoints.find((c) => c.id === id);
+      if (!sprite || !checkpoint) throw missing(name);
+      sprite.files = new Map(checkpoint.files);
+    },
+  };
+  return api;
 }

@@ -2,8 +2,9 @@ import type { ComputerProviderName } from '@openbots/shared';
 import type { ComputerAgentClient } from './agent-client.js';
 
 // The provider interface (plan 9.2). `docker` is v1; `remote` points at a
-// control agent already running on some machine; firecracker, e2b and daytona
-// are later providers (K6). The server owns the `computers` row and calls a
+// control agent already running on some machine; `sprites` makes one Fly
+// Sprite per account (the hosted service); firecracker, e2b and daytona are
+// later providers (K6). The server owns the `computers` row and calls a
 // provider to make the machine behind it exist, run and stop.
 
 /** Resource limits for one computer (plan 9.5). */
@@ -75,6 +76,29 @@ export interface DestroyOptions {
 /** What the provider sees; the server's own status adds `creating`, `starting`, `stopping`, `error`. */
 export type MachineStatus = 'running' | 'stopped' | 'missing';
 
+/**
+ * A DNS egress rule (the Sprites network policy): an exact host, `*.host` or
+ * `*` with `allow` or `deny`, or `include` a provider's preset.
+ */
+export interface EgressRule {
+  domain?: string;
+  action?: 'allow' | 'deny';
+  include?: string;
+}
+
+/** What a computer may reach; an empty rule list means no enforcement. */
+export interface EgressPolicy {
+  rules: EgressRule[];
+}
+
+/** A snapshot of a computer's whole disk. */
+export interface ComputerCheckpoint {
+  id: string;
+  /** ISO timestamp. */
+  createdAt: string;
+  comment?: string;
+}
+
 export interface ComputerProvider {
   readonly name: ComputerProviderName;
   create(spec: ComputerSpec): Promise<ComputerRef>;
@@ -100,6 +124,21 @@ export interface ComputerProvider {
    * local one (the tag moved since), so it is made again; Docker only.
    */
   runsImage?(ref: ComputerRef, image: string): Promise<boolean>;
+  /**
+   * Keeps a machine that pauses itself when idle running for `seconds` (at
+   * most an hour; call again to extend), under `name`, so a run is not paused
+   * mid-task. Sprites only.
+   */
+  hold?(ref: ComputerRef, name: string, seconds: number): Promise<void>;
+  /** Drops the hold `name`; one already gone is fine. Sprites only. */
+  release?(ref: ComputerRef, name: string): Promise<void>;
+  /** Snapshots the machine's whole disk; resolves with the checkpoint's id. Sprites only. */
+  checkpoint?(ref: ComputerRef, comment?: string): Promise<string>;
+  /** Puts the whole disk back as it was at checkpoint `id`. Sprites only. */
+  restore?(ref: ComputerRef, id: string): Promise<void>;
+  listCheckpoints?(ref: ComputerRef): Promise<ComputerCheckpoint[]>;
+  /** Replaces what the machine may reach. Sprites only. */
+  applyEgressPolicy?(ref: ComputerRef, policy: EgressPolicy): Promise<void>;
 }
 
 // The computer's paths and the coding agents' users, paths and environment

@@ -5309,7 +5309,7 @@ export interface paths {
     put?: never;
     /**
      * Rescue unpushed work before a reset
-     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker computers only (409 `RESET_UNSUPPORTED`).
+     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and Sprites computers only (409 `RESET_UNSUPPORTED`).
      */
     post: {
       parameters: {
@@ -13160,7 +13160,7 @@ export interface components {
       /** Format: uuid */
       id: string;
       /** @enum {string} */
-      provider: 'docker' | 'remote';
+      provider: 'docker' | 'remote' | 'sprites';
       /** @enum {string} */
       status: 'creating' | 'updating' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
       alwaysOn: boolean;

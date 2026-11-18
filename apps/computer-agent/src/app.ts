@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { bearer, tokenMatches } from './auth.js';
+import { headersAuthorized } from './auth.js';
 import type { BrowserPool } from './browser.js';
 import type { CookieSync } from './cookies.js';
 import { AgentError } from './errors.js';
@@ -9,6 +9,7 @@ import { deletePath, readPath, writePath } from './fs.js';
 import { sendInput } from './input.js';
 import type { Run } from './proc.js';
 import {
+  AGENT_TOKEN_HEADER,
   BROWSER_ACTIONS,
   CookieSyncRequestSchema,
   ExecRequestSchema,
@@ -67,7 +68,13 @@ export function createApp(deps: AppDeps): Hono {
   app.notFound((c) => problemResponse(c, new AgentError(404, 'NOT_FOUND', 'No such endpoint')));
 
   app.use('*', async (c, next) => {
-    if (!tokenMatches(deps.token, bearer(c.req.header('authorization')))) {
+    if (
+      !headersAuthorized(
+        deps.token,
+        c.req.header('authorization'),
+        c.req.header(AGENT_TOKEN_HEADER),
+      )
+    ) {
       return problemResponse(c, new AgentError(401, 'UNAUTHORIZED', 'Send the agent token'));
     }
     await next();

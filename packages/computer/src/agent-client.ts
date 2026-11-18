@@ -1,19 +1,20 @@
-import type {
-  BrowserActionInput,
-  BrowserActionName,
-  BrowserResult,
-  CoderClientMessageInput,
-  CoderServerMessage,
-  CoderStartInput,
-  CookieSyncResult,
-  ExecEvent,
-  ExecRequest,
-  FsEntry,
-  FsListing,
-  InputAction as AgentInputAction,
-  McpStdioServerMessage,
-  McpStdioStart,
-  ScreenInfo,
+import {
+  AGENT_TOKEN_HEADER,
+  type BrowserActionInput,
+  type BrowserActionName,
+  type BrowserResult,
+  type CoderClientMessageInput,
+  type CoderServerMessage,
+  type CoderStartInput,
+  type CookieSyncResult,
+  type ExecEvent,
+  type ExecRequest,
+  type FsEntry,
+  type FsListing,
+  type InputAction as AgentInputAction,
+  type McpStdioServerMessage,
+  type McpStdioStart,
+  type ScreenInfo,
 } from '@openbots/computer-agent/protocol';
 import { WebSocket, type RawData } from 'ws';
 import type { InputAction } from './actions.js';
@@ -21,7 +22,8 @@ import { COMPUTER_HOME } from './types.js';
 
 // The HTTP client for the control agent inside the computer (plan 9.3), whose
 // wire format is `@openbots/computer-agent/protocol`. Every request carries
-// `Authorization: Bearer <agent token>`; errors are problem documents, thrown
+// `Authorization: Bearer <agent token>` (or, behind a proxy that keeps
+// `Authorization`, `X-OpenBots-Agent-Token`); errors are problem documents, thrown
 // here as `AgentError` with their `detail` and `code`.
 //
 // Paths: the agent's `/fs` is relative to its home; this client takes
@@ -236,6 +238,13 @@ export class AgentError extends Error {
 export interface AgentClientOptions {
   url: string;
   token: string;
+  /**
+   * A token for a proxy in front of the agent that takes `Authorization` for
+   * itself (a private Sprite URL wants the Sprites org token there). With it,
+   * `Authorization` carries this token and the agent token goes in
+   * `X-OpenBots-Agent-Token`, which the agent also accepts.
+   */
+  proxyToken?: string;
   /** Per-request timeout for everything but `exec`, which has its own. */
   timeoutMs?: number;
   fetch?: typeof fetch;
@@ -249,11 +258,14 @@ const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 export function createAgentClient({
   url,
   token,
+  proxyToken,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   fetch: doFetch = fetch,
 }: AgentClientOptions): ComputerAgentClient {
   const base = url.replace(/\/+$/, '');
-  const auth = { authorization: `Bearer ${token}` };
+  const auth: Record<string, string> = proxyToken
+    ? { authorization: `Bearer ${proxyToken}`, [AGENT_TOKEN_HEADER]: token }
+    : { authorization: `Bearer ${token}` };
 
   async function request(
     method: string,

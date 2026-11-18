@@ -23,7 +23,12 @@ export type ComputerStatus = z.infer<typeof ComputerStatusSchema>;
 export const ScreenStatusSchema = z.enum(['stopped', 'running']);
 export type ScreenStatus = z.infer<typeof ScreenStatusSchema>;
 
-export const ComputerProviderNameSchema = z.enum(['docker', 'remote']);
+/**
+ * Where computers run (plan 9.2): `docker` on this host, `remote` on a control
+ * agent already running elsewhere, `sprites` on Fly Sprites, one per account
+ * (the hosted service).
+ */
+export const ComputerProviderNameSchema = z.enum(['docker', 'remote', 'sprites']);
 export type ComputerProviderName = z.infer<typeof ComputerProviderNameSchema>;
 
 /** The Computer tool group (plan 5.4). */

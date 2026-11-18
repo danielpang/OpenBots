@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { AgentError, computerPath } from '@openbots/computer';
 import {
   CodingSessionStatusSchema,
+  ComputerProviderNameSchema,
   ComputerStatusSchema,
   RepoRescueResultSchema,
   ScreenStatusSchema,
@@ -56,7 +57,7 @@ const ScreenSchema = z
 const ComputerSchema = z
   .object({
     id: z.uuid(),
-    provider: z.enum(['docker', 'remote']),
+    provider: ComputerProviderNameSchema,
     status: ComputerStatusSchema,
     alwaysOn: z.boolean(),
     idleTimeoutMin: z.number().int().nullable(),
@@ -368,7 +369,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Rescue unpushed work before a reset',
       description:
-        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker computers only (409 `RESET_UNSUPPORTED`).',
+        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and Sprites computers only (409 `RESET_UNSUPPORTED`).',
       middleware: [requireUser] as const,
       security: authenticated,
       responses: {

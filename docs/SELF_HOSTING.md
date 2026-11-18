@@ -145,6 +145,16 @@ use it keeps it, and every other account is told the computer is unavailable.
 screen, but all accounts share the files under `/home/bot` and every browser login (cookies sync
 across every screen). Turn it on only when the accounts fully trust each other.
 
+### Computers on Fly Sprites (managed service)
+
+The hosted service gives each account its own [Fly Sprite](https://docs.fly.io/sprites/) instead of
+a Docker container. A self-hosted install does not need it and leaves these empty.
+`OPENBOTS_SPRITES_TOKEN` (a Sprites org token) turns it on, and
+`OPENBOTS_SPRITES_PROVISION_DIR` points at the provisioning files from `docker/sprites/`. A remote
+agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
+set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
+the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the

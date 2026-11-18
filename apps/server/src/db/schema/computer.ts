@@ -6,7 +6,7 @@ import { workspaceId } from './workspace.js';
 
 // Plan 4.5: Computer (K1 to K7).
 
-export const computerProvider = pgEnum('computer_provider', ['docker', 'remote']);
+export const computerProvider = pgEnum('computer_provider', ['docker', 'remote', 'sprites']);
 
 /** One per account in each organization (K1, plan 21.3). */
 export const computers = pgTable(
