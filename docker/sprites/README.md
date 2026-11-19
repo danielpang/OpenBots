@@ -189,11 +189,10 @@ Unverified without a real Sprite (each also marked `UNVERIFIED on a real Sprite:
 - That `/sys/fs/cgroup` is a writable cgroup v2 tree and the runtime does not mind the service moving into its own cgroup. Without it, processes of the bot user that a crashed agent left running are not ended.
 - That a service's process is root (the launcher re-runs itself with `sudo -n` if not) and that `services delete` stops it.
 - Playwright's dependency list on Ubuntu 26.04: Playwright may not list 26.04 yet and fall back to a release it knows. It worked in the `ubuntu:26.04` container.
-- How long the first provisioning takes, and the agent's behaviour across warm and cold wakes. Open connections (a screen's VNC or a terminal's WebSocket) drop on any pause; the server reconnects.
+- How long the first provisioning takes, and the agent's behaviour across warm and cold wakes. Open connections (a screen's VNC or a terminal's WebSocket) drop on any pause; the web app reconnects. How the server provisions in the background, holds a Sprite awake during work, closes idle sockets and records usage is in [plan 9.5](../../docs/plans/TECHNICAL_PLAN.md#95-isolation-and-lifecycle); the hold, the 30-second pause tail and the screens a cold wake loses are tested only against fakes.
 
 Not done:
 
-- Keeping a Sprite awake during a Bot's long run: the provider has `hold` and `release` (Tasks API), but the server does not call them yet.
 - No memory, CPU or pids limits.
 - The bundle must be built on x86_64 Linux with a glibc no newer than the Sprite's; node-pty is rebuilt on the Sprite when its binding does not load, but that path has only been reasoned about, not run.
 - Bundles other than the current and the previous one are deleted; there is no rollback command, but pointing `/app` at the previous one in `/opt/openbots/bundles/` and restarting the service is one.
