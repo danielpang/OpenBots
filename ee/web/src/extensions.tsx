@@ -1,6 +1,7 @@
 import { isAdmin, type WebExtensions } from '@openbots/web/extensions';
 import { carryInvite } from './api.js';
 import { AuditLog } from './audit-log.js';
+import { BillingSettings } from './billing.js';
 import { MembersSettings } from './members.js';
 import { Onboarding } from './onboarding.js';
 import { OrganizationSettings } from './organization-settings.js';
@@ -8,7 +9,7 @@ import { OrganizationSwitcher } from './switcher.js';
 
 // What the managed web app adds to the core app (plan 21.5): the switcher,
 // onboarding (create an organization, or join through an invite), the
-// organization's settings, and an invite carried through a GitHub or Google
+// organization's settings and billing, and an invite carried through a GitHub or Google
 // sign-up. Model providers at both levels are the core's
 // Settings > Models, which shows "Organization" and "Yours" here.
 
@@ -28,6 +29,13 @@ export const managedWeb: WebExtensions = {
       label: 'Members',
       visible: (me) => isAdmin(me.role),
       Component: MembersSettings,
+    },
+    {
+      // Everyone: members see their own usage and set their own limit.
+      section: 'billing',
+      label: 'Billing',
+      visible: () => true,
+      Component: BillingSettings,
     },
     {
       section: 'audit',

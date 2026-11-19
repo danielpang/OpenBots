@@ -49,12 +49,12 @@ const text = (html: string) =>
     .replace(/\s+/g, ' ');
 
 describe('the managed web app', () => {
-  it('gives everyone the Organization tab, and owners and admins Members and Audit log', () => {
+  it('gives everyone Organization and Billing, and owners and admins Members and Audit log', () => {
     const tabs = (role: 'owner' | 'admin' | 'member') =>
       managedWeb.settingsTabs!.filter((tab) => tab.visible(me(role))).map((tab) => tab.section);
-    expect(tabs('member')).toEqual(['organization']);
-    expect(tabs('admin')).toEqual(['organization', 'members', 'audit']);
-    expect(tabs('owner')).toEqual(['organization', 'members', 'audit']);
+    expect(tabs('member')).toEqual(['organization', 'billing']);
+    expect(tabs('admin')).toEqual(['organization', 'members', 'billing', 'audit']);
+    expect(tabs('owner')).toEqual(['organization', 'members', 'billing', 'audit']);
   });
 
   it('shows the switcher only with two or more organizations', () => {
