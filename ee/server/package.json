@@ -19,10 +19,13 @@
     "lint": "eslint .",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "openapi": "tsx --conditions=@openbots/source src/openapi-cli.ts"
+    "openapi": "tsx --conditions=@openbots/source src/openapi-cli.ts",
+    "setup-stripe": "tsx --conditions=@openbots/source src/billing/setup-stripe-cli.ts",
+    "reconcile": "tsx --conditions=@openbots/source src/billing/reconcile-cli.ts"
   },
   "dependencies": {
     "@hono/zod-openapi": "catalog:",
+    "@openbots/computer": "workspace:*",
     "@openbots/server": "workspace:*",
     "@openbots/shared": "workspace:*",
     "better-auth": "catalog:",

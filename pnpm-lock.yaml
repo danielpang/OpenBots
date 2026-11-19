@@ -1123,6 +1123,9 @@ importers:
       '@hono/zod-openapi':
         specifier: 'catalog:'
         version: 1.6.3(hono@4.13.18)(zod@4.6.7)
+      '@openbots/computer':
+        specifier: workspace:*
+        version: link:../../packages/computer
       '@openbots/server':
         specifier: workspace:*
         version: link:../../apps/server
