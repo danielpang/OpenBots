@@ -353,6 +353,11 @@ export async function setVisibility(
   requireArtifactHost(deps.config);
   const artifact = await deps.db.transaction(async (tx) => {
     const row = await ownedArtifact(tx, owner, artifactId, true);
+    // An approval shares once. Checked under the Artifact's lock, so two
+    // runs of the same approved call cannot both pass.
+    if (options.approvalId && (await approvalUsed(tx, row.workspaceId, options.approvalId))) {
+      throw notApproved();
+    }
     let publicVersion: VersionRow | null = null;
     if (change.visibility === 'public') {
       const workspace = await getOrganization(tx, row.workspaceId);
@@ -429,6 +434,21 @@ const toShare = (args: unknown): ShareRequest | null => {
   };
 };
 
+/** Whether a share approval was already applied: its audit entry names it. */
+async function approvalUsed(db: Db, workspaceId: string, approvalId: string): Promise<boolean> {
+  const [used] = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.workspaceId, workspaceId),
+        eq(schema.auditLog.action, 'artifact.visibility'),
+        sql`${schema.auditLog.metadata}->>'approvalId' = ${approvalId}`,
+      ),
+    );
+  return used !== undefined;
+}
+
 const notApproved = () =>
   new Error(
     'Your owner has not approved sharing this Artifact. They decide in the app; nothing was shared.',
@@ -471,17 +491,6 @@ export async function shareFromApproval(
     );
   });
   if (!approval) throw notApproved();
-  const [used] = await deps.db
-    .select({ id: schema.auditLog.id })
-    .from(schema.auditLog)
-    .where(
-      and(
-        eq(schema.auditLog.workspaceId, owner.workspaceId),
-        eq(schema.auditLog.action, 'artifact.visibility'),
-        sql`${schema.auditLog.metadata}->>'approvalId' = ${approval.id}`,
-      ),
-    );
-  if (used) throw notApproved();
   return setVisibility(
     deps,
     owner,

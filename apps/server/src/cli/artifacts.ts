@@ -50,8 +50,8 @@ export async function runArtifacts(args: string[], ctx: CliContext): CliResult {
   }
   write(
     down
-      ? `Took down the public link to "${done.title}". Its owner and organization still see it.`
-      : `Restored "${done.title}". Its owner may make it public again.`,
+      ? `Took down the public link to Artifact ${artifactId}. Its owner and organization still see it.`
+      : `Restored Artifact ${artifactId}. Its owner may make it public again.`,
   );
   return 0;
 }
