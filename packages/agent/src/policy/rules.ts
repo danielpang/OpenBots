@@ -112,16 +112,25 @@ export interface DefaultSummary {
   byArguments: boolean;
 }
 
+/**
+ * `record[key]` when the record itself has the key. A tool's name comes from
+ * a model or a connector, and a plain lookup of `constructor` or `__proto__`
+ * finds what every object inherits instead of a rule or a setting.
+ */
+export function ownEntry<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 /** The engine's default for a tool, with no arguments known yet: what Bot Settings shows. */
 export function defaultSummary(toolName: string, facts: ToolFacts): DefaultSummary {
-  const varies = BY_ARGUMENTS[toolName];
+  const varies = ownEntry(BY_ARGUMENTS, toolName);
   if (varies) return { ...varies, byArguments: true };
   const { decision, why } = defaultRule(toolName, {}, facts);
   return { decision, why, byArguments: false };
 }
 
 export function defaultRule(toolName: string, args: unknown, facts: ToolFacts): DefaultRule {
-  const named = NAMED_RULES[toolName];
+  const named = ownEntry(NAMED_RULES, toolName);
   if (named) return named(asRecord(args));
 
   const hints = facts.annotations;

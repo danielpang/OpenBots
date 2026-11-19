@@ -16,6 +16,8 @@ export function ciScope(paths) {
   for (const path of paths) {
     // Documentation alone does not require compilation or integration runners.
     if (path.endsWith('.md') || path.startsWith('docs/')) continue;
+    // Agent settings and skills, at the root or beside an app: nothing a job builds.
+    if (path.includes('/.claude/')) continue;
     if (
       path.startsWith('packages/') ||
       path.startsWith('patches/') ||

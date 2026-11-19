@@ -1,0 +1,36 @@
+# Who must review a change, by path. The last matching line wins.
+#
+# The second group is the checks themselves: the rules a change is judged by.
+# A change must not be able to loosen its own check, so these need an owner's
+# review whatever else the pull request touches (docs/VERIFICATION.md,
+# "Protected checks"). That only binds once the branch protection for main
+# requires review from code owners.
+
+*                                           @danielpang
+
+# The checks.
+/REVIEW.md                                  @danielpang
+**/REVIEW.md                                @danielpang
+/CLAUDE.md                                  @danielpang
+/docs/VERIFICATION.md                       @danielpang
+/.claude/                                   @danielpang
+**/.claude/                                 @danielpang
+/.github/                                   @danielpang
+/scripts/ci-scope.mjs                       @danielpang
+/scripts/agent-checks.mjs                   @danielpang
+/scripts/agent-commit-gate.mjs              @danielpang
+/scripts/reliability-checklist.mjs          @danielpang
+/scripts/openapi-diff.mjs                   @danielpang
+/scripts/verification-stamps.mjs            @danielpang
+/packages/api-client/openapi-approved-changes.json  @danielpang
+
+# Where a mistake costs the most.
+/apps/server/drizzle/                       @danielpang
+/apps/server/src/db/                        @danielpang
+/packages/agent/src/policy/                 @danielpang
+/packages/shared/src/policy.ts              @danielpang
+/packages/computer/                         @danielpang
+/docker/                                    @danielpang
+/apps/relay/                                @danielpang
+/packages/tunnel/                           @danielpang
+/ee/                                        @danielpang

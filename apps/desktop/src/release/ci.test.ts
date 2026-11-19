@@ -42,6 +42,13 @@ describe('affected CI selection', () => {
     expect(selected(['README.md', 'docs/CONTRIBUTING.md', 'apps/mobile/README.md'])).toEqual([]);
   });
 
+  it('skips agent skills and settings, at the root or beside an app', () => {
+    expect(selected(['.claude/settings.json', 'apps/web/.claude/skills/verify/SKILL.md'])).toEqual(
+      [],
+    );
+    expect(selected(['docker/.claude/skills/verify/run.sh'])).toEqual([]);
+  });
+
   it('runs only the mobile job for mobile-only changes', () => {
     expect(selected(['apps/mobile/src/screens/bots.tsx', 'apps/mobile/eas.json'])).toEqual([
       'mobile',
@@ -201,6 +208,7 @@ describe('CI workflow deduplication', () => {
     expect(ci.jobs.result!.if).toBe('always()');
     expect(ci.jobs.result!.needs).toEqual([
       'scope',
+      'gates',
       'mobile',
       'check',
       'server-postgres',
