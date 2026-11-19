@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSpritesApi, decodeExec, SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
@@ -164,11 +164,14 @@ describe('the sprites provider', () => {
     // Run for real on a stand-in path: a directory the Bot made (with its own
     // script in it) and a link it planted both give way to a new directory.
     const root = mkdtempSync(join(tmpdir(), 'staging-'));
+    // On a Sprite the command runs under sudo, which names its caller. Here that
+    // is whoever runs the tests, so the chown also works without root.
+    const asSudo = { ...process.env, SUDO_USER: userInfo().username };
     try {
       const dir = join(root, 'openbots-provision');
       mkdirSync(dir, { mode: 0o777 });
       writeFileSync(join(dir, 'provision.sh'), 'echo planted');
-      execFileSync('bash', ['-c', prepareStaging(dir)]);
+      execFileSync('bash', ['-c', prepareStaging(dir)], { env: asSudo });
       expect(readdirSync(dir)).toEqual([]);
       expect(statSync(dir).mode & 0o777).toBe(0o755);
 
@@ -176,7 +179,7 @@ describe('the sprites provider', () => {
       mkdirSync(elsewhere);
       rmSync(dir, { recursive: true });
       symlinkSync(elsewhere, dir);
-      execFileSync('bash', ['-c', prepareStaging(dir)]);
+      execFileSync('bash', ['-c', prepareStaging(dir)], { env: asSudo });
       expect(lstatSync(dir).isSymbolicLink()).toBe(false);
       expect(lstatSync(dir).isDirectory()).toBe(true);
     } finally {
