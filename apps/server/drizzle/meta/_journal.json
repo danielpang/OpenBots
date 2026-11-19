@@ -330,6 +330,13 @@
       "when": 1795067357824,
       "tag": "0046_billing_absorbed_units",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1795102961893,
+      "tag": "0047_billing_paid_plan",
+      "breakpoints": true
     }
   ]
 }

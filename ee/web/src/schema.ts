@@ -1244,7 +1244,7 @@ export interface paths {
     put?: never;
     /**
      * Start a trial or a plan, or change the plan
-     * @description Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once, prorated, and a trial ends now (`changed`). The overage policy chosen here is saved first.
+     * @description Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once (`changed`) and a trial ends now. A change that raises the price is charged prorated, and one back up to what this period already paid for costs nothing more; a change that lowers it gives no credit, the lower price starts at renewal, and the hours already granted stay until then. The overage policy chosen here is saved first.
      */
     post: {
       parameters: {

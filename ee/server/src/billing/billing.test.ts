@@ -712,5 +712,183 @@ describe('billing', () => {
         expect((await period(hal.org))?.allowanceSeconds).toBe(170 * H);
       });
     });
+
+    describe('changes of plan', () => {
+      const prorations = () =>
+        b.stripe.calls
+          .filter((c) => c.op === 'subscriptions.update')
+          .map((c) => c.params as { items: { quantity?: number }[]; proration_behavior: string })
+          .map((p) => [p.items[0]!.quantity, p.proration_behavior]);
+      const history = async (org: string) => ({
+        events: (
+          await b.t.db
+            .select()
+            .from(schema.billingEvents)
+            .where(eq(schema.billingEvents.workspaceId, org))
+            .orderBy(schema.billingEvents.occurredAt)
+        ).map((e) => [e.activity, e.fromPlan, e.toPlan]),
+        audit: (
+          await b.t.db
+            .select()
+            .from(schema.auditLog)
+            .where(
+              and(eq(schema.auditLog.workspaceId, org), eq(schema.auditLog.action, 'billing.plan')),
+            )
+            .orderBy(schema.auditLog.createdAt)
+        ).map((a) => a.metadata),
+      });
+      const change = async (cookie: string, plan: 'pro' | 'team') => {
+        // A minute apart, as an owner clicking would be.
+        b.clock.now = new Date(b.clock.now.getTime() + 60_000);
+        expect(await json(b.call(cookie, 'POST', '/billing/checkout', { plan }))).toEqual({
+          changed: true,
+        });
+      };
+
+      it('gives no credit when Team becomes Pro, and keeps the period’s hours', async () => {
+        const ivy = await b.founder('ivy@example.com', 'Ivy Co');
+        await b.onPlan(ivy.org, {
+          plan: 'team',
+          status: 'active',
+          stripeCustomerId: 'cus_ivy',
+          stripeSubscriptionId: 'sub_ivy',
+          billedSeats: 2,
+          periodAnchor: ANCHOR,
+        });
+        b.stripe.subscriptions.all.set(
+          'sub_ivy',
+          subscription({
+            id: 'sub_ivy',
+            customer: 'cus_ivy',
+            plan: 'team',
+            seats: 2,
+            periodStart: ANCHOR,
+          }),
+        );
+        await json(b.call(ivy.cookie, 'GET', '/billing'));
+        expect(await period(ivy.org)).toMatchObject({ paidSeats: 2, allowanceSeconds: 200 * H });
+        await change(ivy.cookie, 'pro');
+        // One seat at Pro's price from renewal, with nothing credited now.
+        expect(prorations()).toEqual([[1, 'none']]);
+        const seat = b.stripe.subscriptions.all.get('sub_ivy')!.items.data[1]!;
+        expect(seat).toMatchObject({ price: { id: PRICES.pro }, quantity: 1 });
+        // The two seats' hours stay until renewal, as for a removed seat.
+        expect(await period(ivy.org)).toMatchObject({
+          plan: 'pro',
+          paidSeats: 2,
+          allowanceSeconds: 200 * H,
+        });
+        expect(
+          (await json<{ usage: { allowanceHours: number } }>(b.call(ivy.cookie, 'GET', '/billing')))
+            .usage.allowanceHours,
+        ).toBe(200);
+        expect(await history(ivy.org)).toEqual({
+          events: [['downgraded', 'team', 'pro']],
+          audit: [{ from: 'team', to: 'pro' }],
+        });
+      });
+
+      it('charges going up once a period, however often the plan goes down and back', async () => {
+        const jo = await b.founder('jo@example.com', 'Jo Co');
+        await b.onPlan(jo.org, {
+          plan: 'pro',
+          status: 'active',
+          stripeCustomerId: 'cus_jo',
+          stripeSubscriptionId: 'sub_jo',
+          billedSeats: 1,
+          periodAnchor: ANCHOR,
+        });
+        b.stripe.subscriptions.all.set(
+          'sub_jo',
+          subscription({ id: 'sub_jo', customer: 'cus_jo', seats: 1, periodStart: ANCHOR }),
+        );
+        await json(b.call(jo.cookie, 'GET', '/billing'));
+        await change(jo.cookie, 'team');
+        // Team's second seat, prorated, with its share of the hours.
+        expect(prorations()).toEqual([[2, 'create_prorations']]);
+        const once = (await period(jo.org))!.allowanceSeconds;
+        expect(once).toBeGreaterThan(134 * H);
+        expect(once).toBeLessThan(135 * H);
+        await change(jo.cookie, 'pro');
+        await change(jo.cookie, 'team');
+        await change(jo.cookie, 'pro');
+        await change(jo.cookie, 'team');
+        // Down gives nothing back; up again is already paid for.
+        expect(prorations()).toEqual([
+          [2, 'create_prorations'],
+          [1, 'none'],
+          [2, 'none'],
+          [1, 'none'],
+          [2, 'none'],
+        ]);
+        expect(await period(jo.org)).toMatchObject({
+          plan: 'team',
+          paidSeats: 2,
+          allowanceSeconds: once,
+        });
+        expect(await history(jo.org)).toEqual({
+          events: [
+            ['upgraded', 'pro', 'team'],
+            ['downgraded', 'team', 'pro'],
+            ['upgraded', 'pro', 'team'],
+            ['downgraded', 'team', 'pro'],
+            ['upgraded', 'pro', 'team'],
+          ],
+          audit: [
+            { from: 'pro', to: 'team' },
+            { from: 'team', to: 'pro' },
+            { from: 'pro', to: 'team' },
+            { from: 'team', to: 'pro' },
+            { from: 'pro', to: 'team' },
+          ],
+        });
+      });
+
+      it('charges only past what the period paid for when the seat line is below it', async () => {
+        const kit = await b.founder('kit@example.com', 'Kit Co');
+        await b.invite(kit.cookie, 'lee@example.com');
+        await b.invite(kit.cookie, 'max@example.com');
+        await b.onPlan(kit.org, {
+          plan: 'team',
+          status: 'active',
+          stripeCustomerId: 'cus_kit',
+          stripeSubscriptionId: 'sub_kit',
+          billedSeats: 3,
+          periodAnchor: ANCHOR,
+        });
+        // Team for three seats ($54) paid for this period, while the line
+        // bills two from renewal, as after a seat was given up.
+        b.stripe.subscriptions.all.set(
+          'sub_kit',
+          subscription({
+            id: 'sub_kit',
+            customer: 'cus_kit',
+            plan: 'team',
+            seats: 2,
+            periodStart: ANCHOR,
+          }),
+        );
+        await json(b.call(kit.cookie, 'GET', '/billing'));
+        expect(await period(kit.org)).toMatchObject({ paidSeats: 3, paidPlan: 'team' });
+        // Pro for three ($60): the line goes back to the $54 already paid for
+        // at no charge, so only the $6 between is prorated.
+        await change(kit.cookie, 'pro');
+        const updates = b.stripe.calls
+          .filter((c) => c.op === 'subscriptions.update')
+          .map(
+            (c) =>
+              c.params as {
+                items: { price?: string; quantity?: number }[];
+                proration_behavior: string;
+              },
+          )
+          .map((p) => [p.items[0]!.price, p.items[0]!.quantity, p.proration_behavior]);
+        expect(updates).toEqual([
+          [PRICES.team, 3, 'none'],
+          [PRICES.pro, 3, 'create_prorations'],
+        ]);
+        expect(await period(kit.org)).toMatchObject({ paidSeats: 3, paidPlan: 'pro' });
+      });
+    });
   });
 });

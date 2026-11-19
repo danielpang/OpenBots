@@ -57,7 +57,10 @@ work. Pro is $20 a seat a month, Team $18 a seat with two seats at least, and
 a first checkout starts a 14 day trial with a card that stops at 20 computer
 hours. Each seat brings 100 computer hours a period; past them work stops,
 unless an owner or admin allows overage at $0.20 an hour under a spending
-limit (by default the monthly seat total).
+limit (by default the monthly seat total). A change of plan that raises the
+price is charged prorated now; one that lowers it gives no credit, the lower
+price starts at renewal, and the hours already granted stay until then, as
+for a removed seat. Going back up within the same period costs nothing more.
 
 | Variable                                | Default                   | What                                                                                                                                                    |
 | --------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

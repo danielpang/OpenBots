@@ -22,6 +22,7 @@ import {
   formatHours,
   formatUsd,
   HOUR_SECONDS,
+  isPlanId,
   OVERAGE_USD_PER_HOUR,
   periodAllowanceSeconds,
   periodPlan,
@@ -121,8 +122,10 @@ export function createBilling(config: BillingConfig) {
   /**
    * The period's row, its allowance brought in line with the plan now in
    * force: a period that began with no plan (or before payment recovered)
-   * gets the plan's whole allowance, and a change between paid plans its
-   * prorated difference. An allowance only ever grows within a period.
+   * gets the plan's whole allowance, and a change between paid plans the
+   * prorated hours of seats it pays for that the period had not paid for
+   * yet (Team's minimum second seat). An allowance only ever grows within a
+   * period: a change down keeps the hours already granted until renewal.
    */
   async function standings(db: Db, workspaceId: string, at = now()): Promise<Standings> {
     const billing = await billingFor(db, workspaceId);
@@ -131,24 +134,29 @@ export function createBilling(config: BillingConfig) {
     const plan = periodPlan(standing);
     if (row.plan !== plan && plan !== 'none') {
       const target = periodAllowanceSeconds(standing, row.paidSeats);
-      const prorated =
-        row.plan === 'none'
-          ? { atLeastSeconds: target }
-          : {
-              addSeconds: Math.max(
-                0,
-                Math.floor(
-                  ((target - row.allowanceSeconds) *
-                    Math.max(0, period.end.getTime() - at.getTime())) /
-                    (period.end.getTime() - period.start.getTime()),
-                ),
-              ),
-            };
       // The target counts the plan's minimum seats (Team's two), and Stripe
       // bills them from now: they are paid for this period, so a later seat
       // sync does not grant their hours a second time.
       const paidSeats =
         'plan' in standing ? billableSeats(standing.plan, row.paidSeats) : undefined;
+      const prorated =
+        row.plan === 'none'
+          ? { atLeastSeconds: target }
+          : isPlanId(row.plan) && paidSeats !== undefined
+            ? // Between paid plans only seats not paid for yet bring hours, as
+              // a seat sync's do: a change down and back within the period
+              // grants nothing twice.
+              { addSeconds: seatGrantSeconds(paidSeats - row.paidSeats, period, at) }
+            : {
+                addSeconds: Math.max(
+                  0,
+                  Math.floor(
+                    ((target - row.allowanceSeconds) *
+                      Math.max(0, period.end.getTime() - at.getTime())) /
+                      (period.end.getTime() - period.start.getTime()),
+                  ),
+                ),
+              };
       await raiseAllowance(db, workspaceId, period.start, { ...prorated, plan, paidSeats });
       ({ period, row } = await periodRowAt(db, billing, at));
     }

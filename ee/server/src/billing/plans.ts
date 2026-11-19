@@ -117,6 +117,42 @@ export function monthlyTotalUsd(plan: PlanId, seats: number): number {
   return PLANS[plan].perSeatUsd * billableSeats(plan, seats);
 }
 
+/** A seat line as Stripe bills it: the plan's price times a quantity. */
+export interface SeatLine {
+  plan: PlanId;
+  seats: number;
+}
+
+/** A seat line's monthly price in cents, so no float is compared. */
+const lineCents = (line: SeatLine) => Math.round(PLANS[line.plan].perSeatUsd * 100) * line.seats;
+
+/** The dearer seat price of two plans; the first when they cost the same. */
+export function dearerPlan(a: PlanId, b: PlanId): PlanId {
+  return PLANS[b].perSeatUsd > PLANS[a].perSeatUsd ? b : a;
+}
+
+/**
+ * How a change of plan within a period is charged, the same rule as seats:
+ * a change that lowers what the organization pays (or keeps it) is made
+ * without proration, so nothing is credited and the lower price starts at
+ * renewal; a change back up to what this period already paid for costs
+ * nothing more; a change past that is charged prorated, after the line is
+ * first put back, at no charge, to what was paid (`restore`), so Stripe
+ * charges only the difference from it. `paid` is the dearest seat price
+ * paid for this period with the most seats paid for.
+ */
+export function planChangeCharge(
+  current: SeatLine,
+  next: SeatLine,
+  paid: SeatLine,
+): { prorate: false } | { prorate: true; restore: SeatLine | null } {
+  const now = lineCents(current);
+  const then = lineCents(next);
+  const covered = lineCents(paid);
+  if (then <= now || then <= covered) return { prorate: false };
+  return { prorate: true, restore: now < covered ? paid : null };
+}
+
 /**
  * The spending ceiling an organization starts with: its own monthly seat
  * total, so overage cannot more than double the bill without an owner or

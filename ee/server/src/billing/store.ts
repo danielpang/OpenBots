@@ -1,12 +1,17 @@
-import { and, desc, eq, gt, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Db } from '@openbots/server/db/client';
 import {
   DEFAULT_OVERAGE_POLICY,
+  isPlanId,
   overagePolicyOf,
+  PLAN_IDS,
+  PLANS,
   periodAllowanceSeconds,
   periodPlan,
   standingOf,
   type OveragePolicy,
+  type PlanId,
+  type SeatLine,
   type Standing,
 } from './plans.js';
 import { periodAt, type Period } from './periods.js';
@@ -185,6 +190,7 @@ export async function ensurePeriod(
       plan: periodPlan(standing),
       baseSeats: base,
       paidSeats: base,
+      paidPlan: standing.kind === 'paid' ? standing.plan : null,
       allowanceSeconds: periodAllowanceSeconds(standing, base),
     })
     .onConflictDoNothing();
@@ -226,6 +232,37 @@ export async function raiseAllowance(
       updatedAt: new Date(),
     })
     .where(and(eq(t.workspaceId, workspaceId), eq(t.periodStart, periodStart)));
+}
+
+/**
+ * Records that this period paid for `plan`'s seat price, when it is dearer
+ * than the one paid for so far: one conditional update, so the mark only
+ * moves to a dearer price.
+ */
+export async function markPaidPlan(
+  db: Db,
+  workspaceId: string,
+  periodStart: Date,
+  plan: PlanId,
+): Promise<void> {
+  const t = schema.billingPeriods;
+  const cheaper = PLAN_IDS.filter((id) => PLANS[id].perSeatUsd < PLANS[plan].perSeatUsd);
+  await db
+    .update(t)
+    .set({ paidPlan: plan, updatedAt: new Date() })
+    .where(
+      and(
+        eq(t.workspaceId, workspaceId),
+        eq(t.periodStart, periodStart),
+        cheaper.length ? or(isNull(t.paidPlan), inArray(t.paidPlan, cheaper)) : isNull(t.paidPlan),
+      ),
+    );
+}
+
+/** The dearest seat price paid for this period, with the most seats paid for. */
+export function paidLine(row: PeriodRow, fallback: PlanId): SeatLine {
+  const plan = isPlanId(row.paidPlan) ? row.paidPlan : isPlanId(row.plan) ? row.plan : fallback;
+  return { plan, seats: row.paidSeats };
 }
 
 export interface UsageShare {

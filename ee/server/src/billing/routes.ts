@@ -17,6 +17,7 @@ import type { Context } from 'hono';
 import { errorText } from '../email.js';
 import {
   billableSeats,
+  dearerPlan,
   formatHours,
   HOUR_SECONDS,
   HOURS_PER_SEAT,
@@ -25,6 +26,7 @@ import {
   OVERAGE_USD_PER_HOUR,
   overageSeconds,
   personalLimitRefusal,
+  planChangeCharge,
   PLAN_IDS,
   PLANS,
   reportableUnits,
@@ -39,13 +41,15 @@ import {
   activeMembers,
   billingActivity,
   billingFor,
+  markPaidPlan,
   memberLimits,
+  paidLine,
   recordBillingEvent,
   setBilling,
   setMemberLimit,
   usageByMember,
 } from './store.js';
-import { overageItemOf, seatItemOf, verifyWebhook } from './stripe.js';
+import { overageItemOf, planOfPrice, seatItemOf, verifyWebhook } from './stripe.js';
 
 // The managed service's billing routes (plan 21.10), under /api/v1:
 //
@@ -434,7 +438,7 @@ export function billingRoutes(billing: Billing) {
         tags: ['billing'],
         summary: 'Start a trial or a plan, or change the plan',
         description:
-          'Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once, prorated, and a trial ends now (`changed`). The overage policy chosen here is saved first.',
+          'Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once (`changed`) and a trial ends now. A change that raises the price is charged prorated, and one back up to what this period already paid for costs nothing more; a change that lowers it gives no credit, the lower price starts at renewal, and the hours already granted stay until then. The overage policy chosen here is saved first.',
         middleware: [requireManaged, requireAdmin] as const,
         security: authenticated,
         request: body(
@@ -483,20 +487,53 @@ export function billingRoutes(billing: Billing) {
           );
         }
         if (live) {
+          // The period as it stands before this change, so what it paid for
+          // includes every earlier change.
+          const before = await billing.standings(db, ws);
           const subscription = await stripe.subscriptions.retrieve(current.stripeSubscriptionId!);
           const seat = seatItemOf(subscription, prices);
           if (!seat)
             throw new DomainError(502, 'STRIPE_ERROR', 'The subscription has no seat line.');
           const metered = overageItemOf(subscription, prices);
+          const trialing = subscription.status === 'trialing';
+          const from =
+            planOfPrice(prices, seat.price.id) ?? (isPlanId(current.plan) ? current.plan : plan);
+          // A change that lowers the price gives no credit, as a removed seat
+          // does: the lower price starts at renewal and the hours already
+          // granted stay. A change back up within what this period paid for
+          // costs nothing more; past it, only the difference is prorated.
+          const charge = trialing
+            ? ({ prorate: true, restore: null } as const)
+            : planChangeCharge(
+                { plan: from, seats: seat.quantity ?? current.billedSeats ?? seats },
+                { plan, seats },
+                paidLine(before.row, from),
+              );
+          const restorePrice =
+            charge.prorate && charge.restore ? prices[charge.restore.plan] : null;
+          if (charge.prorate && charge.restore && restorePrice) {
+            await stripe.subscriptions.update(subscription.id, {
+              items: [{ id: seat.id, price: restorePrice, quantity: charge.restore.seats }],
+              proration_behavior: 'none',
+            });
+          }
           const updated = await stripe.subscriptions.update(subscription.id, {
             items: [
               { id: seat.id, price, quantity: seats },
               ...(prices.overage && !metered ? [{ price: prices.overage }] : []),
             ],
-            proration_behavior: 'create_prorations',
-            ...(subscription.status === 'trialing' ? { trial_end: 'now' as const } : {}),
+            proration_behavior: charge.prorate ? 'create_prorations' : 'none',
+            ...(trialing ? { trial_end: 'now' as const } : {}),
             metadata: { openbotsOrganization: ws, openbotsPlan: plan },
           });
+          if (charge.prorate && !trialing) {
+            await markPaidPlan(
+              db,
+              ws,
+              before.period.start,
+              dearerPlan(paidLine(before.row, from).plan, plan),
+            );
+          }
           const at = billing.now();
           // A change made here never goes through Checkout, so it is logged
           // here, under its own id, and Stripe's event for it adds nothing.
@@ -517,6 +554,8 @@ export function billingRoutes(billing: Billing) {
             { plan, status: updated.status, billedSeats: seats },
             Math.floor(at.getTime() / 1000),
           );
+          // The period follows the plan now: the hours of seats newly paid for.
+          await billing.standings(db, ws);
           await audit(
             c,
             'billing.plan',

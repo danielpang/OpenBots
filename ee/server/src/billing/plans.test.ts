@@ -5,6 +5,7 @@ import {
   billableSeats,
   ceilingOf,
   ceilingUnits,
+  dearerPlan,
   formatHours,
   HOUR_SECONDS,
   limitsUnderPlan,
@@ -15,6 +16,7 @@ import {
   overageUnits,
   periodAllowanceSeconds,
   personalLimitRefusal,
+  planChangeCharge,
   reportableUnits,
   seatGrantSeconds,
   standingOf,
@@ -66,6 +68,44 @@ describe('seats and price', () => {
     expect(ceilingOf({ kind: 'paid', plan: 'team' }, 3, 100)).toBe(100);
     expect(ceilingOf({ kind: 'paid', plan: 'team' }, 3, 0)).toBe(0);
     expect(ceilingOf({ kind: 'none' }, 3, null)).toBe(0);
+  });
+});
+
+describe('a change of plan within a period', () => {
+  it('gives no credit for a change that lowers the price, and charges one that raises it', () => {
+    // One member: Team bills two seats ($36), Pro one ($20).
+    const team = { plan: 'team', seats: 2 } as const;
+    const proOne = { plan: 'pro', seats: 1 } as const;
+    expect(planChangeCharge(team, proOne, team)).toEqual({ prorate: false });
+    expect(planChangeCharge(proOne, team, proOne)).toEqual({ prorate: true, restore: null });
+    // Three members: Team ($54) to Pro ($60) raises it, Pro to Team lowers it.
+    const team3 = { plan: 'team', seats: 3 } as const;
+    const pro3 = { plan: 'pro', seats: 3 } as const;
+    expect(planChangeCharge(team3, pro3, team3)).toEqual({ prorate: true, restore: null });
+    expect(planChangeCharge(pro3, team3, pro3)).toEqual({ prorate: false });
+  });
+
+  it('charges nothing more for a change back within what the period paid for', () => {
+    // Pro to Team was paid for ($36, covered by Pro's price for two seats);
+    // back down to Pro and up to Team again costs nothing.
+    const paid = { plan: dearerPlan('pro', 'team'), seats: 2 };
+    expect(planChangeCharge({ plan: 'pro', seats: 1 }, { plan: 'team', seats: 2 }, paid)).toEqual({
+      prorate: false,
+    });
+  });
+
+  it('puts the line back to what was paid before charging only the rest', () => {
+    const paid = { plan: 'team', seats: 3 } as const;
+    expect(planChangeCharge({ plan: 'team', seats: 2 }, { plan: 'pro', seats: 3 }, paid)).toEqual({
+      prorate: true,
+      restore: paid,
+    });
+  });
+
+  it('knows the dearer seat price', () => {
+    expect(dearerPlan('pro', 'team')).toBe('pro');
+    expect(dearerPlan('team', 'pro')).toBe('pro');
+    expect(dearerPlan('team', 'team')).toBe('team');
   });
 });
 

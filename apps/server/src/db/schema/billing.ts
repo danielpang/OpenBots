@@ -99,6 +99,13 @@ export const billingPeriods = pgTable(
     baseSeats: integer('base_seats').notNull(),
     /** The most seats paid for at once this period; a seat back within it costs nothing more. */
     paidSeats: integer('paid_seats').notNull(),
+    /**
+     * The plan with the dearest seat price paid for this period (`pro` or
+     * `team`; null before migration 0047, or with no paid plan, when the
+     * period's plan stands in). A change of plan back within what this and
+     * `paid_seats` cover costs nothing more.
+     */
+    paidPlan: text('paid_plan'),
     allowanceSeconds: bigint('allowance_seconds', { mode: 'number' }).notNull(),
     usedSeconds: bigint('used_seconds', { mode: 'number' }).notNull().default(0),
     reportedUnits: integer('reported_units').notNull().default(0),
