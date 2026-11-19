@@ -155,6 +155,13 @@ agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used onl
 set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
 the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
 
+### Billing (managed service)
+
+The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
+`OPENBOTS_BILLING` in `.env.example`; [ee/README.md](../ee/README.md#billing) says how to set them
+up). A self-hosted install has no billing and leaves them empty: every computer start and run goes
+ahead as before.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
