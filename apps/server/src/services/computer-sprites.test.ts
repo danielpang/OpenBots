@@ -15,6 +15,7 @@ import {
   COMPUTERS_QUEUE,
   destroyComputer,
   ensureScreen,
+  HOSTED_FAILURE,
   agentFor,
   provisionComputer,
   provisionHandler,
@@ -70,8 +71,9 @@ describe('computers on Sprites', () => {
   it('makes and provisions a Sprite on first start, in a job', async () => {
     const res = await start();
     expect(res.status, await res.clone().text()).toBe(200);
+    // The API does not name the sandbox vendor: a hosted computer reads `remote`.
     expect(await res.json()).toMatchObject({
-      provider: 'sprites',
+      provider: 'remote',
       status: 'running',
       idleSettings: false,
     });
@@ -374,9 +376,12 @@ describe('Sprite provisioning off the request path', () => {
     expect(jobs).toHaveLength(1);
     const state = (await (
       await t.app.request('/api/v1/computer', { headers: { cookie } })
-    ).json()) as { computer: { status: string; error: string } };
-    expect(state.computer).toMatchObject({ status: 'error' });
-    expect(state.computer.error).toMatch(/no network/);
+    ).json()) as { computer: { status: string; error: string; provider: string } };
+    // The owner reads that it failed, not the vendor's name or its script's
+    // output: those stay in the server's log.
+    expect(state.computer).toMatchObject({ status: 'error', provider: 'remote' });
+    expect(state.computer.error).toBe(HOSTED_FAILURE);
+    expect(JSON.stringify(state)).not.toMatch(/sprite|no network/i);
 
     // The next start queues it again, and this time it works.
     sprites.api.provisionScript = ok;

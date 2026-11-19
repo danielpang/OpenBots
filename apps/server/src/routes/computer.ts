@@ -2,7 +2,6 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { AgentError, computerPath } from '@openbots/computer';
 import {
   CodingSessionStatusSchema,
-  ComputerProviderNameSchema,
   ComputerStatusSchema,
   RepoRescueResultSchema,
   ScreenStatusSchema,
@@ -55,20 +54,32 @@ const ScreenSchema = z
   })
   .openapi('Screen');
 
+/**
+ * The provider as the API names it. Which sandbox vendor the hosted service
+ * runs on is not something it tells its users, and no client acts on the
+ * value, so a hosted computer reads as what it is to them: a machine
+ * somewhere else. This also keeps the field's values as released apps know
+ * them.
+ */
+const PublicProviderSchema = z.enum(['docker', 'remote']);
+function publicProvider(provider: string): z.infer<typeof PublicProviderSchema> {
+  return provider === 'docker' ? 'docker' : 'remote';
+}
+
 const ComputerSchema = z
   .object({
     id: z.uuid(),
-    provider: ComputerProviderNameSchema,
+    provider: PublicProviderSchema,
     status: ComputerStatusSchema,
     alwaysOn: z.boolean(),
     idleTimeoutMin: z.number().int().nullable(),
     idleSettings: z.boolean().openapi({
       description:
-        'Whether `alwaysOn` and `idleTimeoutMin` apply. False on Sprites, which pause themselves about 30 seconds after their last use and wake on the next',
+        'Whether `alwaysOn` and `idleTimeoutMin` apply. False on the hosted service, where a computer pauses itself shortly after its last use and wakes on the next',
     }),
     error: z.string().nullable().openapi({
       description:
-        'Why the last setup in the background failed (Sprites), while the status is `error`',
+        'Why the last setup in the background failed (the hosted service), while the status is `error`',
     }),
     lastUsedAt: z.iso.datetime().nullable(),
     createdAt: z.iso.datetime(),
@@ -145,7 +156,7 @@ function toScreen(row: ScreenRow): z.infer<typeof ScreenSchema> {
 function toComputer(row: ComputerRow, screens: ScreenRow[]): z.infer<typeof ComputerSchema> {
   return {
     id: row.id,
-    provider: row.provider,
+    provider: publicProvider(row.provider),
     status: ComputerStatusSchema.catch('error').parse(row.status),
     alwaysOn: row.alwaysOn,
     idleTimeoutMin: row.idleTimeoutMin,
@@ -215,7 +226,7 @@ const unavailable = problemResponse(
   'No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)',
 );
 const settingUp = computerResponse(
-  'Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
+  'Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
 );
 
 /**
@@ -269,7 +280,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Keep the computer on, or set how long it idles before it stops',
       description:
-        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (Sprites).',
+        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (the hosted service).',
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -401,7 +412,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Rescue unpushed work before a reset',
       description:
-        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and Sprites computers only (409 `RESET_UNSUPPORTED`).',
+        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and hosted computers only (409 `RESET_UNSUPPORTED`).',
       middleware: [requireUser] as const,
       security: authenticated,
       responses: {

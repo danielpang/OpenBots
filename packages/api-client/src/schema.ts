@@ -5024,7 +5024,7 @@ export interface paths {
     head?: never;
     /**
      * Keep the computer on, or set how long it idles before it stops
-     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (Sprites).
+     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (the hosted service).
      */
     patch: {
       parameters: {
@@ -5098,7 +5098,7 @@ export interface paths {
             'application/json': components['schemas']['Computer'];
           };
         };
-        /** @description Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        /** @description Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
         202: {
           headers: {
             [name: string]: unknown;
@@ -5272,7 +5272,7 @@ export interface paths {
             'application/json': components['schemas']['Computer'];
           };
         };
-        /** @description Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        /** @description Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
         202: {
           headers: {
             [name: string]: unknown;
@@ -5327,7 +5327,7 @@ export interface paths {
     put?: never;
     /**
      * Rescue unpushed work before a reset
-     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and Sprites computers only (409 `RESET_UNSUPPORTED`).
+     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and hosted computers only (409 `RESET_UNSUPPORTED`).
      */
     post: {
       parameters: {
@@ -13178,14 +13178,14 @@ export interface components {
       /** Format: uuid */
       id: string;
       /** @enum {string} */
-      provider: 'docker' | 'remote' | 'sprites';
+      provider: 'docker' | 'remote';
       /** @enum {string} */
       status: 'creating' | 'updating' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
       alwaysOn: boolean;
       idleTimeoutMin: number | null;
-      /** @description Whether `alwaysOn` and `idleTimeoutMin` apply. False on Sprites, which pause themselves about 30 seconds after their last use and wake on the next */
+      /** @description Whether `alwaysOn` and `idleTimeoutMin` apply. False on the hosted service, where a computer pauses itself shortly after its last use and wakes on the next */
       idleSettings: boolean;
-      /** @description Why the last setup in the background failed (Sprites), while the status is `error` */
+      /** @description Why the last setup in the background failed (the hosted service), while the status is `error` */
       error: string | null;
       /** Format: date-time */
       lastUsedAt: string | null;

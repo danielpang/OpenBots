@@ -542,7 +542,7 @@ async function createMachine(
     });
     return created;
   } catch (error) {
-    const message = errorText(error);
+    const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer create failed');
     await setStatus(deps, row, 'error', {}, message);
     throw computerUnavailable(`The computer could not be created: ${message}`);
@@ -602,7 +602,7 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
   try {
     await machines.start(refOf(deps, row));
   } catch (error) {
-    const message = errorText(error);
+    const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer start failed');
     await setStatus(deps, row, 'error', {}, message);
     throw computerUnavailable(`The computer did not start: ${message}`);
@@ -808,7 +808,7 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
     row = await setStatus(deps, row, 'starting');
     await machines.start(refOf(deps, row));
   } catch (error) {
-    const message = errorText(error).replace(/^The computer could not be created: /, '');
+    const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer provisioning failed');
     const { provision: _, ...spec } = specOf(row);
     await setStatus(deps, row, 'error', { spec: { ...spec, error: message } }, message);
@@ -1135,7 +1135,7 @@ export async function destroyComputer(
         state: options.signIns,
       });
     } catch (error) {
-      const message = errorText(error);
+      const message = failureText(deps, error);
       deps.logger.error({ err: error, computerId: row.id }, 'computer reset failed');
       await setStatus(deps, row, 'error', {}, message);
       throw computerUnavailable(`The computer could not be reset: ${message}`);
@@ -1222,7 +1222,8 @@ async function stopMachine(
   try {
     await provider(deps).stop(refOf(deps, row));
   } catch (error) {
-    const message = errorText(error);
+    const message = failureText(deps, error);
+    deps.logger.error({ err: error, computerId: row.id }, 'computer stop failed');
     await setStatus(deps, row, 'error', failed, message);
     throw computerUnavailable(`The computer did not stop: ${message}`);
   }
@@ -1800,4 +1801,19 @@ export function computerServices(deps: AppDeps, options: ComputerRunOptions): Co
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** What the owner reads in place of a hosted machine's own failure text. */
+export const HOSTED_FAILURE = 'something went wrong on our side. Try again shortly.';
+
+/**
+ * What a machine's failure reads as to its owner (the API, the status event,
+ * a Bot's tool). The hosted provider's own text names the sandbox vendor and
+ * carries its script's output, which the service does not show its users: it
+ * goes to the log beside this call, and the owner reads `HOSTED_FAILURE`. A
+ * self-hosted owner runs the machine themselves and reads the real reason.
+ */
+function failureText(deps: AppDeps, error: unknown) {
+  const machines = computerProvider(deps);
+  return machines && provisionsInBackground(machines) ? HOSTED_FAILURE : errorText(error);
 }

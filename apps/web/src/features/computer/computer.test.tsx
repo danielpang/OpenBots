@@ -822,7 +822,7 @@ describe('the Computer page', () => {
   it('shows no idle time for a computer that sleeps on its own (Sprites)', async () => {
     state = {
       available: true,
-      computer: { ...computer('running'), provider: 'sprites', idleSettings: false },
+      computer: { ...computer('running'), provider: 'remote', idleSettings: false },
     };
     render(<ComputerPage />);
     await until(() => host.textContent?.includes('Sleeps when idle') ?? false, 'the note');
