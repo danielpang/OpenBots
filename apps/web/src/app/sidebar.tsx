@@ -11,6 +11,7 @@ import {
 import { Link } from '@tanstack/react-router';
 import { Fragment, useCallback, useState, type ReactNode } from 'react';
 import { Roster } from '../features/bots/roster.js';
+import { SharedArtifactsLink } from '../features/artifacts/shared-page.js';
 import { CodingSessionsLink } from '../features/coders/drawer/drawer.js';
 import { ConnectionIndicator } from './connection-indicator.js';
 import { NAV_LINKS } from './nav.js';
@@ -61,7 +62,12 @@ export function Sidebar() {
             >
               {link.label}
             </Link>
-            {link.to === '/computer' && <CodingSessionsLink />}
+            {link.to === '/computer' && (
+              <>
+                <CodingSessionsLink />
+                <SharedArtifactsLink />
+              </>
+            )}
           </Fragment>
         ))}
       </div>

@@ -213,6 +213,11 @@ describe('sharing Artifacts (plan 21.11)', () => {
     expect(asMember.version.version).toBe(2);
     const state = await json<Sharing>(call(alice, 'GET', `/artifacts/${id}/sharing`));
     expect(state).toMatchObject({ publicVersion: 2, currentVersion: 3 });
+    // Her own list shows it as others see it.
+    const own = await json<{ items: { id: string; version: { version: number } }[] }>(
+      call(alice, 'GET', '/shared-artifacts'),
+    );
+    expect(own.items.find((i) => i.id === id)!.version.version).toBe(2);
 
     // "Update the public version": the same confirmation, for the current version.
     await json<Sharing>(share(alice, id, { visibility: 'public', version: 3, confirmed: true }));

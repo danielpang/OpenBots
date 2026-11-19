@@ -25,6 +25,7 @@ import {
 import { CodeEditor } from './code-editor.js';
 import { parseTable, type Table } from './data.js';
 import { useArtifactRefresh } from './live.js';
+import { ShareControl } from './share.js';
 
 // The Artifact viewer in the right panel (plan 12.1, 18.4; A2): the selected
 // version rendered for its kind, the version history with a switch, a line
@@ -137,6 +138,8 @@ export function ArtifactViewer({ artifactId, version }: { artifactId: string; ve
       ) : (
         <VersionContent artifact={artifact.data} version={shown} raw={raw} />
       )}
+
+      <ShareControl artifactId={artifactId} title={artifact.data.title} />
 
       <VersionHistory
         artifact={artifact.data}

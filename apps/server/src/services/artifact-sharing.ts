@@ -574,7 +574,13 @@ export async function listShared(deps: SharingDeps, viewer: Member): Promise<Sha
   const out: SharedArtifact[] = [];
   for (const artifact of rows) {
     const view = await viewOf(deps, artifact, viewer.id);
-    if (view) out.push(await describeShared(deps, artifact, view.audience, view.version));
+    if (!view) continue;
+    // The owner's own public Artifact is listed as others see it: the confirmed version.
+    const pinned =
+      view.audience === 'owner' && artifact.visibility === 'public'
+        ? await versionById(deps.db, artifact.publicVersionId)
+        : null;
+    out.push(await describeShared(deps, artifact, view.audience, pinned ?? view.version));
   }
   return out;
 }

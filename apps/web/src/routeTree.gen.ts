@@ -19,6 +19,7 @@ import { Route as AppCodingRouteImport } from './routes/_app/coding';
 import { Route as AppComputerRouteImport } from './routes/_app/computer';
 import { Route as AppConnectorsRouteImport } from './routes/_app/connectors';
 import { Route as AppSettingsRouteImport } from './routes/_app/settings';
+import { Route as AppSharedRouteImport } from './routes/_app/shared';
 import { Route as AppSkillsRouteImport } from './routes/_app/skills';
 import { Route as AppToolsRouteImport } from './routes/_app/tools';
 import { Route as AppBotsBotIdRouteImport } from './routes/_app/bots/$botId';
@@ -85,6 +86,11 @@ const AppConnectorsRoute = AppConnectorsRouteImport.update({
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => AppRoute,
+} as any);
+const AppSharedRoute = AppSharedRouteImport.update({
+  id: '/shared',
+  path: '/shared',
   getParentRoute: () => AppRoute,
 } as any);
 const AppSkillsRoute = AppSkillsRouteImport.update({
@@ -188,6 +194,7 @@ export interface FileRoutesByFullPath {
   '/computer': typeof AppComputerRoute;
   '/connectors': typeof AppConnectorsRoute;
   '/settings': typeof AppSettingsRouteWithChildren;
+  '/shared': typeof AppSharedRoute;
   '/skills': typeof AppSkillsRoute;
   '/tools': typeof AppToolsRoute;
   '/bots/$botId': typeof AppBotsBotIdRouteWithChildren;
@@ -215,6 +222,7 @@ export interface FileRoutesByTo {
   '/coding': typeof AppCodingRoute;
   '/computer': typeof AppComputerRoute;
   '/connectors': typeof AppConnectorsRoute;
+  '/shared': typeof AppSharedRoute;
   '/skills': typeof AppSkillsRoute;
   '/tools': typeof AppToolsRoute;
   '/': typeof AppIndexRoute;
@@ -245,6 +253,7 @@ export interface FileRoutesById {
   '/_app/computer': typeof AppComputerRoute;
   '/_app/connectors': typeof AppConnectorsRoute;
   '/_app/settings': typeof AppSettingsRouteWithChildren;
+  '/_app/shared': typeof AppSharedRoute;
   '/_app/skills': typeof AppSkillsRoute;
   '/_app/tools': typeof AppToolsRoute;
   '/_app/': typeof AppIndexRoute;
@@ -277,6 +286,7 @@ export interface FileRouteTypes {
     | '/computer'
     | '/connectors'
     | '/settings'
+    | '/shared'
     | '/skills'
     | '/tools'
     | '/bots/$botId'
@@ -304,6 +314,7 @@ export interface FileRouteTypes {
     | '/coding'
     | '/computer'
     | '/connectors'
+    | '/shared'
     | '/skills'
     | '/tools'
     | '/'
@@ -333,6 +344,7 @@ export interface FileRouteTypes {
     | '/_app/computer'
     | '/_app/connectors'
     | '/_app/settings'
+    | '/_app/shared'
     | '/_app/skills'
     | '/_app/tools'
     | '/_app/'
@@ -432,6 +444,13 @@ declare module '@tanstack/react-router' {
       path: '/settings';
       fullPath: '/settings';
       preLoaderRoute: typeof AppSettingsRouteImport;
+      parentRoute: typeof AppRoute;
+    };
+    '/_app/shared': {
+      id: '/_app/shared';
+      path: '/shared';
+      fullPath: '/shared';
+      preLoaderRoute: typeof AppSharedRouteImport;
       parentRoute: typeof AppRoute;
     };
     '/_app/skills': {
@@ -616,6 +635,7 @@ interface AppRouteChildren {
   AppComputerRoute: typeof AppComputerRoute;
   AppConnectorsRoute: typeof AppConnectorsRoute;
   AppSettingsRoute: typeof AppSettingsRouteWithChildren;
+  AppSharedRoute: typeof AppSharedRoute;
   AppSkillsRoute: typeof AppSkillsRoute;
   AppToolsRoute: typeof AppToolsRoute;
   AppIndexRoute: typeof AppIndexRoute;
@@ -628,6 +648,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppComputerRoute: AppComputerRoute,
   AppConnectorsRoute: AppConnectorsRoute,
   AppSettingsRoute: AppSettingsRouteWithChildren,
+  AppSharedRoute: AppSharedRoute,
   AppSkillsRoute: AppSkillsRoute,
   AppToolsRoute: AppToolsRoute,
   AppIndexRoute: AppIndexRoute,
