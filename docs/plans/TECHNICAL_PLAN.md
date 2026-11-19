@@ -131,6 +131,7 @@ All tables carry `workspace_id`, the organization (one implicit organization on 
 | --- | --- | --- |
 | `computers` | id, owner_id (unique), provider (`docker`, `remote`), spec jsonb, status, container_id, agent_url, agent_token bytea, volume_name, always_on, idle_timeout_min, last_used_at | One per account (K1) |
 | `bot_screens` | bot_id, computer_id, display_number, browser_profile_dir, cdp_port, status, controlled_by_user_id, controlled_since | One screen per Bot (K2) with its own Chromium profile in `browser_profile_dir`; cookies sync between profiles through the control agent's shared store (K1, section 9.6); `controlled_by_user_id` set during takeover (K3) |
+| `computer_usage_intervals` | computer_id, owner_id, provider, reason, started_at, seen_at, ended_at, seconds | When a computer was in use, for usage billing later (section 9.5) |
 
 ### 4.6 Prompts: Skills and Routines (S1 to S3, R1 to R5)
 
