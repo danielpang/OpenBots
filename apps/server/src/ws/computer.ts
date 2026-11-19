@@ -5,6 +5,7 @@ import {
   COMPUTER_IDLE_CLOSE_CODE,
   COMPUTER_OFF,
   COMPUTER_OFF_CLOSE_CODE,
+  COMPUTER_REFUSED_CLOSE_CODE,
   type Unsubscribe,
 } from '@openbots/shared';
 import { and, eq, inArray, lte } from 'drizzle-orm';
@@ -15,6 +16,11 @@ import { DomainError } from '../errors.js';
 import { authenticateHeaders } from '../middleware/auth.js';
 import { assertBotOwner } from '../ownership.js';
 import { SYSTEM_ACTOR } from '../services/audit.js';
+import {
+  admitComputerWork,
+  COMPUTER_REFUSED_STATUS,
+  shortReason,
+} from '../services/computer-admission.js';
 import { isCoderTerminalCwd } from '../services/coding-sessions.js';
 import {
   agentFor,
@@ -179,6 +185,15 @@ export async function attachComputerProxies(
       if (error instanceof DomainError && error.code === COMPUTER_OFF) {
         return closeAtOnce(req, socket, head, COMPUTER_OFF_CLOSE_CODE, COMPUTER_OFF);
       }
+      if (error instanceof DomainError && error.status === COMPUTER_REFUSED_STATUS) {
+        return closeAtOnce(
+          req,
+          socket,
+          head,
+          COMPUTER_REFUSED_CLOSE_CODE,
+          shortReason(error.message),
+        );
+      }
       if (!(error instanceof DomainError))
         deps.logger.error({ err: error }, 'computer socket failed');
       return reject(socket, error instanceof DomainError ? error.status : 502);
@@ -225,6 +240,13 @@ export async function attachComputerProxies(
     const computer = await runningComputer(deps, user);
     const agent = agentFor(deps, computer);
     if (url.pathname === PTY_PATH) {
+      // A terminal is the member's own new work. A screen is not asked: it
+      // shows, or hands back, a Bot's work already under way.
+      await admitComputerWork(deps, {
+        workspaceId: user.workspaceId,
+        ownerId: user.id,
+        kind: 'manual',
+      });
       const params = await ptyParams(deps, user, url.searchParams);
       return {
         ...agent.socket(`/pty${params.size ? `?${params}` : ''}`),

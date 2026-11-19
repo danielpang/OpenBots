@@ -1,4 +1,8 @@
-import { COMPUTER_IDLE_CLOSE_CODE, COMPUTER_OFF_CLOSE_CODE } from '@openbots/shared';
+import {
+  COMPUTER_IDLE_CLOSE_CODE,
+  COMPUTER_OFF_CLOSE_CODE,
+  COMPUTER_REFUSED_CLOSE_CODE,
+} from '@openbots/shared';
 import { Button } from '@openbots/ui';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
@@ -17,9 +21,11 @@ import { useRefreshComputer } from './live.js';
 // attach opens a new session. On a computer that sleeps when idle (a Sprite)
 // a terminal with no activity for a while closes with
 // COMPUTER_IDLE_CLOSE_CODE, so it stops keeping the computer awake; it says
-// so and offers Reconnect.
+// so and offers Reconnect. A terminal the server refuses as new work (the
+// managed service's limits) closes with COMPUTER_REFUSED_CLOSE_CODE, whose
+// reason is a plain sentence saying why; it is shown as it is.
 
-type Phase = 'connecting' | 'open' | 'closed' | 'idle' | 'off';
+type Phase = 'connecting' | 'open' | 'closed' | 'idle' | 'off' | 'refused';
 
 type PtyMessage = { type: 'output'; data: string } | { type: 'exit'; exitCode: number };
 
@@ -30,6 +36,7 @@ export function ComputerTerminal({ attach }: { attach?: PtyAttach } = {}) {
   const host = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>('connecting');
   const [session, setSession] = useState(0);
+  const [refusal, setRefusal] = useState('');
   const refresh = useRefreshComputer();
 
   useEffect(() => {
@@ -65,6 +72,10 @@ export function ComputerTerminal({ attach }: { attach?: PtyAttach } = {}) {
     };
     socket.onclose = (event: CloseEvent) => {
       if (event.code === COMPUTER_IDLE_CLOSE_CODE) return setPhase('idle');
+      if (event.code === COMPUTER_REFUSED_CLOSE_CODE) {
+        setRefusal(event.reason || 'The computer cannot take new work right now.');
+        return setPhase('refused');
+      }
       if (event.code !== COMPUTER_OFF_CLOSE_CODE) return setPhase('closed');
       setPhase('off');
       void refresh();
@@ -96,8 +107,10 @@ export function ComputerTerminal({ attach }: { attach?: PtyAttach } = {}) {
               ? 'The computer is off.'
               : phase === 'idle'
                 ? 'Closed after a while with no activity, so the computer can sleep.'
-                : 'The terminal session ended.'}
-          {(phase === 'closed' || phase === 'idle') && (
+                : phase === 'refused'
+                  ? refusal
+                  : 'The terminal session ended.'}
+          {(phase === 'closed' || phase === 'idle' || phase === 'refused') && (
             <Button variant="outline" size="sm" onClick={() => setSession((n) => n + 1)}>
               Reconnect
             </Button>

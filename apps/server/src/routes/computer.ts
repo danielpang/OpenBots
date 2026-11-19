@@ -30,6 +30,7 @@ import {
   type ComputerRow,
   type ScreenRow,
 } from '../services/computer.js';
+import { admitComputerWork } from '../services/computer-admission.js';
 import { prepareReset, resetComputer, resetStatus } from '../services/computer-reset.js';
 import { fileTooLarge, uploadLimit } from '../services/files.js';
 
@@ -214,9 +215,22 @@ const computerResponse = (description: string) => ({
 const unavailable = problemResponse(
   'No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)',
 );
+const refused = problemResponse(
+  'New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words',
+);
 const settingUp = computerResponse(
   'Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
 );
+
+/** The member's own start, restart or wake is new work (services/computer-admission.ts). */
+function admitManual(c: Context<AppEnv>) {
+  const { deps, user } = c.var;
+  return admitComputerWork(deps, {
+    workspaceId: user.workspaceId,
+    ownerId: user.id,
+    kind: 'manual',
+  });
+}
 
 /**
  * A start that a provisioning job finishes in the background (Sprites)
@@ -318,10 +332,14 @@ export const computerRoutes = createRouter()
         200: computerResponse('Running'),
         202: settingUp,
         ...authProblems,
+        402: refused,
         503: unavailable,
       },
     }),
-    async (c) => started(c, startComputer(c.var.deps, c.var.user)),
+    async (c) => {
+      await admitManual(c);
+      return started(c, startComputer(c.var.deps, c.var.user));
+    },
   )
   .openapi(
     createRoute({
@@ -339,11 +357,13 @@ export const computerRoutes = createRouter()
           content: { 'application/json': { schema: ComputerStateSchema } },
         },
         ...authProblems,
+        402: refused,
       },
     }),
     async (c) => {
       const { deps, user } = c.var;
-      await wakeComputer(deps, user, { create: true });
+      await admitManual(c);
+      await wakeComputer(deps, user, { create: true, admitted: true });
       const row = await getComputer(deps, user);
       return c.json(
         { available: computerAvailable(deps), computer: row ? await computerOut(c, row) : null },
@@ -384,6 +404,7 @@ export const computerRoutes = createRouter()
         200: computerResponse('Running'),
         202: settingUp,
         ...authProblems,
+        402: refused,
         404: problemResponse('The account has no computer yet'),
         503: unavailable,
       },
@@ -391,6 +412,7 @@ export const computerRoutes = createRouter()
     async (c) => {
       const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
+      await admitManual(c);
       return started(c, restartComputer(c.var.deps, c.var.user, row));
     },
   )

@@ -2,6 +2,7 @@
 import type { WsClient } from '@openbots/api-client';
 import {
   COMPUTER_IDLE_CLOSE_CODE,
+  COMPUTER_REFUSED_CLOSE_CODE,
   COMPUTER_OFF_CLOSE_CODE,
   type WsEvent,
   type WsEventOf,
@@ -136,7 +137,7 @@ class FakeSocket {
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
+  onclose: ((event: { code: number; reason?: string }) => void) | null = null;
   listeners: ((event: { code: number }) => void)[] = [];
   constructor(readonly url: string) {
     FakeSocket.sockets.push(this);
@@ -815,6 +816,16 @@ describe('the Computer page', () => {
     FakeSocket.sockets[0]!.open();
     act(() => FakeSocket.sockets[0]!.onclose?.({ code: COMPUTER_IDLE_CLOSE_CODE }));
     expect(host.textContent).toContain('Closed after a while with no activity');
+    click(button('Reconnect'));
+    expect(FakeSocket.sockets).toHaveLength(2);
+  });
+
+  it('shows why a terminal was refused as new work, in the words the server sent', async () => {
+    render(<ComputerPage />);
+    await until(() => FakeSocket.sockets.length === 1, 'the terminal socket');
+    const reason = 'You have used the 25 computer hours your admin set for you this period.';
+    act(() => FakeSocket.sockets[0]!.onclose?.({ code: COMPUTER_REFUSED_CLOSE_CODE, reason }));
+    expect(host.textContent).toContain(reason);
     click(button('Reconnect'));
     expect(FakeSocket.sockets).toHaveLength(2);
   });

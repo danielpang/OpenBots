@@ -5116,6 +5116,15 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
         /** @description No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`) */
         503: {
           headers: {
@@ -5166,6 +5175,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
           headers: {
             [name: string]: unknown;
           };
@@ -5283,6 +5301,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
           headers: {
             [name: string]: unknown;
           };

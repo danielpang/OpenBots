@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { serve, type ServerType } from '@hono/node-server';
-import { COMPUTER_OFF_CLOSE_CODE } from '@openbots/shared';
+import { COMPUTER_OFF_CLOSE_CODE, COMPUTER_REFUSED_CLOSE_CODE } from '@openbots/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
@@ -100,6 +100,28 @@ describe('computer socket proxies', () => {
     const reply = await roundTrip(`${base}/api/v1/bots/${botId}/screen/vnc`, dana, 'rfb');
     expect(reply).toBe('/vnc/0:rfb');
     expect(computer.agent.screens.has(0)).toBe(true);
+  });
+
+  it('refuses a terminal the managed build will not admit, but still shows a Bot its screen', async () => {
+    await startedByOwner();
+    t.deps.extensions = {
+      admitComputerWork: () => ({
+        code: 'SPENDING_CEILING_REACHED',
+        message:
+          'Your organization reached its spending limit of $40 for this period. An owner or admin can raise it under Settings, Billing.',
+      }),
+    };
+    try {
+      expect(await closedWith(`${base}/api/v1/computer/pty?cols=80&rows=24`, dana)).toEqual({
+        code: COMPUTER_REFUSED_CLOSE_CODE,
+        reason: 'Your organization reached its spending limit of $40 for this period.',
+      });
+      // A screen shows, or hands back, work already under way: never refused.
+      const reply = await roundTrip(`${base}/api/v1/bots/${botId}/screen/vnc`, dana, 'rfb');
+      expect(reply).toBeTruthy();
+    } finally {
+      delete t.deps.extensions;
+    }
   });
 
   it('keeps the computer used while frames flow, at most once a minute (plan 9.5)', async () => {

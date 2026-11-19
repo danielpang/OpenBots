@@ -34,6 +34,39 @@ export interface ComputerUsageEvent {
   seconds: number;
 }
 
+/** What new computer work is: a Bot's run, a coding session, or the member's own use. */
+export type ComputerWorkKind = 'run' | 'coding_session' | 'manual';
+
+/**
+ * New work that would use a member's computer (services/computer-admission.ts),
+ * asked before it begins: a run's first computer call (and, with
+ * `continuingSince`, each later one), a coding session's start, and the
+ * member's own start, wake or terminal.
+ */
+export interface ComputerWorkRequest {
+  workspaceId: string;
+  /** The member whose computer it is. */
+  ownerId: string;
+  kind: ComputerWorkKind;
+  botId?: string;
+  runId?: string;
+  sessionId?: string;
+  /**
+   * Set for a run's later computer calls: when the run's use of the computer
+   * began. Work in progress is never refused on the organization's grounds,
+   * only by a cap on one run's own length.
+   */
+  continuingSince?: Date;
+}
+
+/** Why new computer work may not start: a stable code and a plain sentence for the person. */
+export interface ComputerWorkRefusal {
+  /** Upper case letters, digits and underscores, such as `SPENDING_CEILING_REACHED`. */
+  code: string;
+  /** Plain sentences. The first one stands alone, since a closing socket carries only it. */
+  message: string;
+}
+
 export interface ServerExtensions {
   /**
    * The extension manages organizations: creating them, invitations and
@@ -56,12 +89,23 @@ export interface ServerExtensions {
   /** The web build to serve instead of `apps/web/dist`. */
   webDist?: string;
   /**
-   * The most an organization's limits may be (plan 21.6): its plan's, when
-   * billing comes. Without it the operator's limits (OPENBOTS_LIMITS_*) are
+   * The most an organization's limits may be (plan 21.6): its plan's on the
+   * managed service (ee/server billing). Without it the operator's limits (OPENBOTS_LIMITS_*) are
    * every organization's ceiling. Owners and admins may lower limits under
-   * it, never raise them above it.
+   * it, never raise them above it. `db` is the caller's handle, a transaction
+   * when the caller is in one, so a read here never waits on it.
    */
-  limitsCeiling?(workspace: Workspace, config: Config): Limits;
+  limitsCeiling?(workspace: Workspace, config: Config, db: Db): Limits | Promise<Limits>;
+  /**
+   * Asked before new work uses a member's computer (plan 9.5, 21.6): null
+   * lets it begin, a refusal stops it before it starts (402 with the
+   * refusal's code, or the tool's error in a run). Never asked about work
+   * already under way, except a run's own later calls (`continuingSince`).
+   * A throw is logged and the work goes ahead, as with no extension.
+   */
+  admitComputerWork?(
+    request: ComputerWorkRequest,
+  ): ComputerWorkRefusal | null | Promise<ComputerWorkRefusal | null>;
   /**
    * Called once each time a computer usage interval closes, after it is
    * stored (plan 9.5): for usage billing. A throw is logged, never retried,

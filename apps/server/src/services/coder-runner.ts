@@ -75,6 +75,7 @@ import {
   type CodingSessionRow,
 } from './coder-state.js';
 import { agentFor, beginComputerUse, EXEC_TOUCH_MS, startComputer } from './computer.js';
+import { admitComputerWork } from './computer-admission.js';
 import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
 import { runSource } from './policy.js';
@@ -450,6 +451,16 @@ class SessionRunner {
     }
     this.repo = repo;
 
+    // Asked again here: a session can wait in the queue, and the organization
+    // may have run out of hours since it was asked to start.
+    await admitComputerWork(deps, {
+      workspaceId: session.workspaceId,
+      ownerId: session.ownerId,
+      kind: 'coding_session',
+      botId: bot.id,
+      sessionId: session.id,
+      ...(session.runId ? { runId: session.runId } : {}),
+    });
     const { computer } = await startComputer(deps, this.owner, { type: 'bot', id: bot.id });
     this.computerId = computer.id;
     this.use = beginComputerUse(deps, computer, 'coding_session', {

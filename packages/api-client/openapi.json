@@ -14382,6 +14382,16 @@
               }
             }
           },
+          "402": {
+            "description": "New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
             "description": "No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)",
             "content": {
@@ -14421,6 +14431,16 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14523,6 +14543,16 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -66,6 +66,12 @@ export const COMPUTER_OFF_CLOSE_CODE = 4409;
  * its own.
  */
 export const COMPUTER_IDLE_CLOSE_CODE = 4408;
+/**
+ * A terminal socket refused because new computer work may not start (the
+ * managed service's plan and spending limits; HTTP 402 elsewhere). The close
+ * reason is the refusal's first sentence, which the client shows as it is.
+ */
+export const COMPUTER_REFUSED_CLOSE_CODE = 4402;
 
 /** What a screen tool answers while the owner has taken over the screen (plan 9.4). */
 export const OWNER_HAS_SCREEN = 'The owner has the screen; wait';

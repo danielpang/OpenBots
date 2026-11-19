@@ -5,4 +5,11 @@ import { packageName } from '@openbots/shared';
 // and so on) and extends it through `ServerExtensions` (plan 21.5).
 
 export const PACKAGE_NAME = packageName('server');
-export type { ComputerUsageEvent, ServerExtensions, ExtensionContext } from './extensions.js';
+export type {
+  ComputerUsageEvent,
+  ComputerWorkKind,
+  ComputerWorkRefusal,
+  ComputerWorkRequest,
+  ServerExtensions,
+  ExtensionContext,
+} from './extensions.js';
