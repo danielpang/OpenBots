@@ -52,6 +52,10 @@ const CapabilitiesSchema = z
       description:
         'The first owner is made by pairing a phone (`openbots pair`), not the web wizard (OPENBOTS_SETUP_PAIRING_ONLY)',
     }),
+    artifactSharing: z.boolean().optional().openapi({
+      description:
+        'Artifacts can be shared with the organization or made public and opened in a browser on the artifact domain (OPENBOTS_ARTIFACT_DOMAIN). Off: no share control, and the sharing routes answer 404.',
+    }),
     auth: z.enum(['password', 'local']).optional().openapi({
       description:
         '`local`: the Mac app on This Mac signs its owner in itself (OPENBOTS_LOCAL_TOKEN), so there is no sign-in, sign-up or sign-out. `password`: the usual sign-in.',
@@ -85,6 +89,7 @@ export const capabilityRoutes = createRouter().openapi(
         version: serverVersion(),
         protocol: { relay: RELAY_PROTOCOL_VERSION },
         setupPairingOnly: c.var.deps.config.setupPairingOnly,
+        artifactSharing: !!c.var.deps.config.artifactHost,
         auth: localToken ? ('local' as const) : ('password' as const),
       },
       200,

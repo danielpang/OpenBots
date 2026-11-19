@@ -48,6 +48,7 @@ export class NeedsApproval extends WaitFor {
     reason: string | null = null,
     trace: PolicyTraceStep[] = [],
     labels: LabelContext = {},
+    summary?: string,
   ) {
     super({
       reason: 'approval',
@@ -56,7 +57,7 @@ export class NeedsApproval extends WaitFor {
         props: {
           tool_name: toolName,
           args: args ?? {},
-          summary: summarizeArgs(toolName, args),
+          summary: summary ?? summarizeArgs(toolName, args),
           reason,
           ...(trace.length ? { trace } : {}),
         },
@@ -79,12 +80,30 @@ export interface GatedCall {
   execute: () => Promise<unknown>;
   /** Connector name and tool title for the labels. */
   labels?: LabelContext;
+  /**
+   * The request's one line when the policy asks, in place of the arguments'
+   * summary: what exactly would happen, as the tool's backend can say it
+   * (`AgentTool.approvalSummary`). Its failure falls back to the arguments.
+   */
+  describe?: () => Promise<string | undefined>;
 }
 
-export async function gated({ run, policy, toolName, args, onStart, execute, labels }: GatedCall) {
+export async function gated({
+  run,
+  policy,
+  toolName,
+  args,
+  onStart,
+  execute,
+  labels,
+  describe,
+}: GatedCall) {
   const { decision, reason, trace } = asEvaluation(await policy.evaluate(run, toolName, args));
   if (decision === 'deny') return DENIED_RESULT;
-  if (decision === 'ask') throw new NeedsApproval(toolName, args, reason || null, trace, labels);
+  if (decision === 'ask') {
+    const summary = describe ? await describe().catch(() => undefined) : undefined;
+    throw new NeedsApproval(toolName, args, reason || null, trace, labels, summary);
+  }
   await onStart(labelFor(toolName, args, undefined, labels));
   return execute();
 }

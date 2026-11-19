@@ -220,3 +220,75 @@ describe('artifact tools', () => {
     expect(labelFor('publish_artifact', { path: '/x/report.pdf' })).toBe('Publishing report.pdf');
   });
 });
+
+describe('request_artifact_share (plan 21.11)', () => {
+  function withSharing() {
+    const { services } = fakeArtifacts();
+    const applied: unknown[] = [];
+    services.share = {
+      describe: async ({ id, visibility, version }) =>
+        visibility === 'public'
+          ? `Make version ${version} of ${id} public: anyone with the link can view it`
+          : `Share ${id} with everyone in the organization`,
+      apply: async (request) => {
+        applied.push(request);
+        return { shared: true, artifact_id: request.id, visibility: request.visibility };
+      },
+    };
+    return { services, applied };
+  }
+
+  it('is offered only when the install shares Artifacts', () => {
+    expect(Object.keys(toolsFor(ctx(fakeArtifacts().services)))).not.toContain(
+      'request_artifact_share',
+    );
+    expect(Object.keys(toolsFor(ctx(withSharing().services)))).toContain('request_artifact_share');
+  });
+
+  it('waits for the owner even when every setting says auto, and shows what would be shared', async () => {
+    const { services, applied } = withSharing();
+    const c = ctx(services);
+    const facts = toolFacts(c);
+    const outcome = await executeRun({
+      run: { ...run, trigger: 'routine' },
+      model: scriptedModel([
+        [
+          {
+            tool: 'request_artifact_share',
+            args: { id: 'art-9', visibility: 'public', version: 2 },
+            id: 's1',
+          },
+        ],
+        [{ text: 'Asked.' }],
+      ]),
+      instructions: 'test',
+      messages: [{ role: 'user', content: 'share it' }],
+      tools: toolsFor(c),
+      toolContext: c,
+      policy: createPolicy({
+        toolPolicy: { groups: { artifacts: 'auto' }, tools: { request_artifact_share: 'auto' } },
+        facts: (n) => facts.get(n),
+      }),
+      abortSignal: new AbortController().signal,
+      sink: { text: async () => {}, reasoning: async () => {}, part: async () => 0 },
+      setState: async () => {},
+      recordStep: async () => {},
+      drainSteering: async () => [],
+    });
+    expect(outcome.status).toBe('waiting');
+    expect(applied).toEqual([]);
+    const wait = (outcome as { wait: { reason: string; widget: { props: unknown } } }).wait;
+    expect(wait.reason).toBe('approval');
+    expect(wait.widget.props).toMatchObject({
+      tool_name: 'request_artifact_share',
+      summary: 'Make version 2 of art-9 public: anyone with the link can view it',
+    });
+  });
+
+  it('needs a version to make something public', () => {
+    const tool = toolsFor(ctx(withSharing().services)).request_artifact_share!;
+    expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'public' }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'org' }).success).toBe(true);
+    expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'private' }).success).toBe(false);
+  });
+});

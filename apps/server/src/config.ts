@@ -151,6 +151,18 @@ const envSchema = z.object({
     'first_user_admin',
   ),
   OPENBOTS_FILES_DIR: withDefault(z.string(), '/data/files'),
+  OPENBOTS_ARTIFACT_DOMAIN: optional(
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(/^(?=.{4,200}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/, {
+        message: 'must be a domain name such as openbots-artifacts.example, with no scheme or path',
+      }),
+  ),
+  OPENBOTS_ARTIFACT_EDGE_SECRET: optional(
+    z.string().min(32, { message: 'must be 32 characters or more (generate one with keygen)' }),
+  ),
   OPENBOTS_MCP_DIR: withDefault(z.string(), DEFAULT_CATALOG_INSTALL_DIR),
   OPENBOTS_MCP_NPX_FALLBACK: withDefault(z.stringbool(), 'false'),
   OPENBOTS_ROLE: withDefault(z.enum(['api', 'worker', 'all']), 'all'),
@@ -348,6 +360,17 @@ export interface Config {
    */
   stdioRunner: StdioRunner;
   filesDir: string;
+  /**
+   * The artifact host (plan 21.11; OPENBOTS_ARTIFACT_DOMAIN): Artifacts a
+   * person shared are served at `https://<bot>--<organization>.<domain>/<id>`,
+   * a registrable domain apart from the app's, so their content never shares
+   * an origin or a cookie with it. Unset: sharing is off and nothing about
+   * Artifacts changes. `edgeSecret` (OPENBOTS_ARTIFACT_EDGE_SECRET) is what
+   * the edge Worker in front of it sends to `/artifact-host/`; without it that
+   * path answers 404 and only requests that reach this server under the
+   * domain itself are served.
+   */
+  artifactHost?: { domain: string; edgeSecret?: string };
   /** The catalog's pre-installed stdio servers (S-20). */
   mcpCatalog: CatalogInstall;
   role: 'api' | 'worker' | 'all';
@@ -446,6 +469,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`invalid configuration:\n  ${(error as Error).message}`, { cause: error });
   }
   const githubApp = githubAppFrom(e);
+  const artifactHost = artifactHostFrom(e);
   const raw = e as Record<string, unknown>;
   const limitOverrides: Partial<Limits> = {};
   for (const [key, name] of Object.entries(LIMIT_ENV_VARS) as [keyof Limits, string][]) {
@@ -498,6 +522,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     customStdio: e.OPENBOTS_CUSTOM_STDIO ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
     stdioRunner,
     filesDir: e.OPENBOTS_FILES_DIR,
+    ...(artifactHost ? { artifactHost } : {}),
     mcpCatalog: { dir: e.OPENBOTS_MCP_DIR, allowNpx: e.OPENBOTS_MCP_NPX_FALLBACK },
     role: e.OPENBOTS_ROLE,
     metricsToken: e.OPENBOTS_METRICS_TOKEN,
@@ -523,6 +548,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(githubApp ? { githubApp } : {}),
     limits: resolveLimits(limitOverrides),
     processLimits: resolveProcessLimits(processOverrides),
+  };
+}
+
+/**
+ * The artifact domain must not be the app's host or hold it, nor sit under
+ * it: an Artifact's page would then share the app's cookies or origin. A
+ * different registrable domain is what the docs ask for; this catches the
+ * mistakes a configuration can show without a public suffix list.
+ */
+function artifactHostFrom(e: z.infer<typeof envSchema>): Config['artifactHost'] {
+  if (!e.OPENBOTS_ARTIFACT_DOMAIN) {
+    if (e.OPENBOTS_ARTIFACT_EDGE_SECRET) {
+      throw new Error(
+        'invalid configuration:\n  OPENBOTS_ARTIFACT_EDGE_SECRET: set only with OPENBOTS_ARTIFACT_DOMAIN',
+      );
+    }
+    return undefined;
+  }
+  const domain = e.OPENBOTS_ARTIFACT_DOMAIN;
+  const app = new URL(e.OPENBOTS_PUBLIC_URL).hostname.toLowerCase();
+  if (app === domain || app.endsWith(`.${domain}`) || domain.endsWith(`.${app}`)) {
+    throw new Error(
+      `invalid configuration:\n  OPENBOTS_ARTIFACT_DOMAIN: must be a domain apart from the app's (${app}), so shared pages never reach its cookies`,
+    );
+  }
+  return {
+    domain,
+    ...(e.OPENBOTS_ARTIFACT_EDGE_SECRET ? { edgeSecret: e.OPENBOTS_ARTIFACT_EDGE_SECRET } : {}),
   };
 }
 

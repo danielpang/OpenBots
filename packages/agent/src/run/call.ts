@@ -75,6 +75,9 @@ export async function runToolCall(input: RunToolCallInput): Promise<ToolCallOutc
           onStart: (label) => input.setState('working', label, name),
           execute,
           ...(labels ? { labels } : {}),
+          ...(tool.approvalSummary
+            ? { describe: () => tool.approvalSummary!(parsed.data as never, input.toolContext) }
+            : {}),
         });
       } else {
         await input.setState('working', labelFor(name, parsed.data, undefined, labels), name);

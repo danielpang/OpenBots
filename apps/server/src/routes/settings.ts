@@ -35,6 +35,10 @@ const SettingsSchema = z
       description:
         'Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)',
     }),
+    publicArtifactsEnabled: z.boolean().openapi({
+      description:
+        'Whether members may make Artifacts public, so anyone with the link can view them (default true). Turning it off stops every public link in the organization until it is on again.',
+    }),
     ceilings: z.object(LimitsSchema.shape).nullable().openapi({
       description:
         'The most each limit may be on the managed service; null on a self-hosted install, which has none',
@@ -47,6 +51,7 @@ const SettingsPatchSchema = z
     limits: LimitsSchema.partial().strict().optional(),
     auditRetentionDays: z.number().int().min(1).max(3650).optional(),
     customStdioEnabled: z.boolean().optional(),
+    publicArtifactsEnabled: z.boolean().optional(),
   })
   .openapi('SettingsPatch');
 

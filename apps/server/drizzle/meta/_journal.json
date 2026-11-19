@@ -337,6 +337,13 @@
       "when": 1795102961893,
       "tag": "0047_billing_paid_plan",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1795126856912,
+      "tag": "0048_artifact_sharing",
+      "breakpoints": true
     }
   ]
 }

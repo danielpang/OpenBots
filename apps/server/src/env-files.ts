@@ -27,6 +27,7 @@ export const SECRET_ENV_VARS = [
   'GITHUB_APP_PRIVATE_KEY',
   'GITHUB_APP_CLIENT_SECRET',
   'GITHUB_APP_WEBHOOK_SECRET',
+  'OPENBOTS_ARTIFACT_EDGE_SECRET',
 ] as const;
 
 export interface ResolvedEnv {

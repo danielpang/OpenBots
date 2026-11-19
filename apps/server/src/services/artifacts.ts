@@ -21,6 +21,7 @@ import { schema, type Db } from '../db/client.js';
 import { publishEvent } from '../infra/index.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertBotOwner } from '../ownership.js';
+import { artifactSharing } from './artifact-sharing.js';
 import { openFile, storeFile, uploadLimit } from './files.js';
 
 // Artifacts (plan 4.8, 12.1; A1, A2, A4). Every write, by a run or by the
@@ -413,5 +414,8 @@ export function artifactServices(
       };
     },
     byteLimit: () => uploadLimit(deps, owner.workspaceId),
+    ...withSharing(artifactSharing(deps, run, owner)),
   };
 }
+
+const withSharing = (share: ArtifactServices['share']) => (share ? { share } : {});

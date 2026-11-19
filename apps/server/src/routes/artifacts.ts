@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { createRoute, z } from '@hono/zod-openapi';
 import { artifactFileName } from '@openbots/artifacts';
-import { ARTIFACT_KINDS } from '@openbots/shared';
+import { ARTIFACT_KINDS, ARTIFACT_VISIBILITIES } from '@openbots/shared';
 import type { Context } from 'hono';
 import type { AppEnv } from '../context.js';
 import { requireUser } from '../middleware/auth.js';
@@ -24,7 +24,14 @@ import {
 
 const ArtifactKindSchema = z.enum(ARTIFACT_KINDS).openapi('ArtifactKind');
 
-const ArtifactVersionSchema = z
+export const ArtifactVisibilitySchema = z
+  .enum(ARTIFACT_VISIBILITIES)
+  .openapi('ArtifactVisibility', {
+    description:
+      '`private`: its owner only. `org`: every active member of the organization, read only, at the latest version. `public`: anyone with the link, at the version its owner confirmed.',
+  });
+
+export const ArtifactVersionSchema = z
   .object({
     id: z.uuid(),
     artifactId: z.uuid(),
@@ -49,6 +56,8 @@ const ArtifactSchema = z
     kind: ArtifactKindSchema,
     title: z.string(),
     currentVersion: ArtifactVersionSchema.nullable(),
+    // Optional: servers before sharing (plan 21.11) do not send it.
+    visibility: ArtifactVisibilitySchema.optional(),
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
   })
@@ -86,6 +95,7 @@ function toArtifact({ artifact, version }: ArtifactRecord): z.infer<typeof Artif
     kind: artifact.kind,
     title: artifact.title,
     currentVersion: version ? toVersion(version) : null,
+    visibility: artifact.visibility,
     createdAt: new Date(artifact.createdAt).toISOString(),
     updatedAt: new Date(artifact.updatedAt).toISOString(),
   };
@@ -95,7 +105,7 @@ function toArtifact({ artifact, version }: ArtifactRecord): z.infer<typeof Artif
  * Types a browser may render in place; everything else is served as an
  * attachment. Not SVG: the viewer shows it through `<img>`, which runs no script.
  */
-const INLINE_MIME = new Set([
+export const INLINE_MIME = new Set([
   'text/plain',
   'text/markdown',
   'text/csv',

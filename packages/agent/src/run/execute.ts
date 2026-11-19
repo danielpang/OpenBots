@@ -223,6 +223,9 @@ export async function executeRun(input: ExecuteRunInput): Promise<RunOutcome> {
           },
           execute: () => agentTool.execute(args as never, toolContext),
           ...(agentTool.label ? { labels: agentTool.label } : {}),
+          ...(agentTool.approvalSummary
+            ? { describe: () => agentTool.approvalSummary!(args as never, toolContext) }
+            : {}),
         });
         if (name !== SEARCH_TOOLS) {
           await finished(toolModelOutput(name, agentTool, output));

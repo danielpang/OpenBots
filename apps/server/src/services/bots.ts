@@ -18,7 +18,8 @@ import { seedBuiltinSkills } from './builtin-skills.js';
 import { computerAvailable } from './computer.js';
 import { assertBotModel } from './providers.js';
 import type { Config } from '../config.js';
-import { organizationSettings, raiseLimitHint } from '../workspace.js';
+import { getOrganization, organizationSettings, raiseLimitHint } from '../workspace.js';
+import { botPublicSlug } from './artifact-sharing.js';
 import { avatarFileStatus, invalidAvatar } from './files.js';
 import { announceMessage, storeMessage } from './messages.js';
 
@@ -401,11 +402,14 @@ export async function insertBot(
 ): Promise<BotRow & { chatId: string }> {
   const ids = { workspaceId: owner.workspaceId, ownerId: owner.id };
   const isMain = !(await mainBotOf(tx, owner));
+  // Its name on the artifact domain (plan 21.11), given once and kept.
+  const { slug: orgSlug } = await getOrganization(tx, owner.workspaceId);
+  const publicSlug = botPublicSlug(values.handle, orgSlug);
   let bot: BotRow;
   try {
     [bot] = (await tx
       .insert(schema.bots)
-      .values({ ...ids, ...values, isMain })
+      .values({ ...ids, ...values, isMain, publicSlug })
       .returning()) as [BotRow];
   } catch (error) {
     if (isUniqueViolation(error)) throw handleTaken(values.handle);

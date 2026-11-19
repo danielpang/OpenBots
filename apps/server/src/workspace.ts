@@ -56,6 +56,12 @@ export const storedSettingsSchema = z.object({
   customStdioEnabled: z.boolean().optional(),
   /** Background-task model per provider id, overriding the cheapest-with-tools pick (plan 5.9). */
   smallModels: z.record(z.string(), z.string()).optional(),
+  /**
+   * Whether members may make Artifacts public (plan 21.11; on unless an
+   * owner or admin turns it off). Off, existing public links stop working
+   * until it is on again; their Artifacts keep their visibility.
+   */
+  publicArtifactsEnabled: z.boolean().optional(),
 });
 
 export type StoredSettings = z.infer<typeof storedSettingsSchema>;
@@ -64,6 +70,7 @@ export interface Settings {
   limits: Limits;
   auditRetentionDays: number;
   customStdioEnabled: boolean;
+  publicArtifactsEnabled: boolean;
 }
 
 /** Serializes making the implicit organization and its first owner. */
@@ -187,6 +194,7 @@ export function effectiveSettings(
       limits: { ...config.limits, ...stored.limits },
       auditRetentionDays: DEFAULT_AUDIT_RETENTION_DAYS,
       customStdioEnabled: stored.customStdioEnabled ?? false,
+      publicArtifactsEnabled: stored.publicArtifactsEnabled ?? true,
     };
   }
   const limits: Limits = { ...config.limits, ...stored.limits };
@@ -197,6 +205,7 @@ export function effectiveSettings(
     limits,
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     customStdioEnabled: stored.customStdioEnabled ?? false,
+    publicArtifactsEnabled: stored.publicArtifactsEnabled ?? true,
   };
 }
 

@@ -9,7 +9,7 @@ import {
 } from '@openbots/shared';
 import type { Policy, PolicyEvaluation, PolicyTraceStep } from './policy.js';
 import { hostAllowed } from '../tools/builtin.js';
-import { defaultRule, ownEntry, type ToolFacts } from './rules.js';
+import { defaultRule, ownEntry, PERSON_ONLY_TOOLS, type ToolFacts } from './rules.js';
 
 // The policy engine (plan 8, T5). A pure function of the tool, its arguments,
 // the run's trigger and the owner's settings, returning the decision and the
@@ -25,6 +25,13 @@ import { defaultRule, ownEntry, type ToolFacts } from './rules.js';
 // then the webhook endpoint's own. A run webhook data started also asks
 // before a GET fetch from a host outside the Bot's domain allowlist: a query
 // string can carry data out (P2, S-10).
+//
+// Last, a tool in `PERSON_ONLY_TOOLS` (sharing an Artifact, plan 21.11) asks
+// whatever came before: no Bot or group setting, connector override,
+// trusted connector's hint or trigger makes it run unasked, so a Routine or a
+// webhook run with nobody present, another Bot, or text injected through a
+// page or an Artifact can at most post a request a person then answers.
+// Only `deny` stays, being stricter.
 
 export interface PolicyInput {
   toolName: string;
@@ -89,6 +96,14 @@ export function evaluatePolicy(input: PolicyInput): PolicyEvaluation {
         why: `Webhook runs ask before fetching from ${host ?? 'a host'} outside the Bot's domain allowlist`,
       });
     }
+  }
+
+  if (PERSON_ONLY_TOOLS.has(toolName) && trace.at(-1)!.decision === 'auto') {
+    set({
+      rule: 'default',
+      decision: 'ask',
+      why: `${toolName} always waits for its owner to decide; no setting runs it unasked`,
+    });
   }
 
   const last = trace.at(-1)!;

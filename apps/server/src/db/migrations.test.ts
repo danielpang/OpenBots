@@ -398,3 +398,91 @@ describe('organizations backfill (plan 21.1)', () => {
     ]);
   });
 });
+
+describe('artifact_sharing backfill (plan 21.11)', () => {
+  let client: PGlite;
+  let db: Db;
+  const home = ID(81);
+  const long = ID(82);
+  const ada = ID(83);
+  const away = ID(84);
+  const longSlug = `${'a'.repeat(40)}-0123abcd`;
+  const slugOf: Record<string, string> = {};
+
+  beforeAll(async () => {
+    client = new PGlite({ extensions: { vector } });
+    db = drizzle(client, { schema }) as unknown as Db;
+    await migrateBefore(db, 'artifact_sharing');
+    await client.exec(`
+      INSERT INTO workspaces (id, name, slug) VALUES
+        ('${home}', 'Home', 'home-1a2b3c4d'),
+        ('${away}', 'Away', 'away-5e6f7a8b'),
+        ('${long}', 'Long', '${longSlug}');
+      INSERT INTO users (id, name, email) VALUES ('${ada}', 'Ada', 'ada@example.com');
+      INSERT INTO bots (id, workspace_id, owner_id, handle, name) VALUES
+        ('${ID(91)}', '${home}', '${ada}', 'researcher', 'Researcher'),
+        ('${ID(92)}', '${away}', '${ada}', 'researcher', 'Researcher'),
+        ('${ID(97)}', '${long}', '${ada}', 'researcher', 'Researcher'),
+        ('${ID(93)}', '${home}', '${ada}', 'Very_Long--Handle__With   Odd--Bits-and-more-words', 'Odd'),
+        ('${ID(94)}', '${home}', '${ada}', '___', 'Blank');
+      INSERT INTO artifacts (id, workspace_id, owner_id, bot_id, kind, title) VALUES
+        ('${ID(95)}', '${home}', '${ada}', '${ID(91)}', 'document', 'Old');
+    `);
+    await migrateBefore(db);
+  }, 60_000);
+
+  afterAll(async () => {
+    await client?.close();
+  });
+
+  it('gives every Bot a unique DNS-safe slug, even when handles collide', async () => {
+    const bots = await db
+      .select({ id: schema.bots.id, slug: schema.bots.publicSlug, ws: schema.bots.workspaceId })
+      .from(schema.bots)
+      .orderBy(schema.bots.id);
+    const slugs = bots.map((b) => b.slug);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    const orgSlugs: Record<string, string> = {
+      [home]: 'home-1a2b3c4d',
+      [away]: 'away-5e6f7a8b',
+      [long]: longSlug,
+    };
+    for (const { id, slug, ws } of bots) {
+      slugOf[id] = slug;
+      expect(slug).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+      expect(slug).not.toContain('--');
+      expect(`${slug}--${orgSlugs[ws]}`.length).toBeLessThanOrEqual(63);
+    }
+    // The first two Researchers would share their handle and their ids' first digits.
+    expect(slugOf[ID(91)]).toBe('researcher-000000000091');
+    expect(slugOf[ID(92)]).toBe('researcher-000000000092');
+    // In the organization with a long slug, the handle is cut to fit the label.
+    expect(slugOf[ID(97)]).toBe('res-00000000');
+    expect(slugOf[ID(93)]).toBe('very-long-handle-with-00000000');
+    expect(slugOf[ID(94)]).toBe('bot-00000000');
+  });
+
+  it('keeps existing Artifacts private', async () => {
+    const [row] = await db.select().from(schema.artifacts);
+    expect(row).toMatchObject({
+      visibility: 'private',
+      publicVersionId: null,
+      sharedBy: null,
+      takenDownAt: null,
+    });
+  });
+
+  it('gives new Bots a slug by default, and refuses one with -- inside', async () => {
+    await client.exec(
+      `INSERT INTO bots (id, workspace_id, owner_id, handle, name) VALUES ('${ID(96)}', '${home}', '${ada}', 'new', 'New')`,
+    );
+    const [bot] = await db
+      .select()
+      .from(schema.bots)
+      .where(eq(schema.bots.id, ID(96)));
+    expect(bot!.publicSlug).toMatch(/^b[0-9a-f]{11}$/);
+    await expect(
+      client.exec(`UPDATE bots SET public_slug = 'a--b' WHERE id = '${ID(96)}'`),
+    ).rejects.toThrow(/bots_public_slug_format/);
+  });
+});

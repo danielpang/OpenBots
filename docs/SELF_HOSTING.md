@@ -162,6 +162,23 @@ The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
 up). A self-hosted install has no billing and leaves them empty: every computer start and run goes
 ahead as before.
 
+### Shared Artifacts
+
+Sharing an Artifact with the organization or making it public, and opening one in a browser, is
+off unless `OPENBOTS_ARTIFACT_DOMAIN` is set (default empty). With it, each Bot gets a hostname
+on that domain, `https://<bot>--<organization>.<domain>/<artifact id>`, and the server answers
+every request whose `Host` is under it. Use a registrable domain apart from the app's, so a
+shared page never reaches the app's cookies, and point a wildcard DNS record and certificate for
+`*.<domain>` at the server. The server refuses a domain that is the app's host or sits under it.
+
+`OPENBOTS_ARTIFACT_EDGE_SECRET` (default empty) is for the Cloudflare Worker in
+[apps/artifact-worker](../apps/artifact-worker/README.md), which can terminate the wildcard
+hostname instead and forwards to `/artifact-host/` with this secret. Without it that path answers 404.
+
+Owners and admins can turn public links off for their organization in Settings. An operator can
+take one public link down at once with `openbots artifacts takedown <link> [reason]` (and put it
+back with `openbots artifacts restore <link>`); both are recorded in the organization's audit log.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
@@ -364,8 +381,8 @@ the last one finished. A backup made before a rotation needs the key it was made
 ### Secrets in files
 
 Each secret setting (`OPENBOTS_MASTER_KEY`, `OPENBOTS_MASTER_KEY_PREVIOUS`, `DATABASE_URL`,
-`REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN` and
-`OPENBOTS_METRICS_TOKEN`) can be given as `NAME_FILE` instead: the path of a file holding the value,
+`REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
+`OPENBOTS_METRICS_TOKEN` and `OPENBOTS_ARTIFACT_EDGE_SECRET`) can be given as `NAME_FILE` instead: the path of a file holding the value,
 such as a Docker or Kubernetes secret. Set one or the other, not both.
 
 The compose stack does this itself: its entrypoint moves the secrets from `.env` into private

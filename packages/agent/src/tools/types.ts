@@ -156,6 +156,12 @@ export interface AgentTool<Args = unknown> {
   transcript?(output: unknown): unknown;
   /** The provider's own tool for this one, when the run's model has one (Anthropic computer use). */
   native?(target: ModelTarget): NativeTool | undefined;
+  /**
+   * The one line an approval request shows for a call, when the arguments
+   * alone cannot say what would happen (an Artifact's title, who would see
+   * it). Read only; called before the request is posted.
+   */
+  approvalSummary?(args: Args, ctx: ToolContext): Promise<string | undefined>;
   execute(args: Args, ctx: ToolContext): Promise<unknown>;
 }
 
@@ -200,6 +206,7 @@ export interface AnyAgentTool {
   toModelOutput?(output: unknown): ToolResultOutput | undefined;
   transcript?(output: unknown): unknown;
   native?(target: ModelTarget): NativeTool | undefined;
+  approvalSummary?(args: never, ctx: ToolContext): Promise<string | undefined>;
   execute(args: never, ctx: ToolContext): Promise<unknown>;
 }
 

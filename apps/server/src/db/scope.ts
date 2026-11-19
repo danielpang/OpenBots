@@ -48,6 +48,9 @@ import type { Db } from './client.js';
 //   openbots_github_installation_workspaces() (drizzle/0029; 0030 holds
 //   openbots_system to the columns it reads); the App's webhook delivery
 //   then works in each.
+// - `artifactHostWorkspace`: the organization of a Bot by its public slug,
+//   through openbots_artifact_host_workspace() (drizzle/0048), for the
+//   artifact host, which then serves the request in it.
 // - `billingCustomerWorkspace`: the organization of a Stripe customer,
 //   through openbots_billing_customer_workspace() (drizzle/0045), for the
 //   managed build's Stripe webhook, which then works in it.
@@ -292,6 +295,19 @@ export async function githubInstallationWorkspaces(
 export async function billingCustomerWorkspace(db: Db, customerId: string): Promise<string | null> {
   const result = await db.execute<{ id: string | null }>(
     sql`select openbots_billing_customer_workspace(${customerId}) as id`,
+  );
+  return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
+}
+
+/**
+ * The organization of a Bot by its public slug
+ * (openbots_artifact_host_workspace(), drizzle/0048): the artifact host's
+ * request names only the Bot, so it asks this first and then works in
+ * that organization.
+ */
+export async function artifactHostWorkspace(db: Db, botSlug: string): Promise<string | null> {
+  const result = await db.execute<{ id: string | null }>(
+    sql`select openbots_artifact_host_workspace(${botSlug}) as id`,
   );
   return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
 }

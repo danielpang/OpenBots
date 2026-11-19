@@ -16,6 +16,7 @@ import { DomainError, problem, zodProblem, type Problem } from './errors.js';
 import { TOKEN_PREFIX } from './hooks/verify.js';
 import { httpMetrics } from './metrics.js';
 import { apiKeyFrom } from './middleware/auth.js';
+import { artifactHostMiddleware } from './artifact-host/mount.js';
 import { OPENAPI_PATH, openApiDocument } from './openapi.js';
 import { mountRoutes } from './routes/index.js';
 import { LOCAL_SESSION_PATH } from './routes/local.js';
@@ -51,6 +52,9 @@ export function createApp(deps: AppDeps, { webDist = WEB_DIST }: AppOptions = {}
     );
   });
   app.use(httpMetrics);
+  // Shared Artifacts' own hosts (plan 21.11), answered before any app route,
+  // CORS or session: their content never runs on the app's origin.
+  if (config.artifactHost) app.use(artifactHostMiddleware(deps));
   // No CORS for the Mac app's local sign-in (routes/local.ts): no page may read it.
   const apiCors = cors({ origin, credentials: true, maxAge: 600 });
   app.use('/api/*', (c, next) => (c.req.path === LOCAL_SESSION_PATH ? next() : apiCors(c, next)));
@@ -175,7 +179,7 @@ export function redactPath(path: string): string {
 
 /** Paths the SPA fallback must never answer. */
 function isServerPath(path: string): boolean {
-  return /^\/(api|hooks|ws|assets)(\/|$)|^\/(healthz|readyz|metrics)$/.test(path);
+  return /^\/(api|hooks|ws|assets|artifact-host)(\/|$)|^\/(healthz|readyz|metrics)$/.test(path);
 }
 
 function toProblem(error: unknown): Problem {
