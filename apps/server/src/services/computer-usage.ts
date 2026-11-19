@@ -25,7 +25,7 @@ export const USAGE_HEARTBEAT_MS = 60_000;
 /** An open interval not heartbeated for this long was left by a process that died. */
 export const USAGE_DANGLING_MS = 3 * USAGE_HEARTBEAT_MS;
 
-type Deps = Pick<AppDeps, 'db' | 'logger' | 'extensions'>;
+type Deps = Pick<AppDeps, 'db' | 'logger' | 'extensions' | 'config' | 'infra'>;
 
 /** Whose computer an interval is for. */
 export interface UsageTarget {
@@ -138,6 +138,7 @@ export async function closeUsageInterval(
       .returning();
     if (!closed) return null;
     return {
+      intervalId: closed.id,
       workspaceId: closed.workspaceId,
       ownerId: closed.ownerId,
       computerId: closed.computerId,
@@ -153,7 +154,8 @@ export async function closeUsageInterval(
 
 async function reportUsage(deps: Deps, event: ComputerUsageEvent) {
   try {
-    await deps.extensions?.onComputerUsage?.(event);
+    const { config, db, logger, infra } = deps;
+    await deps.extensions?.onComputerUsage?.(event, { config, db, logger, infra });
   } catch (error) {
     deps.logger.warn(
       { err: error, computerId: event.computerId },

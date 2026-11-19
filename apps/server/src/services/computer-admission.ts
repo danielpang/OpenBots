@@ -19,7 +19,7 @@ export const COMPUTER_WORK_REFUSED = 'COMPUTER_WORK_REFUSED';
 
 const CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 
-type Deps = Pick<AppDeps, 'extensions' | 'logger'>;
+type Deps = Pick<AppDeps, 'extensions' | 'logger' | 'config' | 'db' | 'infra'>;
 
 /** The refusal as a problem: 402 with the extension's stable code and its words. */
 export function computerRefused(refusal: ComputerWorkRefusal): DomainError {
@@ -43,7 +43,8 @@ export async function computerWorkRefusal(
   const admit = deps.extensions?.admitComputerWork;
   if (!admit) return null;
   try {
-    return (await admit(request)) ?? null;
+    const { config, db, logger, infra } = deps;
+    return (await admit(request, { config, db, logger, infra })) ?? null;
   } catch (error) {
     deps.logger.warn(
       { err: error, workspaceId: request.workspaceId, kind: request.kind },

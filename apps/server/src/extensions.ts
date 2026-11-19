@@ -21,6 +21,8 @@ export interface ExtensionContext {
 
 /** A stretch of a member's computer use that ended (services/computer-usage.ts). */
 export interface ComputerUsageEvent {
+  /** The `computer_usage_intervals` row: an idempotency key for whoever counts it. */
+  intervalId: string;
   workspaceId: string;
   ownerId: string;
   computerId: string;
@@ -105,11 +107,13 @@ export interface ServerExtensions {
    */
   admitComputerWork?(
     request: ComputerWorkRequest,
+    context: ExtensionContext,
   ): ComputerWorkRefusal | null | Promise<ComputerWorkRefusal | null>;
   /**
    * Called once each time a computer usage interval closes, after it is
    * stored (plan 9.5): for usage billing. A throw is logged, never retried,
    * and the interval stays; the ledger table is the record to reconcile from.
+   * It runs in the interval's organization's scope (db/scope.ts).
    */
-  onComputerUsage?(event: ComputerUsageEvent): void | Promise<void>;
+  onComputerUsage?(event: ComputerUsageEvent, context: ExtensionContext): void | Promise<void>;
 }

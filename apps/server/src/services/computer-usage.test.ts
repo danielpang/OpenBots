@@ -68,6 +68,7 @@ describe('computer usage intervals', () => {
     expect(closed!.seconds).toBe(0);
     expect(heard).toEqual([
       {
+        intervalId: closed!.id,
         workspaceId: row.workspaceId,
         ownerId: row.ownerId,
         computerId: row.id,
