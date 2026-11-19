@@ -1,4 +1,4 @@
-import { COMPUTER_OFF_CLOSE_CODE } from '@openbots/shared';
+import { COMPUTER_IDLE_CLOSE_CODE, COMPUTER_OFF_CLOSE_CODE } from '@openbots/shared';
 import { Button } from '@openbots/ui';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
@@ -14,9 +14,12 @@ import { useRefreshComputer } from './live.js';
 // COMPUTER_OFF_CLOSE_CODE and the page refetches the computer's state.
 // `attach` opens it in a directory, as another user, with a command typed
 // (Open terminal on a coding session or a repository, CA7, I15); a new
-// attach opens a new session.
+// attach opens a new session. On a computer that sleeps when idle (a Sprite)
+// a terminal with no activity for a while closes with
+// COMPUTER_IDLE_CLOSE_CODE, so it stops keeping the computer awake; it says
+// so and offers Reconnect.
 
-type Phase = 'connecting' | 'open' | 'closed' | 'off';
+type Phase = 'connecting' | 'open' | 'closed' | 'idle' | 'off';
 
 type PtyMessage = { type: 'output'; data: string } | { type: 'exit'; exitCode: number };
 
@@ -61,6 +64,7 @@ export function ComputerTerminal({ attach }: { attach?: PtyAttach } = {}) {
       else if (message.type === 'exit') term.write(`\r\n[exited with ${message.exitCode}]\r\n`);
     };
     socket.onclose = (event: CloseEvent) => {
+      if (event.code === COMPUTER_IDLE_CLOSE_CODE) return setPhase('idle');
       if (event.code !== COMPUTER_OFF_CLOSE_CODE) return setPhase('closed');
       setPhase('off');
       void refresh();
@@ -90,8 +94,10 @@ export function ComputerTerminal({ attach }: { attach?: PtyAttach } = {}) {
             ? 'Connecting…'
             : phase === 'off'
               ? 'The computer is off.'
-              : 'The terminal session ended.'}
-          {phase === 'closed' && (
+              : phase === 'idle'
+                ? 'Closed after a while with no activity, so the computer can sleep.'
+                : 'The terminal session ended.'}
+          {(phase === 'closed' || phase === 'idle') && (
             <Button variant="outline" size="sm" onClick={() => setSession((n) => n + 1)}>
               Reconnect
             </Button>

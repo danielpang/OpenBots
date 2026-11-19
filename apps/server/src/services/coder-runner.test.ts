@@ -148,6 +148,15 @@ describe('coder runner', () => {
     );
     await start(sessionId);
     const row = await ended(sessionId, 'settled');
+    // The session used the computer from its start to its end (plan 9.5).
+    await w.until(async () => {
+      const used = await w.t.db
+        .select()
+        .from(schema.computerUsageIntervals)
+        .where(eq(schema.computerUsageIntervals.reason, 'coding_session'));
+      expect(used.length).toBeGreaterThan(0);
+      expect(used.every((u) => u.endedAt)).toBe(true);
+    });
 
     // The checkout was fetched with the fetch and push urls, then the worktree made.
     const git = w.coder.gitCalls();

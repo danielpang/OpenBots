@@ -167,6 +167,18 @@ function IdleSetting({ computer }: { computer: Computer }) {
     );
   }
 
+  // A Sprite sleeps on its own about 30 seconds after its last use (plan 9.5).
+  if (!computer.idleSettings) {
+    return (
+      <SettingsPanel aria-label="Idle">
+        <SettingsRow
+          title="Sleeps when idle"
+          description="This computer sleeps on its own shortly after its last use and wakes when needed, so it has no idle time to set."
+        />
+      </SettingsPanel>
+    );
+  }
+
   return (
     <SettingsPanel aria-label="Idle">
       <SettingsRow

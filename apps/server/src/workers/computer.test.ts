@@ -105,6 +105,14 @@ describe('computer tools in a run', () => {
     ]);
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Look into it' });
     const run = await runOf(bot.id, 'completed');
+    // The run used the computer: an interval opened with it and closed when it ended (plan 9.5).
+    await until(async () => {
+      const used = await t.db
+        .select()
+        .from(schema.computerUsageIntervals)
+        .where(eq(schema.computerUsageIntervals.reason, 'run'));
+      expect(used).toEqual([expect.objectContaining({ endedAt: expect.any(Date) })]);
+    });
 
     // Its own screen, started on the agent.
     const [screen] = await t.db

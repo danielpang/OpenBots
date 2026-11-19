@@ -5024,7 +5024,7 @@ export interface paths {
     head?: never;
     /**
      * Keep the computer on, or set how long it idles before it stops
-     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change.
+     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (Sprites).
      */
     patch: {
       parameters: {
@@ -5091,6 +5091,15 @@ export interface paths {
       responses: {
         /** @description Running */
         200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Computer'];
+          };
+        };
+        /** @description Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        202: {
           headers: {
             [name: string]: unknown;
           };
@@ -5256,6 +5265,15 @@ export interface paths {
       responses: {
         /** @description Running */
         200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Computer'];
+          };
+        };
+        /** @description Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        202: {
           headers: {
             [name: string]: unknown;
           };
@@ -13165,6 +13183,10 @@ export interface components {
       status: 'creating' | 'updating' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
       alwaysOn: boolean;
       idleTimeoutMin: number | null;
+      /** @description Whether `alwaysOn` and `idleTimeoutMin` apply. False on Sprites, which pause themselves about 30 seconds after their last use and wake on the next */
+      idleSettings: boolean;
+      /** @description Why the last setup in the background failed (Sprites), while the status is `error` */
+      error: string | null;
       /** Format: date-time */
       lastUsedAt: string | null;
       /** Format: date-time */
