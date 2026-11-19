@@ -290,15 +290,17 @@ export async function claimReport(
   units: number,
 ): Promise<{ previous: number; seq: number } | null> {
   const t = schema.billingPeriods;
+  // Raw SQL takes no Date on postgres.js: the time goes as text, cast.
+  const start = periodStart.toISOString();
   const rows = await db.execute<{ previous: number; seq: number }>(sql`
     with locked as (
       select reported_units from ${t}
-      where workspace_id = ${workspaceId} and period_start = ${periodStart}
+      where workspace_id = ${workspaceId} and period_start = ${start}::timestamptz
       for update
     )
     update ${t} p set reported_units = ${units}, report_seq = p.report_seq + 1, updated_at = now()
     from locked
-    where p.workspace_id = ${workspaceId} and p.period_start = ${periodStart}
+    where p.workspace_id = ${workspaceId} and p.period_start = ${start}::timestamptz
       and locked.reported_units < ${units}
     returning locked.reported_units as previous, p.report_seq as seq
   `);
@@ -386,7 +388,7 @@ export async function inFlightSeconds(
   const rows = await db
     .select({
       ownerId: t.ownerId,
-      seconds: sql<number>`coalesce(sum(greatest(0, extract(epoch from (least(${now}::timestamptz, ${t.seenAt} + interval '3 minutes') - ${t.startedAt})))), 0)`,
+      seconds: sql<number>`coalesce(sum(greatest(0, extract(epoch from (least(${now.toISOString()}::timestamptz, ${t.seenAt} + interval '3 minutes') - ${t.startedAt})))), 0)`,
     })
     .from(t)
     .where(and(eq(t.workspaceId, workspaceId), isNull(t.endedAt)))
