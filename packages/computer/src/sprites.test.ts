@@ -83,6 +83,10 @@ describe('Sprite names and egress', () => {
     for (const host of ['*.anthropic.com', 'claude.ai', 'chatgpt.com', '*.openai.com', '*.x.ai']) {
       expect(allowed).toContain(host);
     }
+    // What provision.sh downloads, since it runs behind the policy.
+    for (const host of ['nodejs.org', 'archive.ubuntu.com', 'cdn.playwright.dev']) {
+      expect(allowed).toContain(host);
+    }
     expect(allowed).toContain('example.com');
     expect(allowed).toContain('*.example.org');
     expect(policy.rules.slice(1).every((r) => r.action === 'allow')).toBe(true);
@@ -133,7 +137,7 @@ describe('the sprites provider', () => {
       `${PROVISION_STAGING_DIR}/agent-bundle.tgz`,
     ]);
     // The staging directory goes once the script succeeded.
-    expect(execs(api).at(-1)).toBe(`rm -rf ${PROVISION_STAGING_DIR}`);
+    expect(execs(api).at(-1)).toContain(`rm -rf ${PROVISION_STAGING_DIR}`);
     expect([...sprite.files.keys()]).toEqual([PROVISION_VERSION_FILE]);
   });
 
@@ -300,7 +304,13 @@ describe('the sprites provider', () => {
       expect(api.sprites.has(NAME)).toBe(true);
       expect(files.has('/home/bot/notes.md')).toBe(false);
       expect(files.has('/var/lib/openbots/cookies.db')).toBe(true);
-      expect(execs(api).at(-1)).toContain('find /home/bot -mindepth 1 -delete');
+      // The agent's service stops and what it started ends before the wipe.
+      const wipe = execs(api).at(-1)!;
+      expect(wipe).toContain('sprite-env services stop openbots-agent');
+      expect(wipe).toContain('pkill -KILL -u bot');
+      expect(wipe.indexOf('pkill')).toBeLessThan(
+        wipe.indexOf('find /home/bot -mindepth 1 -delete'),
+      );
     });
 
     it('keeps the Sprite and its home without a reset (K7)', async () => {

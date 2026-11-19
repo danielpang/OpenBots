@@ -747,10 +747,13 @@ export function fakeSpritesApi(): FakeSpritesApi {
         return ok();
       }
       if (command === 'bash' && args[2] === 'as-root') {
-        const home = /^find (\S+) -mindepth 1 -delete$/.exec(args[3] ?? '')?.[1];
-        if (home) {
-          for (const path of [...sprite.files.keys()]) {
-            if (path.startsWith(`${home}/`)) sprite.files.delete(path);
+        // The home wipe (`find <home> -mindepth 1 -delete`) and `rm -rf <dir>`.
+        const home = /^find (\S+) -mindepth 1 -delete$/m.exec(args[3] ?? '')?.[1];
+        const removed = /^rm -rf (\S+)$/m.exec(args[3] ?? '')?.[1];
+        for (const path of [...sprite.files.keys()]) {
+          if (home && path.startsWith(`${home}/`)) sprite.files.delete(path);
+          if (removed && (path === removed || path.startsWith(`${removed}/`))) {
+            sprite.files.delete(path);
           }
         }
         return ok();

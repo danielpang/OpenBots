@@ -110,6 +110,15 @@ The service definition holds no token and no environment. The launcher, at each 
 
 The agent's log is `/.sprite/logs/services/openbots-agent.log`.
 
+## How the server reaches the agent
+
+The provider (`packages/computer/src/sprites.ts`) talks to the agent through the Sprite's URL, `https://<name>-<org id>.sprites.app`, which routes to the service's HTTP port. `OPENBOTS_SPRITES_URL_AUTH` picks how:
+
+- `public` (the default): the URL is open to the internet and the agent's own per-computer token, sent as `Authorization: Bearer`, is what guards every request. A private URL would want the Sprites org token in `Authorization`, and the Sprites docs do not say whether the proxy removes it before the request reaches the Sprite; an org token that reached a VM running a Bot's commands could act on every Sprite in the org.
+- `sprite`: the URL is private to the org. The org token goes in `Authorization` for the proxy and the agent token in `X-OpenBots-Agent-Token`, which the agent also accepts. Use it only once `pnpm --filter @openbots/computer sprites-smoke` (with `SPRITES_TOKEN` set) reports that the proxy strips `Authorization`.
+
+Either way the agent refuses any request without its token.
+
 ## Where a Sprite differs from the container
 
 | Container (`packages/computer` docker provider)                                    | On a Sprite                                                                                                                                                                    |
@@ -122,7 +131,7 @@ The agent's log is `/.sprite/logs/services/openbots-agent.log`.
 | `ShmSize`                                                                          | The VM's `/dev/shm`, or a tmpfs the launcher mounts, without the container's size limit.                                                                                       |
 | Memory, CPU and pids limits                                                        | None set: the Sprite is the user's alone (8 vCPU, memory the platform manages).                                                                                                |
 | `tini` as PID 1                                                                    | `tini -s` as a subreaper under the Sprite's own init.                                                                                                                          |
-| Agent port 7070, on the sandbox network only                                       | Port 8080, on the Sprite URL, which is private to the Fly org by default. The agent's token is what guards it; do not make the URL public without that in mind.                |
+| Agent port 7070, on the sandbox network only                                       | Port 8080, on the Sprite URL. The provider makes the URL public by default (`OPENBOTS_SPRITES_URL_AUTH`, below), so the agent's per-computer token is what guards it.          |
 | Token as a file put into the state volume before each start                        | The same file, copied from `/etc/openbots/agent-token` by the launcher before each start.                                                                                      |
 | Ubuntu 24.04, Node from the official image                                         | Ubuntu 26.04, Node from nodejs.org, same major version.                                                                                                                        |
 
@@ -176,7 +185,7 @@ Then check what a container cannot show: let the Sprite go cold (leave it idle l
 Unverified without a real Sprite (each also marked `UNVERIFIED on a real Sprite:` in `provision.sh` where it applies):
 
 - Which user holds uid 1000 on a Sprite, which user `sprite exec` and services run as, and that moving the uid-1000 user does not break `sprite exec` or `sprite console` (it would if the runtime started sessions by uid rather than by name).
-- That the default network policy lets nodejs.org, the npm registry, the Ubuntu archive and Playwright's download hosts through.
+- That the Sprite's apt sources use `archive.ubuntu.com`, `security.ubuntu.com` or `ports.ubuntu.com`, which the provider's egress policy allows with nodejs.org and Playwright's two download hosts (`SPRITES_PROVISION_DOMAINS`); the npm registry is taken to be in the Sprites `defaults` set, which is not documented host by host.
 - That `/sys/fs/cgroup` is a writable cgroup v2 tree and the runtime does not mind the service moving into its own cgroup. Without it, processes of the bot user that a crashed agent left running are not ended.
 - That a service's process is root (the launcher re-runs itself with `sudo -n` if not) and that `services delete` stops it.
 - Playwright's dependency list on Ubuntu 26.04: Playwright may not list 26.04 yet and fall back to a release it knows. It worked in the `ubuntu:26.04` container.
@@ -184,7 +193,7 @@ Unverified without a real Sprite (each also marked `UNVERIFIED on a real Sprite:
 
 Not done:
 
-- The Sprite's network policy, URL auth and tasks (to keep a Sprite awake during a Bot's long run) are the provider's to set from outside.
+- Keeping a Sprite awake during a Bot's long run: the provider has `hold` and `release` (Tasks API), but the server does not call them yet.
 - No memory, CPU or pids limits.
 - The bundle must be built on x86_64 Linux with a glibc no newer than the Sprite's; node-pty is rebuilt on the Sprite when its binding does not load, but that path has only been reasoned about, not run.
 - Bundles other than the current and the previous one are deleted; there is no rollback command, but pointing `/app` at the previous one in `/opt/openbots/bundles/` and restarting the service is one.

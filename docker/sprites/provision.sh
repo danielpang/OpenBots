@@ -232,7 +232,8 @@ elif dry; then
 else
   tmp="$(mktemp -d)"
   name="node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz"
-  # UNVERIFIED on a real Sprite: that its network policy lets nodejs.org through.
+  # The provider's egress policy allows nodejs.org (SPRITES_PROVISION_DOMAINS
+  # in packages/computer/src/sprites.ts).
   curl -fsSL --retry 3 -o "$tmp/$name" "https://nodejs.org/dist/v$NODE_VERSION/$name"
   curl -fsSL --retry 3 -o "$tmp/SHASUMS256.txt" "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt"
   (cd "$tmp" && grep "  $name\$" SHASUMS256.txt | sha256sum -c -) || die "checksum mismatch for $name"
@@ -473,8 +474,10 @@ step 'install Chromium'
 # with the system libraries it needs, no headless shell. Not Ubuntu's
 # chromium package, which is a snap, and snapd needs systemd, which a Sprite
 # does not run.
-# UNVERIFIED on a real Sprite: that its network policy lets Playwright's
-# download hosts through.
+# The provider's egress policy allows Playwright's two download hosts and the
+# Ubuntu archive (SPRITES_PROVISION_DOMAINS in packages/computer/src/sprites.ts).
+# UNVERIFIED on a real Sprite: that its apt sources use those archive hosts
+# and not a mirror of its own.
 export PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR"
 pw_cli="$SRC/app/apps/computer-agent/node_modules/playwright-core/cli.js"
 chromium_path() { (cd "$SRC/app/apps/computer-agent" && node -e "process.stdout.write(require('playwright-core').chromium.executablePath())"); }

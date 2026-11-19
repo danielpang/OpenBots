@@ -73,6 +73,27 @@ export const SPRITES_VENDOR_DOMAINS = [
   '*.grok.com',
 ] as const;
 
+/**
+ * Hosts docker/sprites/provision.sh downloads from: Node's official builds,
+ * the Ubuntu archive (ports.ubuntu.com on arm64) and Playwright's Chromium
+ * mirrors. The policy is in force before the first provisioning (`create`
+ * applies it first, so a reused Sprite gets the current one) and at every
+ * later one, and the Sprites `defaults` set is not documented host by host,
+ * so these are listed rather than assumed. The npm registry is in `defaults`.
+ */
+export const SPRITES_PROVISION_DOMAINS = [
+  'nodejs.org',
+  'archive.ubuntu.com',
+  '*.archive.ubuntu.com',
+  'security.ubuntu.com',
+  'ports.ubuntu.com',
+  'cdn.playwright.dev',
+  'playwright.download.prss.microsoft.com',
+] as const;
+
+/** The control agent's Sprite service, as docker/sprites/provision.sh registers it. */
+export const SPRITES_AGENT_SERVICE = 'openbots-agent';
+
 /** A domain rule the Sprites network policy accepts: a host, `*.host`, or `*`. */
 export function isEgressDomain(domain: string): boolean {
   return (
@@ -84,12 +105,12 @@ export function isEgressDomain(domain: string): boolean {
 }
 
 /**
- * The egress policy: the Sprites defaults, the vendors' hosts and `extra`
- * (OPENBOTS_SPRITES_EGRESS). Everything else is refused at DNS, and private
- * addresses always are.
+ * The egress policy: the Sprites defaults, the vendors' hosts, the
+ * provisioning's download hosts and `extra` (OPENBOTS_SPRITES_EGRESS).
+ * Everything else is refused at DNS, and private addresses always are.
  */
 export function spritesEgressPolicy(extra: readonly string[] = []): SpriteEgressPolicy {
-  const domains = [...new Set([...SPRITES_VENDOR_DOMAINS, ...extra])];
+  const domains = [...new Set([...SPRITES_VENDOR_DOMAINS, ...SPRITES_PROVISION_DOMAINS, ...extra])];
   for (const domain of domains) {
     if (!isEgressDomain(domain)) throw new Error(`Not an egress domain: ${domain}`);
   }
@@ -243,7 +264,9 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
         `Provisioning the Sprite recorded version ${installed ?? 'none'}, not ${setup.version}: ${tail(result)}`,
       );
     }
-    await api.exec(name, ['rm', '-rf', PROVISION_STAGING_DIR]).catch(() => undefined);
+    // As root: the API may have written the files as root, in a directory
+    // exec made as another user.
+    await api.exec(name, asRoot(`rm -rf ${PROVISION_STAGING_DIR}`)).catch(() => undefined);
   }
 
   /** Our holds on the Sprite (Tasks API tasks with our prefix); none unless it runs. */
@@ -327,7 +350,11 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       }
       if (!destroyOptions.state) {
         await provider.stop(ref);
-        await run(name, asRoot(`find ${COMPUTER_HOME} -mindepth 1 -delete`), 'Clearing the home');
+        // The agent and what it started go first, as removing the container
+        // ends them, so nothing writes into the home while it is cleared.
+        // The service stays stopped until the next `create` provisions the
+        // Sprite again and registers it anew with the new token.
+        await run(name, asRoot(clearHome()), 'Clearing the home');
         return;
       }
       await api.delete(name);
@@ -405,6 +432,21 @@ function holdTask(holdName: string) {
   if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(holdName))
     throw new Error(`Not a hold name: ${holdName}`);
   return `${SPRITES_HOLD_PREFIX}${holdName}`;
+}
+
+/**
+ * Stops the agent's service, ends what it started (its cgroup, as
+ * provision.sh's launcher sets it up, else the bot user's processes) and
+ * deletes everything under the home. Run as root.
+ */
+function clearHome(): string {
+  return [
+    `sprite-env services stop ${SPRITES_AGENT_SERVICE} >/dev/null 2>&1 || true`,
+    'cg=/sys/fs/cgroup/openbots-computer',
+    'if [ -e "$cg/cgroup.kill" ]; then echo 1 >"$cg/cgroup.kill" || true; fi',
+    'pkill -KILL -u bot || true',
+    `find ${COMPUTER_HOME} -mindepth 1 -delete`,
+  ].join('\n');
 }
 
 /** Runs a shell command as root: directly when exec already is, else through sudo. */
