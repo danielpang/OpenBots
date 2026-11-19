@@ -442,6 +442,7 @@ export function billingRoutes(billing: Billing) {
               .openapi('BillingCheckoutResult'),
             'Go to `url`, or the plan changed',
           ),
+          409: problemResponse('The subscription waits for a payment (`SUBSCRIPTION_UNPAID`)'),
           502: problemResponse('Stripe did not answer as expected'),
           503: problemResponse('Payments are not set up on this server (`BILLING_NOT_CONFIGURED`)'),
           ...adminProblems,
@@ -461,6 +462,19 @@ export function billingRoutes(billing: Billing) {
         const live =
           current.stripeSubscriptionId &&
           ['trialing', 'active', 'past_due'].includes(current.status ?? '');
+        if (
+          current.stripeSubscriptionId &&
+          !live &&
+          !['canceled', 'incomplete_expired'].includes(current.status ?? 'canceled')
+        ) {
+          // A subscription that is unpaid is still there: a second one would
+          // bill the organization twice. The portal settles the first.
+          throw new DomainError(
+            409,
+            'SUBSCRIPTION_UNPAID',
+            'The subscription is waiting for a payment. Update the payment details in the portal instead.',
+          );
+        }
         if (live) {
           const subscription = await stripe.subscriptions.retrieve(current.stripeSubscriptionId!);
           const seat = seatItemOf(subscription, prices);

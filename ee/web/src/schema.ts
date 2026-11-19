@@ -1286,6 +1286,15 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
+        /** @description The subscription waits for a payment (`SUBSCRIPTION_UNPAID`) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
         /** @description Stripe did not answer as expected */
         502: {
           headers: {

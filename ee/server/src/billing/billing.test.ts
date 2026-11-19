@@ -402,6 +402,30 @@ describe('billing', () => {
       });
     });
 
+    it('changes a live subscription in place, and never makes a second one for an unpaid one', async () => {
+      await pro();
+      b.stripe.subscriptions.all.set(
+        'sub_acme',
+        subscription({ id: 'sub_acme', customer: 'cus_acme', seats: 2, periodStart: ANCHOR }),
+      );
+      expect(await json(b.call(ada.cookie, 'POST', '/billing/checkout', { plan: 'team' }))).toEqual(
+        { changed: true },
+      );
+      expect(b.stripe.subscriptions.all.get('sub_acme')!.items.data[1]!.price.id).toBe(PRICES.team);
+      const [change] = await b.t.db
+        .select()
+        .from(schema.billingEvents)
+        .where(eq(schema.billingEvents.workspaceId, ada.org));
+      expect(change).toMatchObject({ activity: 'upgraded', fromPlan: 'pro', toPlan: 'team' });
+      expect(b.stripe.calls.some((c) => c.op === 'checkout.create')).toBe(false);
+
+      await pro({ status: 'unpaid' });
+      expect(await code(b.call(ada.cookie, 'POST', '/billing/checkout', { plan: 'pro' }))).toBe(
+        'SUBSCRIPTION_UNPAID',
+      );
+      expect(b.stripe.calls.some((c) => c.op === 'checkout.create')).toBe(false);
+    });
+
     it('answers 503 for checkout and the portal without Stripe, while the settings still work', async () => {
       const stripe = b.config.stripe;
       b.config.stripe = null;
