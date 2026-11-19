@@ -28,6 +28,16 @@ import { asDirectory, inWorkspace } from '@openbots/server/db/scope';
 export interface OrganizationsDeps extends Pick<AppDeps, 'db' | 'config' | 'infra' | 'logger'> {
   auth: AppDeps['auth'];
   email: EmailOptions;
+  /**
+   * Called after the active members changed (a join, a leave, a removal, a
+   * suspension or a restore): billing's seat sync. Never throws.
+   */
+  seatsChanged?(deps: OrganizationsDeps, workspaceId: string): Promise<void>;
+}
+
+/** Tells billing the seats may have changed, once the change is committed. */
+async function seatsChanged(deps: OrganizationsDeps, workspaceId: string) {
+  await deps.seatsChanged?.(deps, workspaceId);
 }
 
 /** The organization plugin's endpoints routes.ts calls, as `auth.api` has them at run time. */
@@ -317,14 +327,14 @@ export async function updateMember(
     }
     const nowSuspended = member.suspendedAt === null && suspendedAt !== null;
     if (nowSuspended) await audit(tx, workspaceId, user, 'member.suspend', target);
-    if (member.suspendedAt !== null && suspendedAt === null) {
-      await audit(tx, workspaceId, user, 'member.restore', target);
-    }
-    return nowSuspended;
+    const restored = member.suspendedAt !== null && suspendedAt === null;
+    if (restored) await audit(tx, workspaceId, user, 'member.restore', target);
+    return { nowSuspended, restored };
   });
-  if (suspending) {
+  if (suspending.nowSuspended) {
     await endMembershipAccess(deps, { userId, workspaceId, removed: false });
   }
+  if (suspending.nowSuspended || suspending.restored) await seatsChanged(deps, workspaceId);
   const member = (await listMembers(deps.db, workspaceId)).find((m) => m.id === userId);
   return member!;
 }
@@ -356,6 +366,7 @@ export async function removeMember(deps: OrganizationsDeps, user: CurrentUser, u
     );
   });
   await endMembershipAccess(deps, { userId, workspaceId, removed: true });
+  await seatsChanged(deps, workspaceId);
 }
 
 /** The caller leaves the active organization; the last owner cannot. */
@@ -371,6 +382,7 @@ export async function leaveOrganization(deps: OrganizationsDeps, user: CurrentUs
     await audit(tx, workspaceId, user, 'member.leave', { type: 'user', id: user.id });
   });
   await endMembershipAccess(deps, { userId: user.id, workspaceId, removed: true });
+  await seatsChanged(deps, workspaceId);
 }
 
 // --- Invitations -----------------------------------------------------------------
@@ -585,5 +597,6 @@ async function accept(
     },
     { role: invite.role },
   );
+  if (!already) await seatsChanged(deps, invite.workspaceId);
   return invite.workspaceId;
 }

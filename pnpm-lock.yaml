@@ -383,6 +383,9 @@ catalogs:
     react-dom:
       specifier: ^19.3.0
       version: 19.3.0
+    stripe:
+      specifier: ^23.0.1
+      version: 23.1.0
     tailwind-merge:
       specifier: ^3.7.0
       version: 3.7.0
@@ -1135,6 +1138,9 @@ importers:
       hono:
         specifier: 'catalog:'
         version: 4.13.18
+      stripe:
+        specifier: 'catalog:'
+        version: 23.1.0(@types/node@22.20.5)
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -9174,6 +9180,15 @@ packages:
   strip-json-comments@3.1.1:
     resolution: {integrity: sha512-6fPc+R4ihwqP6N/aIv2f1gMH8lOVtWQHoqC4yK6oSDVVocumAsfCqjkXnqiYMhmMwS/mEHLp7Vehlt3ql6lEig==}
     engines: {node: '>=8'}
+
+  stripe@23.1.0:
+    resolution: {integrity: sha512-fVUfMSfTPoukfoV//MUKAx2+YxyKmYaYtnAL9VkfnHfaPNQylFdWZMD+zgUFerI8rjbaiER8Vzj2XEUQ2AhAsQ==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@types/node': '>=20'
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
 
   structured-headers@0.4.1:
     resolution: {integrity: sha512-0MP/Cxx5SzeeZ10p/bZI0S6MpgD+yxAhi1BOQ34jgnMXsCq3j1t6tQnZu+KdlL7dvJTLT3g9xN8tl10TqgFMcg==}
@@ -19508,6 +19523,10 @@ snapshots:
       min-indent: 1.0.1
 
   strip-json-comments@3.1.1: {}
+
+  stripe@23.1.0(@types/node@22.20.5):
+    optionalDependencies:
+      '@types/node': 22.20.5
 
   structured-headers@0.4.1: {}
 

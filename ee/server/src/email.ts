@@ -1,5 +1,6 @@
 // Email through Resend (plan 21.5), when RESEND_API_KEY and
-// OPENBOTS_EMAIL_FROM are set: invitations and sign-up codes. Without them
+// OPENBOTS_EMAIL_FROM are set: invitations, sign-up codes, and billing's
+// usage warnings to owners and admins (plan 21.10). Without them
 // an invitation is still made and the inviter copies its link. Links and
 // codes in these emails are credentials: a failed send logs why, never the
 // link or code, and only a development server that sends no email may log
@@ -97,6 +98,33 @@ export function sendSignUpNotice(
   log: (error: unknown) => void = () => {},
 ): Promise<boolean> {
   return send(options, to, signUpNoticeMessage(), log);
+}
+
+/** A usage warning to an owner or admin (billing/service.ts), with a link to the Billing tab. */
+export interface BillingWarningEmail {
+  to: string;
+  organization: string;
+  /** The words of the warning: a subject and its paragraphs, plain sentences. */
+  subject: string;
+  paragraphs: string[];
+  /** The Billing tab, in the web app. */
+  link: string;
+}
+
+export function billingWarningMessage(warning: BillingWarningEmail) {
+  const footer = `You get this as an owner or admin of ${warning.organization} on OpenBots.`;
+  const text = `${warning.paragraphs.join('\n\n')}\n\nOpen Billing: ${warning.link}\n\n${footer}\n`;
+  const html = `${warning.paragraphs.map((p) => `<p>${escape(p)}</p>`).join('')}<p><a href="${escape(warning.link)}">Open Billing</a></p><p style="color:#666">${escape(footer)}</p>`;
+  return { subject: warning.subject, text, html };
+}
+
+/** Sends a usage warning; true when Resend took it. Never throws. */
+export function sendBillingWarning(
+  options: EmailOptions,
+  warning: BillingWarningEmail,
+  log: (error: unknown) => void = () => {},
+): Promise<boolean> {
+  return send(options, warning.to, billingWarningMessage(warning), log);
 }
 
 async function send(

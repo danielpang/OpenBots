@@ -3,7 +3,7 @@
   "info": {
     "title": "OpenBots managed API",
     "version": "0.0.0",
-    "description": "Organizations"
+    "description": "Organizations and billing"
   },
   "components": {
     "securitySchemes": {
@@ -311,6 +311,339 @@
           }
         },
         "required": ["id", "organization", "role", "invitedBy", "expiresAt"]
+      },
+      "Billing": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["none", "trial", "paid", "inactive"]
+              },
+              "id": {
+                "$ref": "#/components/schemas/BillingPlanId"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": ["string", "null"],
+                "description": "Stripe's subscription status"
+              },
+              "trialEndsAt": {
+                "type": ["string", "null"],
+                "format": "date-time"
+              }
+            },
+            "required": ["kind", "id", "name", "status", "trialEndsAt"]
+          },
+          "seats": {
+            "type": "object",
+            "properties": {
+              "active": {
+                "type": "integer"
+              },
+              "billed": {
+                "type": ["integer", "null"]
+              },
+              "perSeatUsd": {
+                "type": ["number", "null"]
+              },
+              "monthlyTotalUsd": {
+                "type": ["number", "null"],
+                "description": "The next invoice, before overage"
+              }
+            },
+            "required": ["active", "billed", "perSeatUsd", "monthlyTotalUsd"]
+          },
+          "period": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": ["start", "end"]
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "allowanceHours": {
+                "type": "number"
+              },
+              "usedHours": {
+                "type": "number"
+              },
+              "overageHours": {
+                "type": "number"
+              },
+              "overageUsd": {
+                "type": "number",
+                "description": "What the overage comes to so far"
+              },
+              "stopped": {
+                "type": ["string", "null"],
+                "enum": ["trial", "allowance", "ceiling", "inactive", "none", null],
+                "description": "What stops new work now, if anything"
+              }
+            },
+            "required": ["allowanceHours", "usedHours", "overageHours", "overageUsd", "stopped"]
+          },
+          "overage": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "#/components/schemas/OveragePolicy"
+              },
+              "usdPerHour": {
+                "type": "number"
+              },
+              "ceilingUsd": {
+                "type": "number"
+              },
+              "ceilingIsDefault": {
+                "type": "boolean",
+                "description": "The monthly seat total"
+              }
+            },
+            "required": ["policy", "usdPerHour", "ceilingUsd", "ceilingIsDefault"]
+          },
+          "me": {
+            "$ref": "#/components/schemas/MemberUsage"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberUsage"
+            },
+            "description": "Every member for owners and admins; the caller alone otherwise"
+          },
+          "activity": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "activity": {
+                  "type": "string"
+                },
+                "fromPlan": {
+                  "type": ["string", "null"]
+                },
+                "toPlan": {
+                  "type": ["string", "null"]
+                },
+                "amountTotal": {
+                  "type": ["number", "null"]
+                },
+                "currency": {
+                  "type": ["string", "null"]
+                },
+                "occurredAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "activity",
+                "fromPlan",
+                "toPlan",
+                "amountTotal",
+                "currency",
+                "occurredAt"
+              ]
+            }
+          },
+          "catalog": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/components/schemas/BillingPlanId"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "perSeatUsd": {
+                  "type": "number"
+                },
+                "minimumSeats": {
+                  "type": "integer"
+                },
+                "hoursPerSeat": {
+                  "type": "number"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "monthlyTotalUsd": {
+                  "type": "number",
+                  "description": "For the active members now"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "perSeatUsd",
+                "minimumSeats",
+                "hoursPerSeat",
+                "summary",
+                "monthlyTotalUsd"
+              ]
+            }
+          },
+          "trial": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "integer"
+              },
+              "hours": {
+                "type": "number"
+              },
+              "available": {
+                "type": "boolean"
+              }
+            },
+            "required": ["days", "hours", "available"]
+          },
+          "canManage": {
+            "type": "boolean"
+          },
+          "stripe": {
+            "type": "boolean",
+            "description": "Checkout and the portal work on this server"
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "False only on a development server"
+          }
+        },
+        "required": [
+          "plan",
+          "seats",
+          "period",
+          "usage",
+          "overage",
+          "me",
+          "members",
+          "activity",
+          "catalog",
+          "trial",
+          "canManage",
+          "stripe",
+          "enforced"
+        ]
+      },
+      "BillingPlanId": {
+        "type": ["string", "null"],
+        "enum": ["pro", "team", null]
+      },
+      "OveragePolicy": {
+        "type": "string",
+        "enum": ["stop", "allow"]
+      },
+      "MemberUsage": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "usedHours": {
+            "type": "number"
+          },
+          "capHours": {
+            "type": ["number", "null"],
+            "description": "Set by an owner or admin"
+          },
+          "personalHours": {
+            "type": ["number", "null"],
+            "description": "Set by the member"
+          }
+        },
+        "required": ["userId", "name", "usedHours", "capHours", "personalHours"]
+      },
+      "BillingSettings": {
+        "type": "object",
+        "properties": {
+          "overagePolicy": {
+            "$ref": "#/components/schemas/OveragePolicy"
+          },
+          "ceilingUsd": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 100000
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemberCap": {
+        "type": "object",
+        "properties": {
+          "capHours": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 100000
+          }
+        },
+        "required": ["capHours"],
+        "additionalProperties": false
+      },
+      "PersonalLimit": {
+        "type": "object",
+        "properties": {
+          "personalHours": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 100000
+          }
+        },
+        "required": ["personalHours"],
+        "additionalProperties": false
+      },
+      "BillingCheckoutResult": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BillingCheckout": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/BillingPlanId"
+          },
+          "overagePolicy": {
+            "$ref": "#/components/schemas/OveragePolicy"
+          }
+        },
+        "required": ["plan"],
+        "additionalProperties": false
+      },
+      "BillingPortal": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": ["url"]
       }
     },
     "parameters": {}
@@ -1355,6 +1688,442 @@
           },
           "404": {
             "description": "Used, expired, revoked, or for another address",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing": {
+      "get": {
+        "tags": ["billing"],
+        "summary": "The organization's plan, this period's usage and the spending limits",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Billing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Billing"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/settings": {
+      "patch": {
+        "tags": ["billing"],
+        "summary": "Set what happens past the allowance, and the spending limit on overage",
+        "description": "`ceilingUsd` null goes back to the default, the monthly seat total. Takes effect for new work.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Billing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Billing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid settings",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/members/{id}/cap": {
+      "put": {
+        "tags": ["billing"],
+        "summary": "Cap a member's computer hours a period",
+        "description": "null removes the cap. A personal limit above a new cap counts as the cap.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberCap"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid hours",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such member",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/limit": {
+      "put": {
+        "tags": ["billing"],
+        "summary": "Set your own limit on computer hours a period",
+        "description": "null removes it. Never above the cap an owner or admin set (400 `ABOVE_MEMBER_CAP`).",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalLimit"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "You",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid hours, or above your cap",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/checkout": {
+      "post": {
+        "tags": ["billing"],
+        "summary": "Start a trial or a plan, or change the plan",
+        "description": "Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once, prorated, and a trial ends now (`changed`). The overage policy chosen here is saved first.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingCheckout"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Go to `url`, or the plan changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingCheckoutResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Stripe did not answer as expected",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Payments are not set up on this server (`BILLING_NOT_CONFIGURED`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/portal": {
+      "post": {
+        "tags": ["billing"],
+        "summary": "Stripe's billing portal: cards, invoices, cancelling",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Go to `url`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingPortal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No payment details yet (`NO_BILLING_ACCOUNT`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Payments are not set up on this server (`BILLING_NOT_CONFIGURED`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/webhook": {
+      "post": {
+        "tags": ["billing"],
+        "summary": "Stripe's webhook",
+        "description": "Signature checked on the raw body (`Stripe-Signature`). The only place a purchase is recorded; a repeated event changes nothing.",
+        "responses": {
+          "200": {
+            "description": "Received",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "received": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["received"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No signature, or a wrong one",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The webhook is not set up on this server",
             "content": {
               "application/problem+json": {
                 "schema": {
