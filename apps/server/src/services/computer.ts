@@ -742,7 +742,8 @@ export function provisionHandler(deps: AppDeps): JobHandler<ProvisionJob> {
 /**
  * At worker start (in every organization's scope): queues the provisioning
  * job again for each computer a job was making or starting, since an
- * in-process queue lost it and a crashed worker may have. A job that is in
+ * in-process queue lost it and a crashed worker may have, and for each one a
+ * stop cut short left `stopping`. A job that is in
  * fact still queued finds the row `running` when it ends and does nothing.
  */
 export async function recoverProvisioning(deps: AppDeps): Promise<number> {
@@ -754,7 +755,10 @@ export async function recoverProvisioning(deps: AppDeps): Promise<number> {
     .where(
       and(
         eq(schema.computers.provider, machines.name),
-        inArray(schema.computers.status, ['creating', 'starting', 'updating']),
+        // `stopping` too: a start waits on it (BUSY) and, unlike a Docker
+        // computer's, never takes it over, while the idle sweep skips Sprites,
+        // so a stop cut short would leave the computer unusable for good.
+        inArray(schema.computers.status, ['creating', 'starting', 'updating', 'stopping']),
       ),
     );
   for (const row of rows) await queueProvision(deps, row, SYSTEM_ACTOR);

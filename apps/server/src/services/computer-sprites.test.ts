@@ -409,4 +409,17 @@ describe('Sprite provisioning off the request path', () => {
     // Nothing to recover once it runs.
     expect(await inEveryOrganization(t.deps, () => recoverProvisioning(t.deps))).toBe(0);
   });
+
+  it('starts again after a restart cut a stop short', async () => {
+    // A stop (a restart, a reset) died between `stopping` and `stopped`. A
+    // start only waits on `stopping`, and the idle sweep skips Sprites.
+    await t.db
+      .update(schema.computers)
+      .set({ status: 'stopping' })
+      .where(eq(schema.computers.ownerId, ownerId));
+    expect((await start()).status).toBe(202);
+    expect(await inEveryOrganization(t.deps, () => recoverProvisioning(t.deps))).toBe(1);
+    await until(async () => expect((await row()).status).toBe('running'));
+    expect((await start()).status).toBe(200);
+  });
 });
