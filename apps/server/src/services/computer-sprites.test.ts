@@ -1,7 +1,7 @@
 import { PROVISION_VERSION_FILE, spriteName } from '@openbots/computer';
 import { EVENTS_CHANNEL, type WsEvent } from '@openbots/shared';
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/client.js';
 import { encryptSecret, keyringFromConfig } from '../secrets.js';
 import { createTestApp, type TestApp } from '../test-app.js';
@@ -9,12 +9,14 @@ import { useTestSprites, type TestSprites } from '../test-computer.js';
 import { inEveryOrganization } from '../workers.js';
 import {
   beginComputerUse,
+  computerProvider,
   computerServices,
   computerUseScope,
   COMPUTERS_QUEUE,
   destroyComputer,
   ensureScreen,
   agentFor,
+  provisionComputer,
   provisionHandler,
   provisionTimings,
   recoverProvisioning,
@@ -421,5 +423,111 @@ describe('Sprite provisioning off the request path', () => {
     expect(await inEveryOrganization(t.deps, () => recoverProvisioning(t.deps))).toBe(1);
     await until(async () => expect((await row()).status).toBe('running'));
     expect((await start()).status).toBe(200);
+  });
+
+  describe('when queueing the job goes wrong', () => {
+    const queue = () => t.deps.infra.queue<ProvisionJob>(COMPUTERS_QUEUE);
+    const stopped = () =>
+      t.db
+        .update(schema.computers)
+        .set({ status: 'stopped' })
+        .where(eq(schema.computers.ownerId, ownerId));
+    /** How many times a job really provisioned: each one starts the machine once. */
+    const provisions = () => vi.spyOn(computerProvider(t.deps)!, 'start');
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it('gives the row back when the queue refuses, so the next start queues again', async () => {
+      await stopped();
+      const starts = provisions();
+      const enqueue = vi.spyOn(queue(), 'enqueue').mockRejectedValueOnce(new Error('queue down'));
+
+      const refused = await start();
+      expect(refused.status).toBe(503);
+      expect(await refused.json()).toMatchObject({ code: 'COMPUTER_UNAVAILABLE' });
+      // Not left `starting` for a job that was never queued.
+      expect(await row()).toMatchObject({ status: 'stopped' });
+      expect((await row()).spec).not.toHaveProperty('provision');
+
+      // The queue is back: the same click now queues the job, once.
+      expect([200, 202]).toContain((await start()).status);
+      await until(async () => expect((await row()).status).toBe('running'));
+      expect(enqueue).toHaveBeenCalledTimes(2);
+      expect(starts).toHaveBeenCalledTimes(1);
+      expect((await row()).spec).not.toHaveProperty('provision');
+    });
+
+    it('provisions once when the queue took the job but its answer was lost', async () => {
+      await stopped();
+      const starts = provisions();
+      const real = queue().enqueue.bind(queue());
+      // The job is queued, then the caller is told it was not.
+      vi.spyOn(queue(), 'enqueue').mockImplementationOnce(async (...args) => {
+        await real(...args);
+        throw new Error('connection reset');
+      });
+
+      expect((await start()).status).toBe(503);
+      expect([200, 202]).toContain((await start()).status);
+      await until(async () => expect((await row()).status).toBe('running'));
+      // Whichever of the two jobs got to the row first, one provisioned it.
+      expect(starts).toHaveBeenCalledTimes(1);
+      expect((await row()).spec).not.toHaveProperty('provision');
+    });
+
+    it("a job that is not the row's attempt does nothing", async () => {
+      const attempt = crypto.randomUUID();
+      await t.db
+        .update(schema.computers)
+        .set({ status: 'starting', spec: { provision: { attempt, at: new Date().toISOString() } } })
+        .where(eq(schema.computers.ownerId, ownerId));
+      const computer = await row();
+      const starts = provisions();
+      const job = (attempt: string) =>
+        inEveryOrganization(t.deps, async () => {
+          await provisionComputer(t.deps, {
+            computerId: computer.id,
+            workspaceId: computer.workspaceId,
+            by: { type: 'user', id: ownerId },
+            attempt,
+          });
+          return 1;
+        });
+
+      // The job a refused enqueue left behind, or one a retry replaced.
+      await job(crypto.randomUUID());
+      expect(starts).not.toHaveBeenCalled();
+      expect((await row()).status).toBe('starting');
+
+      await job(attempt);
+      expect(starts).toHaveBeenCalledTimes(1);
+      expect((await row()).status).toBe('running');
+    });
+
+    it('queues again for a row whose job was lost long ago, and not for one still waiting', async () => {
+      const waiting = (at: Date) =>
+        t.db
+          .update(schema.computers)
+          .set({
+            status: 'starting',
+            spec: { provision: { attempt: crypto.randomUUID(), at: at.toISOString() } },
+          })
+          .where(eq(schema.computers.ownerId, ownerId));
+      const enqueue = vi.spyOn(queue(), 'enqueue');
+
+      // Queued a moment ago: the start waits on that job and queues nothing.
+      await waiting(new Date());
+      expect((await start()).status).toBe(202);
+      expect(enqueue).not.toHaveBeenCalled();
+      expect((await row()).status).toBe('starting');
+
+      // Queued longer ago than any provisioning takes: its job is gone.
+      const starts = provisions();
+      await waiting(new Date(Date.now() - provisionTimings.staleMs - 1));
+      expect([200, 202]).toContain((await start()).status);
+      await until(async () => expect((await row()).status).toBe('running'));
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(starts).toHaveBeenCalledTimes(1);
+    });
   });
 });
