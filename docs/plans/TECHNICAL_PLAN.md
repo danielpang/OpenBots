@@ -131,7 +131,12 @@ All tables carry `workspace_id`, the organization (one implicit organization on 
 | --- | --- | --- |
 | `computers` | id, owner_id (unique), provider (`docker`, `remote`), spec jsonb, status, container_id, agent_url, agent_token bytea, volume_name, always_on, idle_timeout_min, last_used_at | One per account (K1) |
 | `bot_screens` | bot_id, computer_id, display_number, browser_profile_dir, cdp_port, status, controlled_by_user_id, controlled_since | One screen per Bot (K2) with its own Chromium profile in `browser_profile_dir`; cookies sync between profiles through the control agent's shared store (K1, section 9.6); `controlled_by_user_id` set during takeover (K3) |
-| `computer_usage_intervals` | computer_id, owner_id, provider, reason, started_at, seen_at, ended_at, seconds | When a computer was in use, for usage billing later (section 9.5) |
+| `computer_usage_intervals` | computer_id, owner_id, provider, reason, started_at, seen_at, ended_at, seconds | When a computer was in use, read by usage billing (sections 9.5, 21.10) |
+| `organization_billing` | plan, status, stripe_customer_id, stripe_subscription_id, billed_seats, overage_policy, ceiling_usd, period_anchor, trial_ends_at, last_event_at | The managed service's plan per organization and its spending settings (section 21.10) |
+| `billing_events` | stripe_event_id (unique), type, activity, from_plan, to_plan, amount_total, currency, subscription_id, invoice_id, occurred_at | What happened to a subscription, one row per Stripe event (section 21.10) |
+| `billing_periods` | period_start, period_end, plan, base_seats, paid_seats, allowance_seconds, used_seconds, reported_units, report_seq, notified_75, notified_90, notified_stopped, overage_notified_usd | Each billing period's fixed allowance, usage, overage told to Stripe and warnings sent (section 21.10) |
+| `billing_usage` | interval_id, period_start (unique together), user_id, user_name, seconds, started_at, ended_at | The usage ledger: closed intervals split by period, with who used them (section 21.10) |
+| `billing_member_limits` | user_id, cap_hours, personal_hours | A member's computer hour cap set by owners and admins, and their own limit (section 21.10) |
 
 ### 4.6 Prompts: Skills and Routines (S1 to S3, R1 to R5)
 

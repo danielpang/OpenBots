@@ -48,6 +48,9 @@ import type { Db } from './client.js';
 //   openbots_github_installation_workspaces() (drizzle/0029; 0030 holds
 //   openbots_system to the columns it reads); the App's webhook delivery
 //   then works in each.
+// - `billingCustomerWorkspace`: the organization of a Stripe customer,
+//   through openbots_billing_customer_workspace() (drizzle/0045), for the
+//   managed build's Stripe webhook, which then works in it.
 // - Jobs carry the organization that queued them and run in it
 //   (infra/index.ts); realtime events carry it too, and the gateway and the
 //   outbound fan-out work in it.
@@ -279,6 +282,18 @@ export async function githubInstallationWorkspaces(
     sql`select openbots_github_installation_workspaces(${installationId}) as id`,
   );
   return rowsOf<{ id: string }>(result).map((r) => r.id);
+}
+
+/**
+ * The organization of a Stripe customer (openbots_billing_customer_workspace(),
+ * drizzle/0045): Stripe's webhook names only the customer, so the managed
+ * build's billing asks this first and then works in that organization.
+ */
+export async function billingCustomerWorkspace(db: Db, customerId: string): Promise<string | null> {
+  const result = await db.execute<{ id: string | null }>(
+    sql`select openbots_billing_customer_workspace(${customerId}) as id`,
+  );
+  return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
 }
 
 /** postgres.js answers an array of rows, PGlite `{ rows }`. */
