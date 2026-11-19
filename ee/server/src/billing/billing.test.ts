@@ -613,6 +613,37 @@ describe('billing', () => {
         ).toBe(204);
         expect(updates().at(-1)).toEqual([2, 'none']);
       });
+
+      it('grants the hours of Team’s minimum seat once, when Pro becomes Team mid-period', async () => {
+        const hal = await b.founder('hal@example.com', 'Hal Co');
+        await b.onPlan(hal.org, {
+          plan: 'pro',
+          status: 'active',
+          stripeCustomerId: 'cus_hal',
+          stripeSubscriptionId: 'sub_hal',
+          billedSeats: 1,
+          periodAnchor: ANCHOR,
+        });
+        b.stripe.subscriptions.all.set(
+          'sub_hal',
+          subscription({ id: 'sub_hal', customer: 'cus_hal', seats: 1, periodStart: ANCHOR }),
+        );
+        await json(b.call(hal.cookie, 'GET', '/billing'));
+        expect(
+          await json(b.call(hal.cookie, 'POST', '/billing/checkout', { plan: 'team' })),
+        ).toEqual({ changed: true });
+        await json(b.call(hal.cookie, 'GET', '/billing'));
+        // Team bills two seats from now: the second one's share of the period.
+        expect(await period(hal.org)).toMatchObject({ paidSeats: 2, allowanceSeconds: 135 * H });
+        // A second member fills the seat already paid; a third is one new seat.
+        await b.invite(hal.cookie, 'fay@example.com');
+        await b.invite(hal.cookie, 'gus@example.com');
+        const seats = b.stripe.calls
+          .filter((c) => c.op === 'subscriptions.update')
+          .map((c) => (c.params as { items: { quantity?: number }[] }).items[0]!.quantity);
+        expect(seats).toEqual([2, 3]);
+        expect((await period(hal.org))?.allowanceSeconds).toBe(170 * H);
+      });
     });
   });
 });

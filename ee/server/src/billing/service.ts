@@ -141,7 +141,12 @@ export function createBilling(config: BillingConfig) {
                 ),
               ),
             };
-      await raiseAllowance(db, workspaceId, period.start, { ...prorated, plan });
+      // The target counts the plan's minimum seats (Team's two), and Stripe
+      // bills them from now: they are paid for this period, so a later seat
+      // sync does not grant their hours a second time.
+      const paidSeats =
+        'plan' in standing ? billableSeats(standing.plan, row.paidSeats) : undefined;
+      await raiseAllowance(db, workspaceId, period.start, { ...prorated, plan, paidSeats });
       ({ period, row } = await periodRowAt(db, billing, at));
     }
     const seats = await seatsOf(db, billing);
