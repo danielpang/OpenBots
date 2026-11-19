@@ -108,6 +108,8 @@ export async function subscriptionModelFor(
   const account = accounts.find((a) => a.agent === connection.agent)!;
   return subscriptionModel(
     async () => {
+      // Not asked of the managed build on purpose (computer-admission.ts):
+      // a member at a limit must still be able to set up their models.
       const { computer } = await startComputer(deps, owner);
       return agentFor(deps, computer);
     },

@@ -5,11 +5,13 @@ import { containerName, createDockerProvider, type ComputerProvider } from '@ope
 import { mockDocker, startFakeAgent, type FakeAgent } from '@openbots/computer/testing';
 import { TEST_STDIO_SERVER } from '@openbots/mcp/testing';
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { connectorToolsFor } from '../builtins/index.js';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { createTestApp, type TestApp } from '../test-app.js';
-import { setComputerProvider, sweepIdleComputers } from './computer.js';
+import type { ComputerWorkRefusal, ComputerWorkRequest } from '../extensions.js';
+import { getComputer, setComputerProvider, sweepIdleComputers } from './computer.js';
 import { NO_COMPUTER, STDIO_TOUCH_MS } from './computer-stdio.js';
 import { closeMcpManager, mcpManager } from './connectors.js';
 import { inEveryOrganization } from '../workers.js';
@@ -330,6 +332,112 @@ describe('stdio connectors in the computer (managed)', () => {
     } finally {
       setComputerProvider(t.ownerDeps, computers.provider);
     }
+  });
+});
+
+describe('stdio connectors and computer admission (managed)', () => {
+  let t: TestApp;
+  let computers: ReturnType<typeof useComputers>;
+  let dana: string;
+  let owner: { id: string; workspaceId: string };
+  const asked: ComputerWorkRequest[] = [];
+  let answer: (request: ComputerWorkRequest) => ComputerWorkRefusal | null = () => null;
+  const refusal: ComputerWorkRefusal = {
+    code: 'PLAN_ALLOWANCE_REACHED',
+    message:
+      'This organization has used the 100 computer hours its plan includes this period. An owner or admin can allow overage under Settings, Billing.',
+  };
+
+  beforeAll(async () => {
+    t = await createTestApp(
+      { OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_SIGNUP_MODE: 'open' },
+      {
+        extensions: {
+          admitComputerWork: (request) => {
+            asked.push(request);
+            return answer(request);
+          },
+        },
+      },
+    );
+    computers = useComputers(t.ownerDeps);
+    dana = (await t.signUp('dana@example.com')).cookie!;
+    owner = { id: await t.userId('dana@example.com'), workspaceId: await t.defaultOrganization() };
+  });
+  afterAll(async () => {
+    await closeMcpManager(t.ownerDeps);
+    await computers.close();
+    await t.close();
+  });
+  beforeEach(() => {
+    asked.length = 0;
+    answer = () => null;
+  });
+
+  const call = (method: string, path: string, body?: unknown) =>
+    t.app.request(`/api/v1${path}`, {
+      method,
+      headers: {
+        cookie: dana,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const create = async (root: string) => {
+    const res = await call('POST', '/connectors', { catalogId: 'filesystem', params: { root } });
+    expect(res.status, await res.clone().text()).toBe(201);
+    return (await res.json()) as Connector;
+  };
+  const test = async (id: string) => {
+    const res = await call('POST', `/connectors/${id}/test`);
+    expect(res.status, await res.clone().text()).toBe(200);
+    return ((await res.json()) as { connector: Connector }).connector;
+  };
+  const computer = () => t.inOrganization(() => getComputer(t.deps, owner));
+
+  let first: Connector;
+
+  it('refused: the connector does not start, says why, and a run goes on without it', async () => {
+    answer = () => refusal;
+    first = await create('notes');
+    expect(await test(first.id)).toMatchObject({ status: 'error', lastError: refusal.message });
+    expect(asked).toEqual([
+      { workspaceId: owner.workspaceId, ownerId: owner.id, kind: 'connector' },
+    ]);
+    expect(await computer()).toBeNull();
+    expect(computers.agents.size).toBe(0);
+
+    // A run loads its connectors: one not yet started is tried, refused, and
+    // recorded, and the run carries on with the rest.
+    const bot = await call('POST', '/bots', { name: 'Notes' });
+    const botId = ((await bot.json()) as { id: string }).id;
+    const untested = await create('drafts');
+    const tools = await t.inOrganization(() => connectorToolsFor(t.deps, botId));
+    expect(tools.entries).toEqual([]);
+    const [row] = await t.db
+      .select()
+      .from(schema.connectors)
+      .where(eq(schema.connectors.id, untested.id));
+    expect(row).toMatchObject({ status: 'error', lastError: refusal.message });
+    expect(await computer()).toBeNull();
+  });
+
+  it('admitted: starts the computer and the server', async () => {
+    expect(await test(first.id)).toMatchObject({ status: 'ok', lastError: null });
+    expect(asked.map((r) => r.kind)).toEqual(['connector']);
+    expect((await computer())?.status).toBe('running');
+  });
+
+  it('on a computer already running: not asked, and a running server goes on', async () => {
+    answer = () => refusal;
+    const echo = await t.inOrganization(() =>
+      mcpManager(t.ownerDeps).callTool(first.id, 'echo', { text: 'still working' }),
+    );
+    expect(textOf(echo)).toBe('still working');
+    // A new connector on the running computer starts too: it starts no computer.
+    const second = await create('more');
+    expect(await test(second.id)).toMatchObject({ status: 'ok', lastError: null });
+    expect(asked).toEqual([]);
   });
 });
 

@@ -42,6 +42,10 @@ export interface ResetCheck {
   results: RepoRescueResult[];
   unsaved: { fullName: string; branch: string; note: string }[];
   runningSessions: { id: string; botId: string; repoFullName: string }[];
+  /** Set when the check failed outright: what it saved is unknown. */
+  error?: string | null;
+  /** Set with `error` when the computer could not be started for the check (a plan limit, say). */
+  errorCode?: string | null;
 }
 
 /** The server's 409 code when the reset's request id has no finished check. */

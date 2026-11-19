@@ -18,9 +18,10 @@ import {
   getComputer,
   type ComputerRow,
 } from './computer.js';
+import { COMPUTER_REFUSED_STATUS } from './computer-admission.js';
 import {
+  finishedRescue,
   RESCUE_CHANNEL,
-  rescueStatus,
   startRescue,
   unsavedWork,
   type RescueMessage,
@@ -39,7 +40,9 @@ import {
 // checkpoint taken first where the provider keeps one (a Sprite reset that
 // keeps the sign-ins), so an operator can restore a mistaken reset. The next start makes
 // a fresh computer, and its reconcile clones the `keep_cloned` repositories
-// again.
+// again. When the managed build would not start a stopped computer for the
+// rescue (computer-admission.ts), nothing was checked: the status says so
+// (`errorCode`) and the reset answers 402 with that code, removing nothing.
 //
 // A prepare reaches every process over the bus, as the rescue's results do,
 // so the process that takes the reset need not be the one that took the
@@ -70,6 +73,8 @@ interface PreparedMessage extends Prepared {
 interface Rescued {
   results: RepoRescueResult[];
   error: string | null;
+  /** The managed build's code when it would not start the computer for the rescue. */
+  refused: string | null;
   at: number;
 }
 
@@ -106,6 +111,7 @@ function listen(deps: Pick<AppDeps, 'infra'>) {
         rescued.set(msg.requestId, {
           results: results.data,
           error: msg.error ?? null,
+          refused: typeof msg.refused === 'string' ? msg.refused : null,
           at: Date.now(),
         });
       }),
@@ -176,12 +182,8 @@ function preparedFor(owner: Owner, requestId: string): Prepared {
 function rescueOf(owner: Owner, requestId: string): Rescued | null {
   const known = rescued.get(requestId);
   if (known) return known;
-  try {
-    const status = rescueStatus(owner, requestId);
-    return status.status === 'done' ? { results: status.results, error: null, at: 0 } : null;
-  } catch {
-    return null;
-  }
+  const done = finishedRescue(owner, requestId);
+  return done ? { ...done, at: 0 } : null;
 }
 
 /** `GET /computer/reset/{requestId}`: the rescue's progress, what it could not push, and the live sessions. */
@@ -202,6 +204,7 @@ export async function resetStatus(deps: AppDeps, owner: Owner, requestId: string
       note: r.note,
     })),
     error: done?.error ?? null,
+    errorCode: done?.refused ?? null,
     runningSessions: sessions.map((s) => ({
       id: s.id,
       botId: s.botId,
@@ -229,6 +232,8 @@ export interface ResetOptions {
  * `CODING_SESSION_RUNNING`) while a coding session runs that the owner was
  * not shown. A rescue that failed outright does not block the reset: the
  * status said so, and a computer that will not start is when a reset helps.
+ * A rescue the managed build refused (402 with its code) does: the computer
+ * works, nothing on it was checked, and a reset would lose what is there.
  */
 export async function resetComputer(
   deps: AppDeps,
@@ -249,6 +254,17 @@ export async function resetComputer(
   }
   const done = rescueOf(owner, requestId);
   if (!done) throw notPrepared('The rescue before the reset is still running');
+  if (done.refused) {
+    // The computer was not started, so nothing was checked for unpushed
+    // work: the home is kept until a rescue can run. The prepare stays, so
+    // nothing here is used up; once the organization may start the
+    // computer again, preparing again rescues and then resets.
+    throw new DomainError(
+      COMPUTER_REFUSED_STATUS,
+      done.refused,
+      `Unpushed work could not be checked, so the computer was not reset. ${done.error ?? ''}`.trim(),
+    );
+  }
   const shown = new Set(record.sessionIds);
   const unseen = (await liveSessions(deps, owner)).filter((s) => !shown.has(s.id));
   if (unseen.length) {

@@ -114,6 +114,10 @@ const ResetStatusSchema = z
       .string()
       .nullable()
       .openapi({ description: 'Set when the rescue failed outright: what it saved is unknown' }),
+    errorCode: z.string().nullable().openapi({
+      description:
+        'Set with `error` when the managed service would not start the computer for the rescue (its stable code, such as `PLAN_ALLOWANCE_REACHED`): nothing was checked, and POST /computer/reset answers 402 with this code until a rescue can run',
+    }),
     runningSessions: z
       .array(
         z.object({
@@ -467,7 +471,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again. A rescue the managed service refused to start the computer for (`errorCode` on the status) refuses it too (402 with that code): nothing on the computer was checked, so nothing is removed.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -492,6 +496,9 @@ export const computerRoutes = createRouter()
       responses: {
         202: computerResponse('Reset: stopped with no machine; the next start makes a fresh one'),
         ...authProblems,
+        402: problemResponse(
+          'The rescue could not run because the managed service would not start the computer (the code says why): nothing was reset, and the prepare stays',
+        ),
         404: problemResponse('The account has no computer yet'),
         409: problemResponse(
           'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), or a computer that cannot be reset from here (`RESET_UNSUPPORTED`)',

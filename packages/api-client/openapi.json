@@ -5203,6 +5203,10 @@
             "type": ["string", "null"],
             "description": "Set when the rescue failed outright: what it saved is unknown"
           },
+          "errorCode": {
+            "type": ["string", "null"],
+            "description": "Set with `error` when the managed service would not start the computer for the rescue (its stable code, such as `PLAN_ALLOWANCE_REACHED`): nothing was checked, and POST /computer/reset answers 402 with this code until a rescue can run"
+          },
           "runningSessions": {
             "type": "array",
             "items": {
@@ -5248,7 +5252,15 @@
             "description": "Confirm the reset before this"
           }
         },
-        "required": ["status", "results", "unsaved", "error", "runningSessions", "expiresAt"]
+        "required": [
+          "status",
+          "results",
+          "unsaved",
+          "error",
+          "errorCode",
+          "runningSessions",
+          "expiresAt"
+        ]
       },
       "ComputerReset": {
         "type": "object",
@@ -14719,7 +14731,7 @@
       "post": {
         "tags": ["computer"],
         "summary": "Reset the computer: a fresh home, after the rescue",
-        "description": "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "description": "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again. A rescue the managed service refused to start the computer for (`errorCode` on the status) refuses it too (402 with that code): nothing on the computer was checked, so nothing is removed.",
         "security": [
           {
             "session": []
@@ -14751,6 +14763,16 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The rescue could not run because the managed service would not start the computer (the code says why): nothing was reset, and the prepare stays",
             "content": {
               "application/problem+json": {
                 "schema": {

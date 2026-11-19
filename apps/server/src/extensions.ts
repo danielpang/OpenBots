@@ -36,14 +36,18 @@ export interface ComputerUsageEvent {
   seconds: number;
 }
 
-/** What new computer work is: a Bot's run, a coding session, or the member's own use. */
-export type ComputerWorkKind = 'run' | 'coding_session' | 'manual';
+/**
+ * What new computer work is: a Bot's run, a coding session, the member's own
+ * use, a stdio connector's server, or a repository's checkout or rescue.
+ */
+export type ComputerWorkKind = 'run' | 'coding_session' | 'manual' | 'connector' | 'repository';
 
 /**
  * New work that would use a member's computer (services/computer-admission.ts),
  * asked before it begins: a run's first computer call (and, with
- * `continuingSince`, each later one), a coding session's start, and the
- * member's own start, wake or terminal.
+ * `continuingSince`, each later one), a coding session's start, the
+ * member's own start, wake or terminal, and a stdio connector, checkout or
+ * rescue that would start the computer.
  */
 export interface ComputerWorkRequest {
   workspaceId: string;

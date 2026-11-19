@@ -91,6 +91,9 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   });
 
   const done = check.data?.status === 'done' ? check.data : null;
+  // The computer was not started for the check, so nothing was checked: the
+  // server refuses the reset until a check can run.
+  const refused = !!done?.errorCode;
   const checkError = prepare.error ?? check.error;
   const stale = reset.error instanceof ApiError && reset.error.code === RESET_NOT_PREPARED;
   const checkAgain = () => {
@@ -131,14 +134,14 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
         <Button variant="outline" onClick={onClose}>
           Cancel
         </Button>
-        {(checkError || stale) && (
+        {(checkError || stale || refused) && (
           <Button variant="outline" disabled={prepare.isPending} onClick={checkAgain}>
             Check again
           </Button>
         )}
         <Button
           variant="destructive"
-          disabled={!done || stale || reset.isPending}
+          disabled={!done || stale || refused || reset.isPending}
           onClick={() => reset.mutate()}
         >
           {reset.isPending ? 'Resetting…' : 'Reset'}
@@ -158,7 +161,14 @@ function CheckResults({ check }: { check: ResetCheck }) {
   const sessions = check.runningSessions;
   return (
     <div className="flex flex-col gap-3">
-      {pushed.length === 0 && check.unsaved.length === 0 ? (
+      {check.error ? (
+        <p className="text-destructive" role="alert" data-reset-error>
+          {check.errorCode
+            ? 'Unpushed work could not be checked, so the computer cannot be reset yet. '
+            : 'The check for unpushed work failed, so work not shown here may be lost. '}
+          {check.error}
+        </p>
+      ) : pushed.length === 0 && check.unsaved.length === 0 ? (
         <p data-reset-clean>Nothing needed saving. Every repository was already pushed.</p>
       ) : null}
       {pushed.length > 0 && (

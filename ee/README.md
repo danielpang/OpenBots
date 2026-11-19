@@ -61,6 +61,11 @@ limit (by default the monthly seat total). A change of plan that raises the
 price is charged prorated now; one that lowers it gives no credit, the lower
 price starts at renewal, and the hours already granted stay until then, as
 for a removed seat. Going back up within the same period costs nothing more.
+New computer work is checked before it starts: runs, coding sessions, the
+member's own start, and a stdio connector, a repository checkout or a rescue
+that would start a stopped computer. A coding agent's sign-in, model
+connections and coding attachments are not checked, so a member at a limit
+can still sign in and fix their setup.
 
 | Variable                                | Default                   | What                                                                                                                                                    |
 | --------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

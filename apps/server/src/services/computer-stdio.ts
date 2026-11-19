@@ -1,6 +1,7 @@
 import type { McpStdioLaunch } from '@openbots/computer';
 import { RestartSkipped, type ComputerStdioSpec } from '@openbots/mcp';
 import type { AppDeps } from '../context.js';
+import { computerRefused, computerWorkRefusal } from './computer-admission.js';
 import {
   agentFor,
   computerAvailable,
@@ -22,7 +23,11 @@ import {
 //
 // When there is no computer, or it does not start, the session fails with a
 // short message, which the manager stores as the connector's last error: it
-// never falls back to running the server on this host.
+// never falls back to running the server on this host. A start is new work
+// (computer-admission.ts): the managed build is asked first, and its refusal
+// fails the session the same way, with the refusal's words and its code. A
+// run only lists connectors from what is stored, so it goes on without that
+// one; a server on a computer already running is not asked.
 
 export const NO_COMPUTER =
   'This connector runs in your computer, and this server has no computer set up.';
@@ -68,6 +73,19 @@ async function computerFor(deps: AppDeps, owner: Owner, restart: boolean) {
     const computer = await getComputer(deps, owner);
     if (computer?.status !== 'running') throw new RestartSkipped('The computer is not running.');
     return computer;
+  }
+  if ((await getComputer(deps, owner))?.status !== 'running') {
+    const refusal = await computerWorkRefusal(deps, {
+      workspaceId: owner.workspaceId,
+      ownerId: owner.id,
+      kind: 'connector',
+    });
+    if (refusal) {
+      // A plain error, so the manager records it on the connector, as a start
+      // that failed is; the stable code rides along for whoever reads it.
+      const refused = computerRefused(refusal);
+      throw Object.assign(new Error(refused.message), { code: refused.code });
+    }
   }
   try {
     return (await startComputer(deps, owner)).computer;

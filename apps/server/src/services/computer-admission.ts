@@ -7,9 +7,18 @@ import type { ComputerWorkRefusal, ComputerWorkRequest } from '../extensions.js'
 // spending limits); a self-hosted server has no extension and every request
 // is admitted, exactly as before. It is asked where work begins: a run's
 // first computer call, a coding session's start, the member's own start,
-// wake or terminal. Work already under way is never asked about, so a
-// refusal only stops what has not started yet. A run's later calls are
-// asked with `continuingSince`, for a cap on the length of one run.
+// wake or terminal, and a stdio connector, a repository checkout or a rescue
+// that would start the computer (`connector`, `repository`). Work already
+// under way is never asked about, so a refusal only stops what has not
+// started yet. A run's later calls are asked with `continuingSince`, for a
+// cap on the length of one run.
+//
+// Deliberately not asked, so a member who has reached a limit can still
+// sign in and fix their setup (do not add a check to these): a coding
+// agent's sign-in, check and sign-out (coder-login-driver.ts,
+// coder-accounts.ts), a model connection through a subscription
+// (model-connections.ts), and staging a coding session's attachments
+// (coding-attachments.ts), whose session is asked when its runner takes it.
 
 /** The HTTP status of a refusal: the work needs something only billing can give. */
 export const COMPUTER_REFUSED_STATUS = 402;

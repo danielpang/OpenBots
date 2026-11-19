@@ -35,6 +35,8 @@ export async function stageCodingAttachments(deps: AppDeps, owner: Owner, ids: s
       'Attachments must be at most 20 MB each and 50 MB in total.',
     );
   }
+  // Not asked of the managed build on purpose (computer-admission.ts): the
+  // session these are for is asked when its runner takes it.
   const { computer } = await startComputer(deps, owner);
   const agent = agentFor(deps, computer);
   // A fresh unpredictable directory; neither uploaded names nor prompts choose paths.

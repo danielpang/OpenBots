@@ -1014,6 +1014,47 @@ describe('Reset computer', () => {
     click(button('Check again'));
     await until(() => posts('/api/v1/computer/reset/prepare').length === 2, 'a new check');
   });
+
+  it(
+    'says why nothing was checked when the computer could not start, and offers no reset',
+    { timeout: 15_000 },
+    async () => {
+      const handle = server.handle;
+      server.handle = async (request) => {
+        const { pathname } = new URL(request.url, 'http://localhost');
+        if (pathname === '/api/v1/computer/reset/prepare') {
+          return Response.json({ requestId: 'r1' }, { status: 202 });
+        }
+        if (pathname === '/api/v1/computer/reset/r1') {
+          return Response.json({
+            status: 'done',
+            results: [],
+            unsaved: [],
+            runningSessions: [],
+            error:
+              'This organization has used the 100 computer hours its plan includes this period.',
+            errorCode: 'PLAN_ALLOWANCE_REACHED',
+          });
+        }
+        if (pathname === '/api/v1/repos') return Response.json({ repos: [] });
+        return handle(request);
+      };
+      render(<ComputerPage />);
+      await until(() => !!button('Reset computer'), 'Reset computer');
+      click(button('Reset computer'));
+      await until(() => !!document.querySelector('[data-reset="checked"]'), 'the results');
+      const dialog = document.querySelector('[data-reset]')!;
+      expect(dialog.querySelector('[data-reset-error]')!.textContent).toBe(
+        'Unpushed work could not be checked, so the computer cannot be reset yet. This organization has used the 100 computer hours its plan includes this period.',
+      );
+      // Never the reassurance that everything was pushed.
+      expect(dialog.querySelector('[data-reset-clean]')).toBeNull();
+      expect(dialog.textContent).not.toMatch(/[–—]| - /);
+      expect(button('Reset')!.disabled).toBe(true);
+      click(button('Check again'));
+      await until(() => posts('/api/v1/computer/reset/prepare').length === 2, 'a new check');
+    },
+  );
 });
 
 describe('terminal attach (CA7, I15)', () => {

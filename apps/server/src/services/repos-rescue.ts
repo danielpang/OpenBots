@@ -9,10 +9,15 @@ import {
 import { and, eq, inArray, isNotNull, notInArray } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
-import { notFound } from '../errors.js';
+import { DomainError, notFound } from '../errors.js';
 import { SYSTEM_ACTOR } from './audit.js';
 import { enqueueCoderJob } from './coder-jobs.js';
 import { agentFor, startComputer } from './computer.js';
+import {
+  COMPUTER_REFUSED_STATUS,
+  computerRefused,
+  computerWorkRefusal,
+} from './computer-admission.js';
 import {
   assertRunnable,
   branchSlug,
@@ -33,7 +38,9 @@ import {
 // saves what would be lost with the computer's home to rescue branches and
 // pushes them as `runner`; the route asks, the job answers, and the results
 // reach every process over the bus. Unlike the other repository jobs it
-// starts the computer, since it needs it up to save anything.
+// starts the computer, since it needs it up to save anything, after asking
+// the managed build (computer-admission.ts): a refusal saves nothing and
+// says so (`refused`, the code), and the reset that asked waits on it.
 
 type Owner = { id: string; workspaceId: string };
 
@@ -74,6 +81,16 @@ export async function rescueRepos(
     .where(and(eq(schema.computers.id, computerId), eq(schema.computers.ownerId, ownerId)));
   if (!computer) return [];
   const owner = { id: computer.ownerId, workspaceId: computer.workspaceId };
+  if (computer.status !== 'running') {
+    // Starting it is new work (computer-admission.ts): refused, nothing is
+    // checked or saved, and the job says why with the refusal's code.
+    const refusal = await computerWorkRefusal(deps, {
+      workspaceId: owner.workspaceId,
+      ownerId: owner.id,
+      kind: 'repository',
+    });
+    if (refusal) throw computerRefused(refusal);
+  }
   const up =
     computer.status === 'running'
       ? computer
@@ -226,6 +243,8 @@ interface RescueRecord {
   status: 'running' | 'done';
   results: RepoRescueResult[];
   error?: string;
+  /** The managed build's code when it refused to start the computer for the rescue. */
+  refused?: string;
   at: number;
 }
 
@@ -235,6 +254,8 @@ export interface RescueMessage {
   workspaceId: string;
   results: RepoRescueResult[];
   error?: string;
+  /** The managed build's code when it refused to start the computer for the rescue. */
+  refused?: string;
 }
 
 const rescues = new Map<string, RescueRecord>();
@@ -259,6 +280,7 @@ function settleRescue(msg: RescueMessage) {
     status: 'done',
     results: msg.results,
     ...(msg.error ? { error: msg.error } : {}),
+    ...(msg.refused ? { refused: msg.refused } : {}),
     at: Date.now(),
   });
 }
@@ -310,6 +332,21 @@ export function rescueStatus(owner: Owner, requestId: string) {
   return { status: record.status, results: record.results };
 }
 
+/** A finished rescue as this process knows it, with why it failed if it did; null otherwise. */
+export function finishedRescue(owner: Owner, requestId: string) {
+  prune();
+  const record = rescues.get(requestId);
+  if (!record || record.ownerId !== owner.id || record.workspaceId !== owner.workspaceId) {
+    return null;
+  }
+  if (record.status !== 'done') return null;
+  return {
+    results: record.results,
+    error: record.error ?? null,
+    refused: record.refused ?? null,
+  };
+}
+
 /** The `rescue` job: runs it and tells every process the results. */
 export async function runRescueJob(
   deps: AppDeps,
@@ -317,11 +354,21 @@ export async function runRescueJob(
 ): Promise<void> {
   let results: RepoRescueResult[] = [];
   let error: string | undefined;
+  let refused: string | undefined;
   try {
     results = await rescueRepos(deps, job.ownerId, job.computerId);
   } catch (err) {
     error = errorText(err);
-    deps.logger.warn({ err, computerId: job.computerId }, 'repository rescue failed');
+    if (err instanceof DomainError && err.status === COMPUTER_REFUSED_STATUS) {
+      // Not a fault: the organization's plan or limits. Logged by code only.
+      refused = err.code;
+      deps.logger.info(
+        { code: err.code, computerId: job.computerId },
+        'repository rescue refused: the computer was not started',
+      );
+    } else {
+      deps.logger.warn({ err, computerId: job.computerId }, 'repository rescue failed');
+    }
   }
   const [computer] = await deps.db
     .select({ workspaceId: schema.computers.workspaceId })
@@ -333,6 +380,7 @@ export async function runRescueJob(
     workspaceId: computer?.workspaceId ?? rescues.get(job.requestId)?.workspaceId ?? '',
     results,
     ...(error ? { error } : {}),
+    ...(refused ? { refused } : {}),
   };
   settleRescue(msg);
   await deps.infra.bus.publish(RESCUE_CHANNEL, msg);
