@@ -472,6 +472,8 @@ importers:
         specifier: 'catalog:'
         version: 5.0.4(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(happy-dom@21.0.4)(jsdom@20.0.3(supports-color@10.2.2))(vite@8.3.4(@types/node@22.20.5)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
+  apps/artifact-worker: {}
+
   apps/computer-agent:
     dependencies:
       '@hono/node-server':

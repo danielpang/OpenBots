@@ -1,0 +1,13 @@
+{
+  "name": "@openbots/artifact-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Cloudflare Worker in front of the artifact host: wildcard hostnames, the shared secret, edge caching of public Artifacts (plan 21.11)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  }
+}

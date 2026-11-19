@@ -1,0 +1,20 @@
+# The edge in front of the artifact host (plan 21.11; README.md). Not deployed
+# by CI or by anyone yet: the artifact domain is not bought. Fill in the
+# domain and the server's address, set the secret, then `wrangler deploy`.
+name = "openbots-artifacts"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+# Every Bot's subdomain on the artifact domain. One route on the zone, and a
+# proxied wildcard DNS record (*.<domain>) so Cloudflare holds the certificate.
+# routes = [{ pattern = "*.openbots-artifacts.example/*", zone_name = "openbots-artifacts.example" }]
+
+[vars]
+# The artifact domain, as the server's OPENBOTS_ARTIFACT_DOMAIN.
+ARTIFACT_DOMAIN = "openbots-artifacts.example"
+# The server's public address (OPENBOTS_PUBLIC_URL); the Worker calls
+# <ORIGIN>/artifact-host/<path> on it.
+ORIGIN = "https://app.openbots.example"
+
+# The shared secret, the server's OPENBOTS_ARTIFACT_EDGE_SECRET, is a secret,
+# never a var: `wrangler secret put EDGE_SECRET`.
