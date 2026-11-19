@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { labelFor, OwnerHasScreen, type ComputerServices, type StepRecord } from '@openbots/agent';
@@ -132,8 +132,13 @@ export const COMPUTERS_QUEUE = 'computers';
  */
 export const PROVISION_WAIT_MS = 15_000;
 const PROVISION_POLL_MS = 250;
-/** The start's wait, changeable by tests so a queued start answers at once. */
-export const provisionTimings = { waitMs: PROVISION_WAIT_MS };
+/**
+ * The start's wait, changeable by tests so a queued start answers at once, and
+ * how long a row may wait on its job before a start queues another: longer
+ * than the longest provisioning (15 minutes), so a job that is only slow is
+ * not doubled.
+ */
+export const provisionTimings = { waitMs: PROVISION_WAIT_MS, staleMs: 20 * 60_000 };
 
 /**
  * The settings a computer's container is made with (plan 9.5). They live in
@@ -162,6 +167,13 @@ interface MachineSpec {
   provisionVersion?: string;
   /** Why the last provisioning job failed, until one succeeds. */
   error?: string;
+  /**
+   * The provisioning job the row waits on, while it is `creating`, `starting`
+   * or `updating` for one: only the job that carries this attempt runs, so a
+   * job queued twice, or one whose enqueue seemed to fail and was replaced,
+   * provisions once. `at` is when it was queued.
+   */
+  provision?: { attempt: string; at: string };
 }
 
 const specOf = (row: ComputerRow): MachineSpec => (row.spec ?? {}) as MachineSpec;
@@ -633,6 +645,8 @@ export interface ProvisionJob {
   computerId: string;
   workspaceId: string;
   by: AuditActor;
+  /** The row's `spec.provision.attempt` when it was queued; absent on a job from before attempts. */
+  attempt?: string;
 }
 
 /**
@@ -654,8 +668,13 @@ async function startInBackground(
     const claimed = await claim(deps, row, eq(schema.computers.status, row.status), status);
     if (claimed) {
       await publishStatus(deps, claimed, status);
-      await queueProvision(deps, claimed, by);
+      await queueOrFail(deps, claimed, by, row.status as ComputerStatus);
     }
+  } else if (row.status !== 'stopping' && provisionStale(row)) {
+    // Its job was queued long ago and never ended (lost with a process that
+    // died, or never queued): this start queues another. Waiting for a worker
+    // to restart would leave the owner pressing Start for nothing.
+    await queueOrFail(deps, row, by);
   }
   const ready = await waitForComputer(deps, row.id, provisionTimings.waitMs);
   if (ready.status === 'running') {
@@ -669,14 +688,85 @@ async function startInBackground(
   throw computerStarting(ready.status);
 }
 
-function queueProvision(deps: AppDeps, row: ComputerRow, by: AuditActor) {
-  return deps.infra.queue<ProvisionJob>(COMPUTERS_QUEUE).enqueue(
-    'provision',
-    { computerId: row.id, workspaceId: row.workspaceId, by },
-    {
-      groupKey: row.id,
-    },
-  );
+/** True when the row has waited on its provisioning job for longer than any job takes. */
+function provisionStale(row: ComputerRow): boolean {
+  const at = specOf(row).provision?.at;
+  return at !== undefined && Date.now() - new Date(at).getTime() >= provisionTimings.staleMs;
+}
+
+/** `queueProvision` for a start: a queue that refuses answers as a computer that cannot start. */
+async function queueOrFail(
+  deps: AppDeps,
+  row: ComputerRow,
+  by: AuditActor,
+  releaseTo?: ComputerStatus,
+) {
+  try {
+    await queueProvision(deps, row, by, releaseTo);
+  } catch (error) {
+    deps.logger.error({ err: error, computerId: row.id }, 'queueing the provisioning failed');
+    throw computerUnavailable('The computer could not be queued to start. Try again shortly.');
+  }
+}
+
+/**
+ * Queues the provisioning job for a row already claimed (`creating`,
+ * `starting`, `updating`, or `stopping` at recovery), under a new attempt
+ * written to the row first. False when another start gave the row its own
+ * attempt meanwhile.
+ *
+ * When the queue refuses, the row goes back as it was (to `releaseTo` when
+ * the caller had just claimed it), so the next start claims and queues again
+ * instead of waiting on a job that does not exist. If the queue in fact took
+ * the job and only its answer was lost, that job no longer carries the row's
+ * attempt and does nothing, so the retry's job is the only one that
+ * provisions.
+ */
+async function queueProvision(
+  deps: AppDeps,
+  row: ComputerRow,
+  by: AuditActor,
+  releaseTo?: ComputerStatus,
+): Promise<boolean> {
+  const attempt = randomUUID();
+  const attemptOf = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
+  const [queued] = await deps.db
+    .update(schema.computers)
+    .set({ spec: { ...specOf(row), provision: { attempt, at: new Date().toISOString() } } })
+    .where(
+      and(
+        eq(schema.computers.id, row.id),
+        eq(schema.computers.status, row.status),
+        sql`${attemptOf} is not distinct from ${specOf(row).provision?.attempt ?? null}`,
+      ),
+    )
+    .returning();
+  if (!queued) return false;
+  try {
+    await deps.infra
+      .queue<ProvisionJob>(COMPUTERS_QUEUE)
+      .enqueue(
+        'provision',
+        { computerId: row.id, workspaceId: row.workspaceId, by, attempt },
+        { groupKey: row.id },
+      );
+  } catch (error) {
+    const status = releaseTo ?? (row.status as ComputerStatus);
+    // Only the attempt goes back, to the one before it if there was one: the
+    // job may be running after all and writing the rest of the spec.
+    const before = specOf(row).provision;
+    const spec = before
+      ? sql`jsonb_set(${schema.computers.spec}, '{provision}', ${JSON.stringify(before)}::jsonb)`
+      : sql`${schema.computers.spec} - 'provision'`;
+    const [released] = await deps.db
+      .update(schema.computers)
+      .set({ status, spec })
+      .where(and(eq(schema.computers.id, row.id), sql`${attemptOf} = ${attempt}`))
+      .returning();
+    if (released && status !== row.status) await publishStatus(deps, released, status);
+    throw error;
+  }
+  return true;
 }
 
 /** Polls the row until it is `running` or `error`, or `ms` pass; the row as it then is. */
@@ -708,6 +798,8 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
     .from(schema.computers)
     .where(eq(schema.computers.id, job.computerId));
   if (!row || !machines || row.status === 'running') return;
+  // Another attempt took the row's place, or this one was given up: not this job's to run.
+  if (job.attempt && specOf(row).provision?.attempt !== job.attempt) return;
   const began = Date.now();
   const owner = { id: row.ownerId, workspaceId: row.workspaceId };
   try {
@@ -718,7 +810,8 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   } catch (error) {
     const message = errorText(error).replace(/^The computer could not be created: /, '');
     deps.logger.error({ err: error, computerId: row.id }, 'computer provisioning failed');
-    await setStatus(deps, row, 'error', { spec: { ...specOf(row), error: message } }, message);
+    const { provision: _, ...spec } = specOf(row);
+    await setStatus(deps, row, 'error', { spec: { ...spec, error: message } }, message);
     return;
   }
   // The agent may have been installed again, so no display runs.
@@ -726,7 +819,7 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
     .update(schema.botScreens)
     .set({ status: 'stopped' })
     .where(eq(schema.botScreens.computerId, row.id));
-  const { error: _, ...spec } = settledSpec(row);
+  const { error: _, provision: __, ...spec } = settledSpec(row);
   row = await setStatus(deps, row, 'running', {
     lastUsedAt: new Date(),
     spec: { ...spec, ...(machines.version ? { provisionVersion: machines.version } : {}) },
