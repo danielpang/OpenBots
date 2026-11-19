@@ -32,6 +32,9 @@ Rules for code here:
 - `web` (`@openbots/ee-web`): the managed web app. `src/main.tsx` starts the
   core web app (`startWeb` from `@openbots/web/start`) with onboarding, the
   organization switcher and the organization's settings, Billing included.
+  Settings > Organization also holds the switch for public Artifact links
+  (shown when the server hosts Artifacts); the setting, its rules and the
+  sharing routes are the core's (`/api/v1/settings`, plan 21.11).
 
 See section 21 of [docs/plans/TECHNICAL_PLAN.md](../docs/plans/TECHNICAL_PLAN.md).
 

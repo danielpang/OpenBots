@@ -195,6 +195,9 @@ A webhook can trigger a Routine, and each Bot also has a direct webhook endpoint
 | A2 | Artifacts appear as cards in the transcript and open in a viewer with version history, download, and inline editing for text kinds. | Must |
 | A3 | Files produced on the computer can be published as Artifacts; Artifacts can be sent into the computer's filesystem. | Must |
 | A4 | An Artifacts view per Bot lists everything it has produced. | Must |
+| A5 | (Hosted, off unless the server has an artifact domain) The owner can share an Artifact with their organization: every active member can view its latest version, read only, from a Shared list. Nothing else of the owner's comes with it. Artifacts are private by default. | Should |
+| A6 | The owner can make an Artifact public: anyone with the link can view it without signing in. Only a person confirms it, in a dialog that says who will see it and which version; later versions stay private until they confirm again. A Bot can only ask, and its request always waits for the owner. Owners and admins can turn public links off for the organization, which stops the existing ones. Every change is audited. | Should |
+| A7 | Each Bot has its own subdomain on a separate artifact domain, where a shared Artifact opens in a browser: sandboxed so its content reaches nothing else, private and organization views through a short-lived token for that one Artifact, and the same not found answer for anything a viewer may not see. The operator can take a public link down at once. | Should |
 
 ### 4.10 Memory
 
