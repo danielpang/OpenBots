@@ -14,6 +14,7 @@ import { and, eq, ne } from 'drizzle-orm';
 import { errorText, sendBillingWarning, type EmailOptions } from '../email.js';
 import { splitAcrossPeriods } from './periods.js';
 import {
+  absorbedUnitsNow,
   admission,
   billableSeats,
   ceilingOf,
@@ -35,6 +36,7 @@ import {
   type Warning,
 } from './plans.js';
 import {
+  absorbUnits,
   activeMembers,
   anchorFor,
   billingContacts,
@@ -259,7 +261,12 @@ export function createBilling(config: BillingConfig) {
   async function reportAndWarn(ctx: Context, workspaceId: string): Promise<void> {
     const { db, logger } = ctx;
     const s = await standings(db, workspaceId);
-    const units = reportableUnits(s.row.usedSeconds, s.row.allowanceSeconds, s.ceilingUsd);
+    const units = reportableUnits(
+      s.row.usedSeconds,
+      s.row.allowanceSeconds,
+      s.ceilingUsd,
+      s.row.absorbedUnits,
+    );
     let reported = s.row.reportedUnits;
     if (
       s.standing.kind === 'paid' &&
@@ -290,6 +297,7 @@ export function createBilling(config: BillingConfig) {
         }
       }
     }
+    await absorb(db, s);
     const due = warningDue(
       s.row,
       {
@@ -304,6 +312,35 @@ export function createBilling(config: BillingConfig) {
       reported,
     );
     if (due) await warn(ctx, s, due, reported);
+  }
+
+  /**
+   * Marks the overage the settings in force may not bill (all of it while
+   * overage is not allowed, the part past the ceiling when it is) as never
+   * to be billed, so allowing overage or raising the ceiling later bills
+   * only time used after the change. `inFlightSeconds` adds work still
+   * running, for a change of settings while it runs.
+   */
+  async function absorb(db: Db, s: Standings, inFlightSeconds = 0): Promise<void> {
+    const used = s.row.usedSeconds + inFlightSeconds;
+    const allowed = s.standing.kind === 'paid' && s.billing.overagePolicy === 'allow';
+    const reportable = allowed
+      ? reportableUnits(used, s.row.allowanceSeconds, s.ceilingUsd, s.row.absorbedUnits)
+      : 0;
+    const units = absorbedUnitsNow(used, s.row.allowanceSeconds, reportable, s.row.reportedUnits);
+    if (units > s.row.absorbedUnits) {
+      await absorbUnits(db, s.billing.workspaceId, s.period.start, units);
+    }
+  }
+
+  /** Before the overage policy or the ceiling changes: absorbs what the old settings would not bill. */
+  async function absorbBeforeChange(db: Db, workspaceId: string): Promise<void> {
+    if (!config.enforce) return;
+    const at = now();
+    const s = await standings(db, workspaceId, at);
+    let flying = 0;
+    for (const seconds of (await inFlightSeconds(db, workspaceId, at)).values()) flying += seconds;
+    await absorb(db, s, flying);
   }
 
   async function warn(ctx: Context, s: Standings, warning: Warning, reportedUnits: number) {
@@ -522,6 +559,7 @@ export function createBilling(config: BillingConfig) {
     admit,
     recordUsage,
     reportAndWarn,
+    absorbBeforeChange,
     syncSeats,
     applyEvent,
     stopComputers,

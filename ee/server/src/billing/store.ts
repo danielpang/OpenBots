@@ -333,6 +333,29 @@ export async function releaseReport(
     );
 }
 
+/**
+ * Marks overage units as never to be billed (plans.ts `absorbedUnitsNow`):
+ * the mark only moves up, so two closes at once keep the larger.
+ */
+export async function absorbUnits(
+  db: Db,
+  workspaceId: string,
+  periodStart: Date,
+  units: number,
+): Promise<void> {
+  const t = schema.billingPeriods;
+  await db
+    .update(t)
+    .set({ absorbedUnits: sql`greatest(${t.absorbedUnits}, ${units})` })
+    .where(
+      and(
+        eq(t.workspaceId, workspaceId),
+        eq(t.periodStart, periodStart),
+        lt(t.absorbedUnits, units),
+      ),
+    );
+}
+
 export type WarningFlag = 'notified75' | 'notified90' | 'notifiedStopped';
 
 /** Claims a warning for the period: true for exactly one caller, who then sends it. */

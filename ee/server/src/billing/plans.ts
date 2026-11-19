@@ -225,17 +225,39 @@ export function ceilingUnits(ceilingUsd: number): number {
 
 /**
  * The overage units Stripe may be told about: the whole units used past the
- * allowance, never more than the ceiling allows. Work already running when
- * the ceiling is reached finishes, and its time past the ceiling is not
- * billed: the ceiling is the most the organization agreed to find on its
- * invoice, and nothing may make it more.
+ * allowance, less those absorbed, never more than the ceiling allows. Work
+ * already running when the ceiling is reached finishes, and its time past
+ * the ceiling is not billed: the ceiling is the most the organization agreed
+ * to find on its invoice, and nothing may make it more. Absorbed units (time
+ * used while overage was not allowed or past the ceiling) stay unbilled when
+ * overage is allowed or the ceiling raised later.
  */
 export function reportableUnits(
   usedSeconds: number,
   allowanceSeconds: number,
   ceilingUsd: number,
+  absorbedUnits = 0,
 ): number {
-  return Math.min(overageUnits(usedSeconds, allowanceSeconds), ceilingUnits(ceilingUsd));
+  return Math.max(
+    0,
+    Math.min(overageUnits(usedSeconds, allowanceSeconds) - absorbedUnits, ceilingUnits(ceilingUsd)),
+  );
+}
+
+/**
+ * The overage units that will never be billed, given what Stripe was told
+ * and what it may be told now: everything past both. Only ever grows.
+ */
+export function absorbedUnitsNow(
+  usedSeconds: number,
+  allowanceSeconds: number,
+  reportable: number,
+  reportedUnits: number,
+): number {
+  return Math.max(
+    0,
+    overageUnits(usedSeconds, allowanceSeconds) - Math.max(reportable, reportedUnits),
+  );
 }
 
 // --- Policy ------------------------------------------------------------------------

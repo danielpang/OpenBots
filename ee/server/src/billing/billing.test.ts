@@ -176,6 +176,26 @@ describe('billing', () => {
       await record(usage(ada.org, ada.id, 110 * H));
       expect(b.stripe.meter).toEqual([]);
     });
+    it('never bills time absorbed past the ceiling once the ceiling is raised', async () => {
+      await pro({ overagePolicy: 'allow', ceilingUsd: 1 }); // $1 is 5 hours
+      await record(usage(ada.org, ada.id, 110 * H)); // 5 hours past the ceiling, absorbed
+      expect(b.stripe.meter.map((m) => m.value)).toEqual([500]);
+      await json(b.call(ada.cookie, 'PATCH', '/billing/settings', { ceilingUsd: 100 }));
+      await record(usage(ada.org, ada.id, 36)); // one unit after the raise
+      expect(b.stripe.meter.map((m) => m.value)).toEqual([500, 1]);
+    });
+
+    it('never bills time used past the allowance on the stop policy once overage is allowed', async () => {
+      await pro({ overagePolicy: 'stop', ceilingUsd: 100 });
+      await record(usage(ada.org, ada.id, 110 * H)); // running work went 10 hours past it
+      await json(b.call(ada.cookie, 'PATCH', '/billing/settings', { overagePolicy: 'allow' }));
+      await record(usage(ada.org, ada.id, 36));
+      expect(b.stripe.meter.map((m) => m.value)).toEqual([1]);
+      const tab = await json<{ usage: { overageUsd: number } }>(
+        b.call(ada.cookie, 'GET', '/billing'),
+      );
+      expect(tab.usage.overageUsd).toBe(0);
+    });
   });
 
   describe('warnings', () => {
@@ -252,6 +272,31 @@ describe('billing', () => {
       });
       try {
         expect(await code(start(ada.cookie))).toBe('PLAN_ALLOWANCE_REACHED');
+      } finally {
+        await b.t.db.delete(schema.computerUsageIntervals);
+      }
+    });
+
+    it('does not bill work in flight on the stop policy when overage is allowed during it', async () => {
+      await pro({ overagePolicy: 'stop', ceilingUsd: 100 });
+      await record(usage(ada.org, ada.id, 100 * H));
+      const [row] = await b.t.db.select().from(schema.computers);
+      // A run that began at the allowance, an hour ago, still going.
+      await b.t.db.insert(schema.computerUsageIntervals).values({
+        workspaceId: ada.org,
+        computerId: row!.id,
+        ownerId: ada.id,
+        provider: 'docker',
+        reason: 'run',
+        startedAt: new Date(b.clock.now.getTime() - H * 1000),
+        seenAt: b.clock.now,
+      });
+      try {
+        await json(b.call(ada.cookie, 'PATCH', '/billing/settings', { overagePolicy: 'allow' }));
+        // It ends a minute later: only that minute was used with overage allowed.
+        b.clock.now = new Date(b.clock.now.getTime() + 60_000);
+        await record(usage(ada.org, ada.id, H + 60));
+        expect(b.stripe.meter.map((m) => m.value)).toEqual([1]);
       } finally {
         await b.t.db.delete(schema.computerUsageIntervals);
       }

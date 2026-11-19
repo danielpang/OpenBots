@@ -103,6 +103,12 @@ export const billingPeriods = pgTable(
     usedSeconds: bigint('used_seconds', { mode: 'number' }).notNull().default(0),
     reportedUnits: integer('reported_units').notNull().default(0),
     reportSeq: integer('report_seq').notNull().default(0),
+    /**
+     * Overage units Stripe will never be told about: time used past the
+     * allowance while overage was not allowed, or past the spending ceiling.
+     * Raising the ceiling or allowing overage later does not bill it.
+     */
+    absorbedUnits: integer('absorbed_units').notNull().default(0),
     notified75: boolean('notified_75').notNull().default(false),
     notified90: boolean('notified_90').notNull().default(false),
     notifiedStopped: boolean('notified_stopped').notNull().default(false),

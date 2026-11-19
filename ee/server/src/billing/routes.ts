@@ -188,7 +188,12 @@ export function billingRoutes(billing: Billing) {
       }
     }
     const plan = 'plan' in s.standing ? s.standing.plan : null;
-    const units = reportableUnits(s.row.usedSeconds, s.row.allowanceSeconds, s.ceilingUsd);
+    const units = reportableUnits(
+      s.row.usedSeconds,
+      s.row.allowanceSeconds,
+      s.ceilingUsd,
+      s.row.absorbedUnits,
+    );
     const activity = admin ? await billingActivity(db, ws) : [];
     return {
       plan: {
@@ -317,6 +322,8 @@ export function billingRoutes(billing: Billing) {
         const patch = c.req.valid('json');
         const ws = c.var.user.workspaceId;
         const before = await billingFor(c.var.deps.db, ws);
+        // Time already used past what the old settings bill stays unbilled.
+        await billing.absorbBeforeChange(c.var.deps.db, ws);
         await setBilling(c.var.deps.db, ws, {
           ...(patch.overagePolicy ? { overagePolicy: patch.overagePolicy } : {}),
           ...(patch.ceilingUsd !== undefined ? { ceilingUsd: patch.ceilingUsd } : {}),
