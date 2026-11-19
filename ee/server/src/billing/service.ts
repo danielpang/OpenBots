@@ -65,6 +65,7 @@ import {
   type BillingStripe,
   type StripeEvent,
   type StripeSubscription,
+  customerId,
 } from './stripe.js';
 
 // Billing on the managed service (plan 21.10): the core's extension points
@@ -481,12 +482,13 @@ export function createBilling(config: BillingConfig) {
     if (!customer) return 'ignored';
     const workspaceId = await billingCustomerWorkspace(deps.db, customer);
     if (!workspaceId) return 'ignored';
+    const current = await currentSubscription(deps, event, object, customer);
     return inWorkspace(workspaceId, async () => {
       const before = await billingFor(deps.db, workspaceId);
       const wasActive = isActive(standingOf(before.plan, before.status));
       const outcome = await deps.db.transaction(async (tx) => {
         const db = tx as unknown as Db;
-        const decision = eventChange(event, object, before, config.prices);
+        const decision = eventChange(event, current, before, config.prices);
         const fresh = await recordBillingEvent(db, {
           workspaceId,
           stripeEventId: event.id,
@@ -513,6 +515,36 @@ export function createBilling(config: BillingConfig) {
       }
       return outcome;
     });
+  }
+
+  /**
+   * A subscription event's subscription as Stripe has it now. Stripe dates
+   * events to the second and does not keep their order: a checkout's
+   * `created` (incomplete) and `updated` (active) share a second, and the
+   * older one delivered last would pass the `last_event_at` check and leave
+   * a paying organization refused. The current state is right whatever the
+   * order. Without Stripe, or when it does not answer, the event's own copy.
+   */
+  async function currentSubscription(
+    deps: AppDeps,
+    event: StripeEvent,
+    object: Record<string, unknown>,
+    customer: string,
+  ): Promise<Record<string, unknown>> {
+    if (!config.stripe || !event.type.startsWith('customer.subscription.')) return object;
+    if (typeof object.id !== 'string') return object;
+    try {
+      const fresh = await config.stripe.subscriptions.retrieve(object.id);
+      return customerId(fresh) === customer
+        ? (fresh as unknown as Record<string, unknown>)
+        : object;
+    } catch (error) {
+      deps.logger.warn(
+        { err: errorText(error), eventId: event.id },
+        'reading the subscription from Stripe failed; using the event',
+      );
+      return object;
+    }
   }
 
   /** Every computer of the organization, stopped: new work is refused, nothing is deleted. */

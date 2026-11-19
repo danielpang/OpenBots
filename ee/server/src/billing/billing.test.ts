@@ -39,6 +39,8 @@ describe('billing', () => {
     b.stripe.meter.length = 0;
     // Each test starts the period over, so its report numbers begin again.
     b.stripe.forget();
+    // Stripe holds no subscription a test did not give it.
+    b.stripe.subscriptions.all.clear();
     b.mail.sent.length = 0;
     await b.t.db.delete(schema.billingPeriods);
     await b.t.db.delete(schema.billingUsage);
@@ -570,6 +572,26 @@ describe('billing', () => {
         expect((await send(newer.body, newer.signature)).status).toBe(200);
         expect((await send(older.body, older.signature)).status).toBe(200);
         expect(await billingRow()).toMatchObject({ plan: 'team', billedSeats: 3 });
+      });
+
+      it('keeps the subscription as Stripe has it when two events of one second arrive swapped', async () => {
+        await b.onPlan(ada.org, { stripeCustomerId: 'cus_acme' });
+        const second = new Date('2026-11-10T00:00:00Z');
+        const paid = subscription({ id: 'sub_acme', customer: 'cus_acme', periodStart: ANCHOR });
+        b.stripe.subscriptions.all.set('sub_acme', paid);
+        // Checkout: made incomplete, paid, active, all within one second.
+        const created = stripeEvent(
+          'customer.subscription.created',
+          { ...paid, status: 'incomplete' },
+          { id: 'evt_created', created: second },
+        );
+        const updated = stripeEvent('customer.subscription.updated', paid, {
+          id: 'evt_updated',
+          created: second,
+        });
+        expect((await send(updated.body, updated.signature)).status).toBe(200);
+        expect((await send(created.body, created.signature)).status).toBe(200);
+        expect(await billingRow()).toMatchObject({ plan: 'pro', status: 'active' });
       });
 
       it('ignores an event for a customer no organization has', async () => {
