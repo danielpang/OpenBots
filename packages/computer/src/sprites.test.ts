@@ -1,3 +1,16 @@
+import { execFileSync } from 'node:child_process';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSpritesApi, decodeExec, SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
 import {
@@ -5,6 +18,7 @@ import {
   isEgressDomain,
   PROVISION_STAGING_DIR,
   PROVISION_VERSION_FILE,
+  prepareStaging,
   spriteName,
   spritesEgressPolicy,
   type SpritesProviderOptions,
@@ -139,6 +153,35 @@ describe('the sprites provider', () => {
     // The staging directory goes once the script succeeded.
     expect(execs(api).at(-1)).toContain(`rm -rf ${PROVISION_STAGING_DIR}`);
     expect([...sprite.files.keys()]).toEqual([PROVISION_VERSION_FILE]);
+  });
+
+  it('makes the staging directory afresh as root, whatever a Bot left at its path', async () => {
+    const { api, provider } = setup();
+    await provider.create(spec);
+    const first = api.calls.find((c) => c.op === 'exec')!.args[0] as string[];
+    expect(first).toEqual(['bash', '-c', expect.any(String), 'as-root', prepareStaging()]);
+
+    // Run for real on a stand-in path: a directory the Bot made (with its own
+    // script in it) and a link it planted both give way to a new directory.
+    const root = mkdtempSync(join(tmpdir(), 'staging-'));
+    try {
+      const dir = join(root, 'openbots-provision');
+      mkdirSync(dir, { mode: 0o777 });
+      writeFileSync(join(dir, 'provision.sh'), 'echo planted');
+      execFileSync('bash', ['-c', prepareStaging(dir)]);
+      expect(readdirSync(dir)).toEqual([]);
+      expect(statSync(dir).mode & 0o777).toBe(0o755);
+
+      const elsewhere = join(root, 'bot-owned');
+      mkdirSync(elsewhere);
+      rmSync(dir, { recursive: true });
+      symlinkSync(elsewhere, dir);
+      execFileSync('bash', ['-c', prepareStaging(dir)]);
+      expect(lstatSync(dir).isSymbolicLink()).toBe(false);
+      expect(lstatSync(dir).isDirectory()).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('uploads a bundle larger than one write in parts and joins them', async () => {

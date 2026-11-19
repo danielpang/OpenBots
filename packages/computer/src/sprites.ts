@@ -233,7 +233,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     const bundlePath = `${PROVISION_STAGING_DIR}/agent-bundle.tgz`;
     // Neither file holds a secret (the token goes on stdin), and the API may
     // write them as another user than the one exec runs as: readable by all.
-    await run(name, ['mkdir', '-p', PROVISION_STAGING_DIR], 'Preparing the provisioning');
+    await run(name, asRoot(prepareStaging()), 'Preparing the provisioning');
     await upload(name, scriptPath, script, 0o644);
     await upload(name, bundlePath, bundle, 0o644);
     const result = await api.exec(
@@ -448,6 +448,21 @@ function clearHome(): string {
     'pkill -KILL -u bot || true',
     `find ${COMPUTER_HOME} -mindepth 1 -delete`,
   ].join('\n');
+}
+
+/**
+ * Makes the staging directory afresh, as root. It sits in /var/tmp, where the
+ * Bots' commands can write: a directory or link they left at the path would
+ * otherwise take the upload, and they could swap the script that then runs as
+ * root. `mkdir` without -p fails if one appears again after the `rm`. It
+ * belongs to the user exec runs as (sudo's caller), as `mkdir -p` made it before.
+ */
+export function prepareStaging(dir = PROVISION_STAGING_DIR): string {
+  return [
+    `rm -rf -- ${dir}`,
+    `mkdir -m 0755 -- ${dir}`,
+    `chown -- "\${SUDO_USER:-root}" ${dir}`,
+  ].join(' && ');
 }
 
 /** Runs a shell command as root: directly when exec already is, else through sudo. */
