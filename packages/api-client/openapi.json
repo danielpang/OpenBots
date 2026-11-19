@@ -14935,6 +14935,16 @@
               }
             }
           },
+          "402": {
+            "description": "New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such Bot, or (hand back) no screen yet",
             "content": {

@@ -85,6 +85,37 @@ describe('computer work admission', () => {
     expect((await t.inOrganization(() => getComputer(t.deps, owner)))?.status).toBe('running');
   });
 
+  it("refuses taking a Bot's screen when that would start the computer, not while it runs", async () => {
+    const bot = await t.app.request('/api/v1/bots', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Screen' }),
+    });
+    const botId = ((await bot.json()) as { id: string }).id;
+    const take = () =>
+      t.app.request(`/api/v1/bots/${botId}/screen/control`, {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'take' }),
+      });
+    await stopped();
+    answer = () => refusal;
+    const res = await take();
+    expect(res.status).toBe(402);
+    expect(await res.json()).toMatchObject({ code: refusal.code });
+    expect((await t.inOrganization(() => getComputer(t.deps, owner)))?.status).toBe('stopped');
+    expect(asked.at(-1)).toMatchObject({ kind: 'manual', ownerId: owner.id, botId });
+
+    // On a running computer a Bot's run may be waiting for the owner's
+    // sign-in: that is work under way, so it is not asked.
+    answer = () => null;
+    expect((await post('/computer/start')).status).toBe(200);
+    answer = () => refusal;
+    asked.length = 0;
+    expect((await take()).status).toBe(200);
+    expect(asked).toEqual([]);
+  });
+
   it('keeps a code the core can render: anything else becomes COMPUTER_WORK_REFUSED', async () => {
     answer = () => ({ code: 'not a code', message: 'No.' });
     const res = await post('/computer/start');

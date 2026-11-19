@@ -1623,6 +1623,18 @@ export async function setScreenControl(
   await assertBotOwner(deps.db, user, botId);
   let screen = await screenOf(deps, botId);
   if (take) {
+    // Taking the screen of a computer that is not running starts it, which
+    // is the member's own new work (computer-admission.ts). On a running
+    // computer it is not asked: a run waiting for the owner's sign-in (K8)
+    // is work under way.
+    if ((await getComputer(deps, user))?.status !== 'running') {
+      await admitComputerWork(deps, {
+        workspaceId: user.workspaceId,
+        ownerId: user.id,
+        kind: 'manual',
+        botId,
+      });
+    }
     const { computer } = await startComputer(deps, user);
     const agent = agentFor(deps, computer);
     screen = await ensureScreen(

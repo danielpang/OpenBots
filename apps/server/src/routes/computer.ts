@@ -581,6 +581,7 @@ export const computerRoutes = createRouter()
           content: { 'application/json': { schema: ScreenSchema } },
         },
         ...authProblems,
+        402: refused,
         404: problemResponse('No such Bot, or (hand back) no screen yet'),
         503: unavailable,
       },
