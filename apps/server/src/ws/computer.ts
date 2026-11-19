@@ -1,7 +1,12 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { screenNumber } from '@openbots/computer';
-import { COMPUTER_OFF, COMPUTER_OFF_CLOSE_CODE, type Unsubscribe } from '@openbots/shared';
+import {
+  COMPUTER_IDLE_CLOSE_CODE,
+  COMPUTER_OFF,
+  COMPUTER_OFF_CLOSE_CODE,
+  type Unsubscribe,
+} from '@openbots/shared';
 import { and, eq, inArray, lte } from 'drizzle-orm';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { AppDeps, CurrentUser } from '../context.js';
@@ -13,11 +18,14 @@ import { SYSTEM_ACTOR } from '../services/audit.js';
 import { isCoderTerminalCwd } from '../services/coding-sessions.js';
 import {
   agentFor,
+  beginComputerUse,
   ensureScreen,
+  idleSettingsApply,
   releaseScreens,
   runningComputer,
   syncCookies,
   touchComputer,
+  type ComputerRow,
 } from '../services/computer.js';
 import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
 import { reject, toHeaders, type UpgradeSource } from './gateway.js';
@@ -49,6 +57,18 @@ import { KEY_RECHECK_MS, watchApiKeys } from './key-watch.js';
 // `/ws`, and hands back any screen they hold (U3). A socket opened with an API
 // key closes 1008 when the key stops working (a revoked phone's shell and
 // screen included), at once on the bus or within a minute (ws/key-watch.ts).
+//
+// An open socket is a use of the computer for the usage ledger
+// (computer-use.ts), without a hold or a touch of its own. On a Sprite an
+// open connection keeps the machine awake, and billing, so the agent side is
+// never left open without a client: it closes with the client, and a client
+// that goes before the agent answered takes the agent socket with it. A
+// socket on a Sprite with no frame either way for `socketIdleMs` (a terminal
+// left open, a Preview on a still screen) closes with
+// COMPUTER_IDLE_CLOSE_CODE, which the web app does not retry on its own. When
+// the agent side drops (a Sprite's cold wake restarts the agent) the client
+// sees a plain close and reconnects as after any drop; the next screen socket
+// starts the screen again (`ensureScreen` checks the agent first).
 
 export const PTY_PATH = '/api/v1/computer/pty';
 const VNC_PATH =
@@ -100,18 +120,23 @@ export interface ComputerProxyOptions {
   takeoverGraceMs?: number;
   /** How often the API keys of open sockets are looked up again; KEY_RECHECK_MS. */
   keyRecheckMs?: number;
+  /** How long a socket on a Sprite may pass no frames before it closes; `SOCKET_IDLE_MS`. */
+  socketIdleMs?: number;
 }
 
 /** How often frames on an open socket mark the computer used. */
 export const SOCKET_TOUCH_MS = 60_000;
 /** A takeover whose screen socket closed is handed back after this, unless it reconnects. */
 export const TAKEOVER_GRACE_MS = 30_000;
+/** A socket on a computer that pauses itself closes after this long with no frames. */
+export const SOCKET_IDLE_MS = 10 * 60_000;
 
 /** Where an accepted socket goes, and whose computer it is. */
 interface Upstream {
   url: string;
   headers: Record<string, string>;
   computerId: string;
+  computer: ComputerRow;
   user: CurrentUser;
   /** A Takeover's screen: the Bot whose screen it is. */
   control?: string;
@@ -123,6 +148,7 @@ export async function attachComputerProxies(
   options: ComputerProxyOptions = {},
 ): Promise<ComputerProxies> {
   const graceMs = options.takeoverGraceMs ?? TAKEOVER_GRACE_MS;
+  const socketIdleMs = options.socketIdleMs ?? SOCKET_IDLE_MS;
   const origin = new URL(deps.config.publicUrl).origin;
   const wss = new WebSocketServer({
     noServer: true,
@@ -162,11 +188,17 @@ export async function attachComputerProxies(
       .map((p) => p.trim())
       .filter(Boolean);
     const upstream = new WebSocket(target.url, protocols, { headers: target.headers });
+    // The client may leave while the agent (a waking Sprite) is still answering:
+    // its socket must not stay open with nobody on the other end.
+    const leave = () => upstream.terminate();
+    socket.once('close', leave);
     upstream.once('error', (error) => {
       deps.logger.warn({ err: error }, 'computer agent socket failed');
       if (!socket.destroyed) reject(socket, 502);
     });
     upstream.once('open', () => {
+      socket.off('close', leave);
+      if (socket.destroyed) return upstream.terminate();
       (req as IncomingMessage & { upstreamProtocol?: string }).upstreamProtocol = upstream.protocol;
       wss.handleUpgrade(req, socket, head, (client) => pipe(client, upstream, target));
     });
@@ -197,6 +229,7 @@ export async function attachComputerProxies(
       return {
         ...agent.socket(`/pty${params.size ? `?${params}` : ''}`),
         computerId: computer.id,
+        computer,
         user,
       };
     }
@@ -209,6 +242,7 @@ export async function attachComputerProxies(
     return {
       ...agent.socket(`/vnc/${screenNumber(screen.displayNumber)}`),
       computerId: computer.id,
+      computer,
       user,
       ...(url.searchParams.get('control') === '1' ? { control: botId! } : {}),
     };
@@ -251,9 +285,28 @@ export async function attachComputerProxies(
 
   function pipe(client: WebSocket, upstream: WebSocket, target: Upstream) {
     open.set(client, target);
+    const use = beginComputerUse(
+      deps,
+      target.computer,
+      target.url.includes('/vnc/') ? 'screen' : 'terminal',
+      { touchMs: null, hold: false },
+    );
+    // Only on a computer that pauses itself: elsewhere an idle socket costs nothing.
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    const watchIdle = () => {
+      if (idleSettingsApply(target.computer)) return;
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => {
+        if (client.readyState === WebSocket.OPEN) client.close(COMPUTER_IDLE_CLOSE_CODE, 'idle');
+        if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
+      }, socketIdleMs);
+      idle.unref();
+    };
+    watchIdle();
     // Opening it marked the computer used already.
     let touched = Date.now();
     const used = () => {
+      watchIdle();
       if (Date.now() - touched < SOCKET_TOUCH_MS) return;
       touched = Date.now();
       inWorkspace(target.user.workspaceId, () => touchComputer(deps, target.computerId)).catch(
@@ -269,6 +322,8 @@ export async function attachComputerProxies(
       if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
     });
     const closeBoth = () => {
+      if (idle) clearTimeout(idle);
+      void use.end();
       if (open.delete(client)) afterControlClosed(target);
       if (client.readyState === WebSocket.OPEN) client.close();
       if (upstream.readyState === WebSocket.OPEN) upstream.close();

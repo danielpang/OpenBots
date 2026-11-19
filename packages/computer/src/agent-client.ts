@@ -164,7 +164,12 @@ export type BrowserAction = {
 
 export interface ComputerAgentClient {
   readonly url: string;
-  health(signal?: AbortSignal): Promise<{ ok: boolean; version?: string }>;
+  /**
+   * The agent answers, with its version and the screens it runs now. A
+   * Sprite's cold wake restarts the agent with no screens, so the server
+   * checks the list before it trusts a screen it started earlier.
+   */
+  health(signal?: AbortSignal): Promise<{ ok: boolean; version?: string; screens?: number[] }>;
   exec(
     request: ExecRequest,
     options?: { signal?: AbortSignal; onChunk?(chunk: ExecChunk): void },
@@ -314,10 +319,17 @@ export function createAgentClient({
   return {
     url: base,
     async health(signal) {
-      const body = await json<{ status?: string; version?: string }>(
+      const body = await json<{ status?: string; version?: string; screens?: { n?: unknown }[] }>(
         await request('GET', '/healthz', { signal, timeoutMs: 5_000 }),
       );
-      return { ok: body.status === 'ok', ...(body.version ? { version: body.version } : {}) };
+      const screens = Array.isArray(body.screens)
+        ? body.screens.map((s) => s?.n).filter((n): n is number => typeof n === 'number')
+        : undefined;
+      return {
+        ok: body.status === 'ok',
+        ...(body.version ? { version: body.version } : {}),
+        ...(screens ? { screens } : {}),
+      };
     },
     async exec(req, { signal, onChunk } = {}) {
       const response = await request('POST', '/exec', {

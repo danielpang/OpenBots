@@ -11,6 +11,7 @@ import { DomainError, notFound } from '../errors.js';
 import { recordAudit, userActor } from './audit.js';
 import {
   assertResettable,
+  checkpointBeforeReset,
   computerAvailable,
   computerUnavailable,
   destroyComputer,
@@ -34,7 +35,9 @@ import {
 // stops the computer and its coding sessions, removes the container and its
 // home volume (the state volume, with the cookie store and the coding agents'
 // sign-ins, only on request), marks every checkout `missing`, clears the
-// sessions' worktree paths and records `computer.reset`. The next start makes
+// sessions' worktree paths and records `computer.reset`, with the id of the
+// checkpoint taken first where the provider keeps one (a Sprite reset that
+// keeps the sign-ins), so an operator can restore a mistaken reset. The next start makes
 // a fresh computer, and its reconcile clones the `keep_cloned` repositories
 // again.
 //
@@ -257,6 +260,7 @@ export async function resetComputer(
   }
   prepared.delete(requestId);
   const by = userActor(owner);
+  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns });
   const reset = await destroyComputer(deps, row, { signIns: resetSignIns }, by);
   await deps.db.transaction(async (tx) => {
     const checkouts = await tx
@@ -304,6 +308,8 @@ export async function resetComputer(
         checkouts: checkouts.length,
         unsaved: unsavedWork(done.results).length,
         rescueFailed: !!done.error,
+        // The disk as it was, for an operator to restore a mistaken reset (Sprites).
+        ...(checkpoint ? { checkpoint } : {}),
       },
     });
   });

@@ -1,4 +1,14 @@
-import { boolean, integer, jsonb, pgEnum, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  text,
+  unique,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { users } from './auth.js';
 import { bots } from './bots.js';
 import { bytea, createdAt, id, timestamptz } from './columns.js';
@@ -53,4 +63,41 @@ export const botScreens = pgTable(
     controlledSince: timestamptz('controlled_since'),
   },
   (t) => [unique().on(t.computerId, t.displayNumber)],
+);
+
+/**
+ * When a member's computer was in use (plan 9.5): one row per stretch of use
+ * a server process saw, from the first use to the last plus, on a provider
+ * that pauses itself, the tail before it pauses. `ended_at` and `seconds` are
+ * null while it is open; `seen_at` is its last heartbeat, so one a crashed
+ * process left open is closed at its last sign of life. `seconds` counts only
+ * time no other closed interval of the computer already covers, so the
+ * seconds of a computer add up to its time in use even when two processes
+ * (the API's terminal, a worker's run) used it at once. For usage billing
+ * later (`ServerExtensions.onComputerUsage`); nothing reads it yet.
+ */
+export const computerUsageIntervals = pgTable(
+  'computer_usage_intervals',
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    computerId: uuid('computer_id')
+      .notNull()
+      .references(() => computers.id, { onDelete: 'cascade' }),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    provider: computerProvider('provider').notNull(),
+    /** What began it: `run`, `coding_session`, `exec`, `terminal` or `screen`. */
+    reason: text('reason').notNull(),
+    startedAt: timestamptz('started_at').notNull(),
+    seenAt: timestamptz('seen_at').notNull(),
+    endedAt: timestamptz('ended_at'),
+    seconds: integer('seconds'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('computer_usage_intervals_owner').on(t.workspaceId, t.ownerId, t.startedAt),
+    index('computer_usage_intervals_computer').on(t.computerId, t.startedAt),
+  ],
 );

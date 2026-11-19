@@ -9,6 +9,7 @@ import {
   createDockerProvider,
   createRemoteProvider,
   createSpritesProvider,
+  FIRST_DISPLAY,
   nextDisplay,
   SANDBOX_NETWORK,
   SCREEN_SIZE,
@@ -36,11 +37,13 @@ import {
   isNotNull,
   isNull,
   lt,
+  ne,
   not,
   or,
   sql,
   type SQL,
 } from 'drizzle-orm';
+import type { JobHandler } from '@openbots/shared';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { inRanges } from '../client-ip.js';
 import { schema, type Db } from '../db/client.js';
@@ -51,6 +54,13 @@ import { decryptSecretString, encryptSecret, keyringFromConfig } from '../secret
 import { recordAudit, SYSTEM_ACTOR, type AuditActor } from './audit.js';
 import { setState } from './bot-state.js';
 import { enqueueCoderJob } from './coder-jobs.js';
+import {
+  beginUse,
+  inUseSince,
+  type ComputerUse,
+  type UseOptions,
+  type UseReason,
+} from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 
 // The account's computer (plan 4.5, 9; K1 to K7). One `computers` row per
@@ -65,9 +75,18 @@ import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 // A Sprite pauses itself about 30 seconds after its last activity and wakes
 // on the next request to its URL, which is how every agent call reaches it,
 // so the provider reads a paused Sprite as `running` and its `stop` only
-// releases holds. The idle sweep still marks the row stopped, which ends the
-// stdio connectors and coding sessions whose open connections would keep the
-// Sprite awake; the next start wakes it and waits for its agent.
+// releases holds. Its row stays `running`: the idle sweep and the owner's
+// idle settings do not apply to it (`idleSettingsApply`). Making and
+// provisioning a Sprite takes minutes, so it runs as a `computers` job
+// (`provisionComputer`), one per computer at a time, never inside a request
+// or a run: those see `creating` or `starting`, wait up to
+// `PROVISION_WAIT_MS`, and otherwise get `COMPUTER_STARTING`; the job's end
+// publishes `computer.status`. A new provisioning version reaches a running
+// Sprite once it has been unused for the default idle time. While a run, a
+// coding session or a command uses it, the computer is held awake
+// (computer-use.ts, `beginComputerUse`). After a cold wake the agent comes
+// back without the screens it had started, so a screen is checked on the
+// agent before it is trusted (`ensureScreen`).
 //
 // Each Bot gets a screen (`bot_screens`, K2): display `:10+n`, its own CDP
 // port and Chromium profile, started on the agent the first time the Bot
@@ -104,6 +123,17 @@ export const IDLE_SWEEP_MS = 60_000;
 const SCREEN_STOP_TIMEOUT_MS = 10_000;
 /** A failed idle stop is retried after one sweep, then twice as long each time, up to this. */
 export const IDLE_STOP_RETRY_MAX_MS = 30 * 60_000;
+/** The queue that makes and provisions computers off the request path (Sprites). */
+export const COMPUTERS_QUEUE = 'computers';
+/**
+ * How long a start waits for a provisioning job before it answers
+ * `COMPUTER_STARTING`: long enough for a Sprite that only needs its agent
+ * checked, far short of a first provisioning.
+ */
+export const PROVISION_WAIT_MS = 15_000;
+const PROVISION_POLL_MS = 250;
+/** The start's wait, changeable by tests so a queued start answers at once. */
+export const provisionTimings = { waitMs: PROVISION_WAIT_MS };
 
 /**
  * The settings a computer's container is made with (plan 9.5). They live in
@@ -128,6 +158,10 @@ interface MachineSpec {
   network?: string;
   /** Set while a failed idle stop waits for its retry (plan 9.5). */
   idleStopRetry?: { failures: number; retryAt: string };
+  /** The provider's `version` the machine was last provisioned with (Sprites). */
+  provisionVersion?: string;
+  /** Why the last provisioning job failed, until one succeeds. */
+  error?: string;
 }
 
 const specOf = (row: ComputerRow): MachineSpec => (row.spec ?? {}) as MachineSpec;
@@ -175,6 +209,16 @@ export function idleStopRetryDelayMs(failures: number) {
 
 export const computerUnavailable = (message: string) =>
   new DomainError(503, 'COMPUTER_UNAVAILABLE', message);
+
+/** A provisioning job is making the computer ready; the caller should try again shortly (503). */
+export const computerStarting = (status: string) =>
+  new DomainError(
+    503,
+    'COMPUTER_STARTING',
+    status === 'creating'
+      ? 'The computer is being set up; the first time takes a few minutes. Try again shortly.'
+      : 'The computer is starting. Try again shortly.',
+  );
 
 /** The owner's computer is not running, and this path does not start it (409). */
 export const computerOff = () =>
@@ -251,6 +295,23 @@ function spritesProvider(
 
 export function computerAvailable(deps: AppDeps) {
   return computerProvider(deps) !== null;
+}
+
+/**
+ * Whether the provider's machines are made and started by a `computers` job
+ * rather than inline (Sprites: provisioning takes minutes).
+ */
+function provisionsInBackground(machines: ComputerProvider) {
+  return machines.name === 'sprites';
+}
+
+/**
+ * Whether the owner's idle timeout and "always on" mean anything for this
+ * row: not on Sprites, which pause themselves about 30 seconds after their
+ * last use and wake on the next.
+ */
+export function idleSettingsApply(row: Pick<ComputerRow, 'provider'>) {
+  return row.provider !== 'sprites';
 }
 
 function provider(deps: AppDeps) {
@@ -350,7 +411,8 @@ export async function ensureComputer(
           workspaceId: owner.workspaceId,
           ownerId: owner.id,
           provider: machines.name,
-          status: 'creating',
+          // A job makes it in the background: the start claims it and queues the job.
+          status: provisionsInBackground(machines) ? 'stopped' : 'creating',
           idleTimeoutMin: DEFAULT_IDLE_TIMEOUT_MIN,
         })
         .onConflictDoNothing();
@@ -361,6 +423,8 @@ export async function ensureComputer(
     await assertRemoteFor(deps, owner);
   }
   if (row.agentUrl && row.agentToken) return row;
+  // Made by the provisioning job, which the start queues.
+  if (provisionsInBackground(machines)) return row;
   return createMachine(deps, row, by);
 }
 
@@ -501,10 +565,11 @@ export function startComputer(
 async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Started> {
   const machines = provider(deps);
   let row = await ensureComputer(deps, owner, by);
-  const machine = await machines.status(refOf(deps, row));
+  const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
   if (machine === 'running' && row.status === 'running') {
     return { computer: await touch(deps, row), durationMs: null, updated: false };
   }
+  if (provisionsInBackground(machines)) return startInBackground(deps, row, by);
   const began = Date.now();
   // Removed behind the server's back: made again, same home volume.
   if (machine === 'missing') row = await createMachine(deps, row, by);
@@ -536,6 +601,18 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
     .set({ status: 'stopped' })
     .where(eq(schema.botScreens.computerId, row.id));
   row = await setStatus(deps, row, 'running', { lastUsedAt: new Date(), spec: settledSpec(row) });
+  await afterStart(deps, owner, row, by, began);
+  return { computer: row, durationMs: Date.now() - began, updated };
+}
+
+/** What follows every start: the audit row, the repositories' jobs, git identity, wallpaper. */
+async function afterStart(
+  deps: AppDeps,
+  owner: Owner,
+  row: ComputerRow,
+  by: AuditActor,
+  began: number,
+) {
   await auditComputer(deps, row, by, 'computer.start', { durationMs: Date.now() - began });
   queueRepoJobs(deps, row.id);
   // The owner's git identity in the computer's git config (git-identity.ts),
@@ -549,7 +626,139 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
   agentFor(deps, row)
     .setWallpaper()
     .catch((error: unknown) => deps.logger.warn({ err: error }, 'wallpaper failed'));
-  return { computer: row, durationMs: Date.now() - began, updated };
+}
+
+/** A `computers` job: make and provision the computer, or start it. */
+export interface ProvisionJob {
+  computerId: string;
+  workspaceId: string;
+  by: AuditActor;
+}
+
+/**
+ * Queues the provisioning job for a computer the provider makes in the
+ * background, unless one is under way (the row is `creating`, `starting` or
+ * `updating`), then waits up to `PROVISION_WAIT_MS` for it. A start that
+ * finishes in that time answers as any start; a longer one answers
+ * `COMPUTER_STARTING` and reports through `computer.status`.
+ */
+async function startInBackground(
+  deps: AppDeps,
+  row: ComputerRow,
+  by: AuditActor,
+): Promise<Started> {
+  const began = Date.now();
+  if (!BUSY.has(row.status)) {
+    const status = row.agentUrl ? 'starting' : 'creating';
+    // Two starts at once, in two processes: one claims the row and queues.
+    const claimed = await claim(deps, row, eq(schema.computers.status, row.status), status);
+    if (claimed) {
+      await publishStatus(deps, claimed, status);
+      await queueProvision(deps, claimed, by);
+    }
+  }
+  const ready = await waitForComputer(deps, row.id, provisionTimings.waitMs);
+  if (ready.status === 'running') {
+    return { computer: ready, durationMs: Date.now() - began, updated: false };
+  }
+  if (ready.status === 'error') {
+    throw computerUnavailable(
+      `The computer did not start: ${specOf(ready).error ?? 'the provisioning failed'}`,
+    );
+  }
+  throw computerStarting(ready.status);
+}
+
+function queueProvision(deps: AppDeps, row: ComputerRow, by: AuditActor) {
+  return deps.infra.queue<ProvisionJob>(COMPUTERS_QUEUE).enqueue(
+    'provision',
+    { computerId: row.id, workspaceId: row.workspaceId, by },
+    {
+      groupKey: row.id,
+    },
+  );
+}
+
+/** Polls the row until it is `running` or `error`, or `ms` pass; the row as it then is. */
+async function waitForComputer(deps: AppDeps, computerId: string, ms: number) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const [row] = await deps.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.id, computerId));
+    if (!row) throw notFound('The computer is gone');
+    if (row.status === 'running' || row.status === 'error' || Date.now() >= deadline) return row;
+    await new Promise((resolve) => setTimeout(resolve, PROVISION_POLL_MS));
+  }
+}
+
+/**
+ * The `computers` job (Sprites): makes the machine if it has none, then
+ * starts it through the provider, which provisions it again when its
+ * provisioning version is not the configured one and waits for the agent.
+ * A failure leaves the row `error` with the reason in `spec.error`, and the
+ * next start queues the job again. A row already `running` (a job queued
+ * twice, or recovered after it finished) is left alone.
+ */
+export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promise<void> {
+  const machines = computerProvider(deps);
+  let [row] = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(eq(schema.computers.id, job.computerId));
+  if (!row || !machines || row.status === 'running') return;
+  const began = Date.now();
+  const owner = { id: row.ownerId, workspaceId: row.workspaceId };
+  try {
+    const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
+    if (machine === 'missing') row = await createMachine(deps, row, job.by);
+    row = await setStatus(deps, row, 'starting');
+    await machines.start(refOf(deps, row));
+  } catch (error) {
+    const message = errorText(error).replace(/^The computer could not be created: /, '');
+    deps.logger.error({ err: error, computerId: row.id }, 'computer provisioning failed');
+    await setStatus(deps, row, 'error', { spec: { ...specOf(row), error: message } }, message);
+    return;
+  }
+  // The agent may have been installed again, so no display runs.
+  await deps.db
+    .update(schema.botScreens)
+    .set({ status: 'stopped' })
+    .where(eq(schema.botScreens.computerId, row.id));
+  const { error: _, ...spec } = settledSpec(row);
+  row = await setStatus(deps, row, 'running', {
+    lastUsedAt: new Date(),
+    spec: { ...spec, ...(machines.version ? { provisionVersion: machines.version } : {}) },
+  });
+  await afterStart(deps, owner, row, job.by, began);
+}
+
+/** The `computers` queue's handler. */
+export function provisionHandler(deps: AppDeps): JobHandler<ProvisionJob> {
+  return (job) => provisionComputer(deps, job.data);
+}
+
+/**
+ * At worker start (in every organization's scope): queues the provisioning
+ * job again for each computer a job was making or starting, since an
+ * in-process queue lost it and a crashed worker may have. A job that is in
+ * fact still queued finds the row `running` when it ends and does nothing.
+ */
+export async function recoverProvisioning(deps: AppDeps): Promise<number> {
+  const machines = computerProvider(deps);
+  if (!machines || !provisionsInBackground(machines)) return 0;
+  const rows = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(
+      and(
+        eq(schema.computers.provider, machines.name),
+        inArray(schema.computers.status, ['creating', 'starting', 'updating']),
+      ),
+    );
+  for (const row of rows) await queueProvision(deps, row, SYSTEM_ACTOR);
+  return rows.length;
 }
 
 /**
@@ -652,6 +861,64 @@ export async function touchComputer(deps: Pick<AppDeps, 'db'>, computerId: strin
     .update(schema.computers)
     .set({ lastUsedAt: new Date() })
     .where(and(eq(schema.computers.id, computerId), eq(schema.computers.status, 'running')));
+}
+
+/**
+ * Begins a use of the computer (computer-use.ts): marks it used every
+ * minute, holds it awake on a provider that pauses itself, and records the
+ * usage interval. End it when the work ends, fails or is cancelled.
+ */
+export function beginComputerUse(
+  deps: AppDeps,
+  row: ComputerRow,
+  reason: UseReason,
+  options: UseOptions = {},
+): ComputerUse {
+  const machines = computerProvider(deps);
+  let hold: Parameters<typeof beginUse>[1]['hold'];
+  if (machines?.hold && machines.name === row.provider && row.agentUrl && row.agentToken) {
+    const ref = refOf(deps, row);
+    hold = {
+      hold: (name, seconds) => machines.hold!(ref, name, seconds),
+      release: async (name) => machines.release?.(ref, name),
+    };
+  }
+  return beginUse(
+    deps,
+    {
+      workspaceId: row.workspaceId,
+      ownerId: row.ownerId,
+      computerId: row.id,
+      provider: row.provider,
+      touch: () => touchComputer(deps, row.id),
+      ...(hold ? { hold } : {}),
+    },
+    reason,
+    options,
+  );
+}
+
+/** A use that begins with the first computer call of some work and ends with the work. */
+export interface ComputerUseScope {
+  /** Begins the use on the first call; later calls do nothing. */
+  begin(row: ComputerRow): void;
+  end(): Promise<void>;
+}
+
+export function computerUseScope(deps: AppDeps, reason: UseReason): ComputerUseScope {
+  let use: ComputerUse | null = null;
+  let ended = false;
+  return {
+    begin(row) {
+      if (!ended) use ??= beginComputerUse(deps, row, reason);
+    },
+    async end() {
+      ended = true;
+      const current = use;
+      use = null;
+      await current?.end();
+    },
+  };
 }
 
 /**
@@ -783,6 +1050,34 @@ export async function destroyComputer(
     agentToken: null,
     volumeName: row.volumeName ?? volumeName(row.id),
   });
+}
+
+/**
+ * Before a reset that keeps the machine (a Sprite reset without its
+ * sign-ins clears the home in place), a checkpoint of its whole disk, so an
+ * operator can undo a mistaken reset (`restore`). Returns its id, or null
+ * when the provider takes none or the machine goes with the reset (a Sprite
+ * deleted with its sign-ins takes its checkpoints with it). A checkpoint that
+ * fails does not stop the reset: a computer that will not work is when a
+ * reset helps most.
+ */
+export async function checkpointBeforeReset(
+  deps: AppDeps,
+  row: ComputerRow,
+  options: DestroyComputerOptions,
+): Promise<string | null> {
+  const machines = provider(deps);
+  if (!machines.checkpoint || options.signIns || !row.agentUrl || !row.agentToken) return null;
+  if (machines.name !== row.provider || !row.containerId) return null;
+  try {
+    return await machines.checkpoint(
+      refOf(deps, row),
+      `OpenBots: before a reset, ${new Date().toISOString()}`,
+    );
+  } catch (error) {
+    deps.logger.warn({ err: error, computerId: row.id }, 'the checkpoint before a reset failed');
+    return null;
+  }
 }
 
 /**
@@ -918,9 +1213,14 @@ function auditComputer(
  * many. An idle stop that fails leaves the computer `error` and is retried on
  * a later sweep, after one sweep and then twice as long each time, up to
  * `IDLE_STOP_RETRY_MAX_MS`; starting the computer again drops the retry.
+ * Sprites are left alone (`idleSettingsApply`): they pause themselves, and
+ * marking one stopped would only end its coding sessions and stdio
+ * connectors. One whose provisioning is out of date is updated instead, once
+ * unused for the default idle time (`queueSpriteUpdates`).
  */
 export async function sweepIdleComputers(deps: AppDeps, now = new Date()): Promise<number> {
   if (!computerAvailable(deps)) return 0;
+  await queueSpriteUpdates(deps, now);
   const candidates = await deps.db
     .select()
     .from(schema.computers)
@@ -928,6 +1228,7 @@ export async function sweepIdleComputers(deps: AppDeps, now = new Date()): Promi
       and(
         inArray(schema.computers.status, ['running', 'error']),
         eq(schema.computers.alwaysOn, false),
+        ne(schema.computers.provider, 'sprites'),
       ),
     );
   let stopped = 0;
@@ -957,12 +1258,47 @@ export async function sweepIdleComputers(deps: AppDeps, now = new Date()): Promi
 }
 
 /**
+ * A running Sprite provisioned with another version than the provider's (a
+ * new release) is provisioned again once nobody has used it for
+ * `DEFAULT_IDLE_TIMEOUT_MIN` and none of its screens is under owner control,
+ * so the agent's restart never cuts into work, as a Docker computer moves to
+ * a new image only at its next start.
+ */
+async function queueSpriteUpdates(deps: AppDeps, now: Date) {
+  const machines = provider(deps);
+  if (!provisionsInBackground(machines) || !machines.version) return;
+  const rows = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(
+      and(eq(schema.computers.status, 'running'), eq(schema.computers.provider, machines.name)),
+    );
+  for (const row of rows) {
+    if (specOf(row).provisionVersion === machines.version) continue;
+    const claimed = await claimIdle(deps, row, now, DEFAULT_IDLE_TIMEOUT_MIN, 'updating');
+    if (!claimed) continue;
+    deps.logger.info(
+      { computerId: row.id, version: machines.version },
+      'provisioning an idle Sprite again for a new release',
+    );
+    await publishStatus(deps, claimed, 'updating');
+    await queueProvision(deps, claimed, SYSTEM_ACTOR);
+  }
+}
+
+/**
  * Claims a running computer idle past its timeout, unless it was used
  * meanwhile or the owner has one of its screens (K3): a takeover is in use
  * however long the sign-in takes.
  */
-function claimIdle(deps: AppDeps, row: ComputerRow, now: Date) {
-  const idleMs = (row.idleTimeoutMin ?? DEFAULT_IDLE_TIMEOUT_MIN) * 60_000;
+function claimIdle(
+  deps: AppDeps,
+  row: ComputerRow,
+  now: Date,
+  idleMin = row.idleTimeoutMin ?? DEFAULT_IDLE_TIMEOUT_MIN,
+  to: ComputerStatus = 'stopping',
+) {
+  const idleMs = idleMin * 60_000;
   const last = row.lastUsedAt ? new Date(row.lastUsedAt).getTime() : 0;
   if (now.getTime() - last < idleMs) return null;
   const held = deps.db
@@ -985,14 +1321,20 @@ function claimIdle(deps: AppDeps, row: ComputerRow, now: Date) {
       ),
       not(exists(held)),
     ),
+    to,
   );
 }
 
-/** Sets the row `stopping` if it still matches, so two workers sweeping at once stop it once. */
-async function claim(deps: AppDeps, row: ComputerRow, still: SQL | undefined) {
+/** Sets the row `stopping` (or `to`) if it still matches, so two workers sweeping at once stop it once. */
+async function claim(
+  deps: AppDeps,
+  row: ComputerRow,
+  still: SQL | undefined,
+  to: ComputerStatus = 'stopping',
+) {
   const [claimed] = await deps.db
     .update(schema.computers)
-    .set({ status: 'stopping' })
+    .set({ status: to })
     .where(and(eq(schema.computers.id, row.id), still))
     .returning();
   return claimed ?? null;
@@ -1045,6 +1387,13 @@ export async function ensureScreen(
     screen = await screenOf(deps, bot.id);
   }
   if (!screen) throw computerUnavailable('No screen could be allocated for this Bot');
+  if (
+    !allocated &&
+    screen.status === 'running' &&
+    !(await screenAlive(deps, computer, agent, screen))
+  ) {
+    screen = { ...screen, status: 'stopped' };
+  }
   if (allocated || screen.status !== 'running') {
     // The agent keeps Chromium's profile per screen number; a display freed by
     // a deleted Bot must not hand its logins to the next one.
@@ -1061,6 +1410,43 @@ export async function ensureScreen(
     screen = updated ?? screen;
   }
   return screen;
+}
+
+/** When each computer's screens were last checked on its agent, in this process. */
+const screensChecked = new Map<string, number>();
+
+/**
+ * Whether a screen recorded `running` still runs on the agent. Only asked of
+ * a computer that pauses itself (Sprites): a cold wake restarts the agent
+ * with no screens, and nothing tells the server. Asked once per stretch of
+ * use in this process, so a run's screen actions do not each pay for it. A
+ * screen found gone marks every screen of the computer the agent does not
+ * run `stopped`, as a Docker start does.
+ */
+async function screenAlive(
+  deps: AppDeps,
+  computer: ComputerRow,
+  agent: ComputerAgentClient,
+  screen: ScreenRow,
+): Promise<boolean> {
+  if (!computerProvider(deps)?.hold || computer.provider !== 'sprites') return true;
+  const since = inUseSince(computer.id);
+  const checked = screensChecked.get(computer.id);
+  if (since !== null && checked !== undefined && checked >= since) return true;
+  const health = await agent.health();
+  screensChecked.set(computer.id, Date.now());
+  if (!health.screens) return true;
+  const live = health.screens.map((n) => n + FIRST_DISPLAY);
+  await deps.db
+    .update(schema.botScreens)
+    .set({ status: 'stopped' })
+    .where(
+      and(
+        eq(schema.botScreens.computerId, computer.id),
+        live.length ? not(inArray(schema.botScreens.displayNumber, live)) : undefined,
+      ),
+    );
+  return health.screens.includes(screenNumber(screen.displayNumber));
 }
 
 export async function screenOf(deps: Pick<AppDeps, 'db'>, botId: string) {
@@ -1212,34 +1598,32 @@ export interface ComputerRunOptions {
   takeoverPollMs?: number;
   /** How often a running command marks the computer used; `EXEC_TOUCH_MS` by default. */
   execTouchMs?: number;
+  /** The run's use of the computer, begun at its first computer call; the run ends it. */
+  use?: ComputerUseScope;
 }
 
 /** How often a command still running marks the computer used. */
 export const EXEC_TOUCH_MS = 60_000;
 
 /**
- * The agent, with a command marking the computer used while it runs: `bash`
+ * The agent, with a command in use of the computer while it runs: `bash`
  * may run for 30 minutes, longer than the shortest idle timeout, and the idle
- * sweep must not stop the computer under it (plan 9.5).
+ * sweep must not stop the computer under it, nor a Sprite pause (plan 9.5).
  */
 function inUse(
   deps: AppDeps,
-  computerId: string,
+  computer: ComputerRow,
   agent: ComputerAgentClient,
   everyMs = EXEC_TOUCH_MS,
 ): ComputerAgentClient {
   return {
     ...agent,
     async exec(request, options) {
-      const timer = setInterval(() => {
-        touchComputer(deps, computerId).catch((error: unknown) =>
-          deps.logger.warn({ err: error, computerId }, 'marking the computer used failed'),
-        );
-      }, everyMs);
+      const use = beginComputerUse(deps, computer, 'exec', { touchMs: everyMs });
       try {
         return await agent.exec(request, options);
       } finally {
-        clearInterval(timer);
+        await use.end();
       }
     },
   };
@@ -1267,7 +1651,8 @@ export function computerServices(deps: AppDeps, options: ComputerRunOptions): Co
         deps.logger.warn({ err: error, runId }, 'computer started event failed');
       });
     }
-    const agent = inUse(deps, computer.id, agentFor(deps, computer), options.execTouchMs);
+    options.use?.begin(computer);
+    const agent = inUse(deps, computer, agentFor(deps, computer), options.execTouchMs);
     return { computer, agent };
   };
   // While the owner holds the screen, wait for the hand back (K3).

@@ -101,6 +101,13 @@ export interface ComputerCheckpoint {
 
 export interface ComputerProvider {
   readonly name: ComputerProviderName;
+  /**
+   * What a made machine runs when it differs per release and the server
+   * cannot see it in the image: the Sprites provisioning version
+   * (docker/sprites/dist/VERSION). The server records it on the row once a
+   * provisioning succeeded, and provisions again when it changes.
+   */
+  readonly version?: string;
   create(spec: ComputerSpec): Promise<ComputerRef>;
   /** Starts the machine and resolves once its control agent answers. */
   start(ref: ComputerRef): Promise<void>;

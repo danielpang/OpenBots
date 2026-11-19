@@ -301,6 +301,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
 
   const provider: ComputerProvider = {
     name: 'sprites',
+    ...(options.provision ? { version: options.provision.version } : {}),
     async create(spec) {
       const name = spriteName(spec.computerId, prefix);
       // A Sprite left from an earlier row (same id), or kept by a reset that

@@ -74,7 +74,8 @@ import {
   settleSession,
   type CodingSessionRow,
 } from './coder-state.js';
-import { agentFor, EXEC_TOUCH_MS, startComputer, touchComputer } from './computer.js';
+import { agentFor, beginComputerUse, EXEC_TOUCH_MS, startComputer } from './computer.js';
+import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
 import { runSource } from './policy.js';
 import { providerConfig } from './providers.js';
@@ -362,7 +363,8 @@ class SessionRunner {
   private logBytes = 0;
   private logFull = false;
   private timers: ReturnType<typeof setTimeout>[] = [];
-  private touch: ReturnType<typeof setInterval> | null = null;
+  /** The session's use of the computer (holds a Sprite awake, records usage), from its start to its end. */
+  private use: ComputerUse | null = null;
   private git: GitContext | null = null;
   private bot: typeof schema.bots.$inferSelect | null = null;
   private repo: RepoRow | null = null;
@@ -405,8 +407,8 @@ class SessionRunner {
       await this.fail(errorText(error));
     } finally {
       for (const timer of this.timers) clearTimeout(timer);
-      if (this.touch) clearInterval(this.touch);
       await this.proc?.close().catch(() => {});
+      await this.use?.end();
     }
   }
 
@@ -447,6 +449,9 @@ class SessionRunner {
 
     const { computer } = await startComputer(deps, this.owner, { type: 'bot', id: bot.id });
     this.computerId = computer.id;
+    this.use = beginComputerUse(deps, computer, 'coding_session', {
+      touchMs: this.options.touchMs ?? EXEC_TOUCH_MS,
+    });
     this.git = {
       deps,
       agent: agentFor(deps, computer),
@@ -653,13 +658,6 @@ class SessionRunner {
       .catch(() => {
         // It never started; the exit says why.
       });
-    this.touch = setInterval(() => {
-      if (!this.computerId) return;
-      touchComputer(deps, this.computerId).catch((error: unknown) =>
-        deps.logger.warn({ err: error, sessionId: session.id }, 'marking the computer used failed'),
-      );
-    }, this.options.touchMs ?? EXEC_TOUCH_MS);
-    this.touch.unref?.();
     const minutes = this.options.sessionMinutes ?? DEFAULT_SESSION_MINUTES;
     const limit = setTimeout(() => {
       this.timedOut = true;
@@ -1115,7 +1113,6 @@ class SessionRunner {
     this.errors = [];
     this.stderr = '';
     this.stderrPartial = '';
-    if (this.touch) clearInterval(this.touch);
     await this.proc?.close().catch(() => {});
     this.proc = null;
     await setSessionStatus(this.deps, this.id, 'running');

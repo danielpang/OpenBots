@@ -309,6 +309,13 @@
       "when": 1795044579334,
       "tag": "0043_sprites_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1795047155105,
+      "tag": "0044_computer_usage_intervals",
+      "breakpoints": true
     }
   ]
 }

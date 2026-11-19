@@ -59,6 +59,13 @@ export const SCREEN_TOOL_NAMES: readonly string[] = COMPUTER_TOOL_NAMES.filter(
  */
 export const COMPUTER_OFF = 'COMPUTER_OFF';
 export const COMPUTER_OFF_CLOSE_CODE = 4409;
+/**
+ * A terminal or screen socket on a computer that pauses itself (a Sprite)
+ * closed after passing no frames for a while, so the open connection stops
+ * keeping the machine awake. A client reconnects when someone acts, not on
+ * its own.
+ */
+export const COMPUTER_IDLE_CLOSE_CODE = 4408;
 
 /** What a screen tool answers while the owner has taken over the screen (plan 9.4). */
 export const OWNER_HAS_SCREEN = 'The owner has the screen; wait';

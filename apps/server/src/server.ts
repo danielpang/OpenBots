@@ -37,6 +37,7 @@ import { inEveryOrganization, startWorkers } from './workers.js';
 import { openAppDb } from './db/app-role.js';
 import { attachComputerProxies, isComputerSocketPath } from './ws/computer.js';
 import { attachGateway } from './ws/gateway.js';
+import { endAllComputerUses } from './services/computer-use.js';
 import type { ServerExtensions } from './extensions.js';
 import { ensureWorkspace } from './workspace.js';
 
@@ -194,6 +195,10 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
     process.once(signal, async () => {
       logger.info({ signal }, 'shutting down');
       await Promise.allSettled(stops.map((stop) => stop()));
+      // Holds released and usage intervals closed now, not left to expire.
+      await endAllComputerUses().catch((err: unknown) =>
+        logger.warn({ err }, 'ending computer uses failed'),
+      );
       await closeMcpManager(deps);
       await infra.close();
       await db.close();

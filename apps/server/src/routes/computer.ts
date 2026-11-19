@@ -18,6 +18,7 @@ import {
   computerAvailable,
   getComputer,
   IDLE_TIMEOUT_RANGE_MIN,
+  idleSettingsApply,
   listScreens,
   restartComputer,
   runningComputer,
@@ -61,6 +62,14 @@ const ComputerSchema = z
     status: ComputerStatusSchema,
     alwaysOn: z.boolean(),
     idleTimeoutMin: z.number().int().nullable(),
+    idleSettings: z.boolean().openapi({
+      description:
+        'Whether `alwaysOn` and `idleTimeoutMin` apply. False on Sprites, which pause themselves about 30 seconds after their last use and wake on the next',
+    }),
+    error: z.string().nullable().openapi({
+      description:
+        'Why the last setup in the background failed (Sprites), while the status is `error`',
+    }),
     lastUsedAt: z.iso.datetime().nullable(),
     createdAt: z.iso.datetime(),
     screens: z.array(ScreenSchema),
@@ -140,6 +149,8 @@ function toComputer(row: ComputerRow, screens: ScreenRow[]): z.infer<typeof Comp
     status: ComputerStatusSchema.catch('error').parse(row.status),
     alwaysOn: row.alwaysOn,
     idleTimeoutMin: row.idleTimeoutMin,
+    idleSettings: idleSettingsApply(row),
+    error: row.status === 'error' ? ((row.spec as { error?: string } | null)?.error ?? null) : null,
     lastUsedAt: iso(row.lastUsedAt),
     createdAt: iso(row.createdAt)!,
     screens: screens.map(toScreen),
@@ -203,6 +214,25 @@ const computerResponse = (description: string) => ({
 const unavailable = problemResponse(
   'No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)',
 );
+const settingUp = computerResponse(
+  'Being made or started in the background (Sprites): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
+);
+
+/**
+ * A start that a provisioning job finishes in the background (Sprites)
+ * answers 202 with the computer as it is now, instead of an error.
+ */
+async function started(c: Context<AppEnv>, starting: Promise<{ computer: ComputerRow }>) {
+  try {
+    const { computer } = await starting;
+    return c.json(await computerOut(c, computer), 200);
+  } catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'COMPUTER_STARTING') throw error;
+    const row = await getComputer(c.var.deps, c.var.user);
+    if (!row) throw error;
+    return c.json(await computerOut(c, row), 202);
+  }
+}
 
 export const computerRoutes = createRouter()
   .openapi(
@@ -239,7 +269,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Keep the computer on, or set how long it idles before it stops',
       description:
-        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change.',
+        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (Sprites).',
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -284,12 +314,14 @@ export const computerRoutes = createRouter()
       summary: 'Start the computer, creating it on first use',
       middleware: [requireUser] as const,
       security: authenticated,
-      responses: { 200: computerResponse('Running'), ...authProblems, 503: unavailable },
+      responses: {
+        200: computerResponse('Running'),
+        202: settingUp,
+        ...authProblems,
+        503: unavailable,
+      },
     }),
-    async (c) => {
-      const { computer } = await startComputer(c.var.deps, c.var.user);
-      return c.json(await computerOut(c, computer), 200);
-    },
+    async (c) => started(c, startComputer(c.var.deps, c.var.user)),
   )
   .openapi(
     createRoute({
@@ -350,6 +382,7 @@ export const computerRoutes = createRouter()
       security: authenticated,
       responses: {
         200: computerResponse('Running'),
+        202: settingUp,
         ...authProblems,
         404: problemResponse('The account has no computer yet'),
         503: unavailable,
@@ -358,8 +391,7 @@ export const computerRoutes = createRouter()
     async (c) => {
       const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
-      const { computer } = await restartComputer(c.var.deps, c.var.user, row);
-      return c.json(await computerOut(c, computer), 200);
+      return started(c, restartComputer(c.var.deps, c.var.user, row));
     },
   )
   .openapi(

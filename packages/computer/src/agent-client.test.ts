@@ -23,7 +23,7 @@ describe('agent client', () => {
   afterEach(() => agent.close());
 
   it('sends the bearer token and reads health', async () => {
-    expect(await client.health()).toEqual({ ok: true, version: 'fake' });
+    expect(await client.health()).toEqual({ ok: true, version: 'fake', screens: [] });
     const wrong = createAgentClient({ url: agent.url, token: 'nope' });
     await expect(wrong.health()).rejects.toMatchObject({
       status: 401,

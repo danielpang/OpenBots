@@ -13,7 +13,16 @@ import { BOT_STATE_QUEUE, settleHandler } from './services/bot-state.js';
 import { recoverInterruptedCoderSessions } from './services/coder-recovery.js';
 import { createCoderWorker } from './services/coder-runner.js';
 import { PAIRING_SWEEP_MS, expireDuePairings } from './services/devices.js';
-import { IDLE_SWEEP_MS, refreshSandboxImage, sweepIdleComputers } from './services/computer.js';
+import {
+  COMPUTERS_QUEUE,
+  IDLE_SWEEP_MS,
+  provisionHandler,
+  recoverProvisioning,
+  refreshSandboxImage,
+  sweepIdleComputers,
+} from './services/computer.js';
+import { closeDanglingUsage } from './services/computer-usage.js';
+import { endAllComputerUses } from './services/computer-use.js';
 import { expireDueLoginRequests, LOGINS_QUEUE, loginExpiryHandler } from './services/logins.js';
 import { MEMORIES_QUEUE, reembedHandler } from './services/memories.js';
 import { startRoutineScheduler } from './services/routines.js';
@@ -48,6 +57,8 @@ export const JOB_HANDLERS: Record<
   [CODERS_QUEUE]: { handler: (deps) => createCoderWorker(deps) as JobHandler, concurrency: 8 },
   // A Bot's memories re-embedded after its embedding source changed (M1).
   [MEMORIES_QUEUE]: { handler: (deps) => reembedHandler(deps) as JobHandler, concurrency: 2 },
+  // Making and provisioning Sprites (plan 9.5), one job per computer at a time (groupKey).
+  [COMPUTERS_QUEUE]: { handler: (deps) => provisionHandler(deps) as JobHandler, concurrency: 4 },
 };
 
 /**
@@ -79,12 +90,21 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
   if (expired) logger.info({ approvals: expired }, 'expired overdue approval requests');
   const logins = await inEveryOrganization(deps, () => expireDueLoginRequests(deps));
   if (logins) logger.info({ logins }, 'expired overdue sign-in requests');
+  // Usage intervals a process that died left open, closed at their last heartbeat (plan 9.5).
+  const dangling = await inEveryOrganization(deps, () => closeDanglingUsage(deps));
+  if (dangling) logger.info({ intervals: dangling }, 'closed computer usage left open');
   for (const [name, { handler, concurrency }] of Object.entries(JOB_HANDLERS)) {
     await infra.queue(name).process(handler(deps), {
       concurrency,
       onError: (err, job) => logger.error({ err, queue: name, jobId: job.id }, 'job failed'),
     });
   }
+  // Provisionings a restart cut short start again; a queued one finds its work done.
+  inEveryOrganization(deps, () => recoverProvisioning(deps)).then(
+    (requeued) =>
+      requeued && logger.warn({ computers: requeued }, 'requeued computer provisioning'),
+    (err: unknown) => logger.error({ err }, 'requeueing computer provisioning failed'),
+  );
   // A new release's computer image, for computers to move to at their next start (plan 16.3).
   void refreshSandboxImage(deps);
   // Idle computers stop after their timeout (plan 9.5); the home volume stays.
@@ -92,6 +112,9 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     inEveryOrganization(deps, () => sweepIdleComputers(deps)).then(
       (stopped) => stopped && logger.info({ computers: stopped }, 'stopped idle computers'),
       (err: unknown) => logger.error({ err }, 'idle computer sweep failed'),
+    );
+    inEveryOrganization(deps, () => closeDanglingUsage(deps)).catch((err: unknown) =>
+      logger.error({ err }, 'closing dangling computer usage failed'),
     );
   }, IDLE_SWEEP_MS);
   sweep.unref();
@@ -147,6 +170,7 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
       stopScheduler();
       await stopFanOut();
       await push?.stop();
+      await endAllComputerUses();
     },
   };
 }
