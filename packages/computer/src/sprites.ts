@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createAgentClient } from './agent-client.js';
 import { waitForAgent } from './docker.js';
@@ -40,8 +41,21 @@ import {
 
 /** Where the provision script records the version it installed. */
 export const PROVISION_VERSION_FILE = '/opt/openbots/provision.version';
-/** Where the script and bundle are uploaded before the script runs; removed after. */
+/**
+ * Where the script and bundle are uploaded before the script runs, with a
+ * suffix of its own per attempt (`stagingDir`); removed after. Its own, so a
+ * write from an earlier attempt that lands late (a timed out upload the API
+ * still completes) cannot replace this attempt's files.
+ */
 export const PROVISION_STAGING_DIR = '/var/tmp/openbots-provision';
+/** provision.sh's exit code when another provisioning holds its lock past the wait. */
+export const PROVISION_LOCKED_EXIT = 75;
+/**
+ * How long a provisioning may run on once the connection to it is gone: as
+ * short as the API takes. Nobody reads its output then, no retry can attach
+ * to it, and a later attempt would wait on its lock.
+ */
+export const PROVISION_MAX_RUN_AFTER_DISCONNECT = '1s';
 /** The control agent's port: the one HTTP port a Sprite's URL routes to. */
 export const SPRITES_AGENT_PORT = 8080;
 export const DEFAULT_SPRITES_NAME_PREFIX = 'ob';
@@ -229,44 +243,57 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       readLocal(setup.scriptPath),
       readLocal(setup.bundlePath),
     ]);
-    const scriptPath = `${PROVISION_STAGING_DIR}/provision.sh`;
-    const bundlePath = `${PROVISION_STAGING_DIR}/agent-bundle.tgz`;
+    const staging = stagingDir();
+    const scriptPath = `${staging}/provision.sh`;
+    const bundlePath = `${staging}/agent-bundle.tgz`;
     // Neither file holds a secret (the token goes on stdin), and the API may
     // write them as another user than the one exec runs as: readable by all.
-    await run(name, asRoot(prepareStaging()), 'Preparing the provisioning');
-    await upload(name, scriptPath, script, 0o644);
-    await upload(name, bundlePath, bundle, 0o644);
-    const result = await api.exec(
-      name,
-      [
-        'bash',
-        '-c',
-        'IFS= read -r OPENBOTS_AGENT_TOKEN; export OPENBOTS_AGENT_TOKEN; exec bash "$0" "$1"',
-        scriptPath,
-        bundlePath,
-      ],
-      {
-        stdin: `${agentToken}\n`,
-        env: {
-          OPENBOTS_AGENT_PORT: String(SPRITES_AGENT_PORT),
-          OPENBOTS_PROVISION_VERSION: setup.version,
-          TZ: timezone,
+    await run(name, asRoot(prepareStaging(staging)), 'Preparing the provisioning');
+    try {
+      await upload(name, scriptPath, script, 0o644);
+      await upload(name, bundlePath, bundle, 0o644);
+      const result = await api.exec(
+        name,
+        [
+          'bash',
+          '-c',
+          'IFS= read -r OPENBOTS_AGENT_TOKEN; export OPENBOTS_AGENT_TOKEN; exec bash "$0" "$1"',
+          scriptPath,
+          bundlePath,
+        ],
+        {
+          stdin: `${agentToken}\n`,
+          env: {
+            OPENBOTS_AGENT_PORT: String(SPRITES_AGENT_PORT),
+            OPENBOTS_PROVISION_VERSION: setup.version,
+            TZ: timezone,
+          },
+          timeoutMs: provisionTimeoutMs,
+          maxRunAfterDisconnect: PROVISION_MAX_RUN_AFTER_DISCONNECT,
         },
-        timeoutMs: provisionTimeoutMs,
-      },
-    );
-    if (result.exitCode !== 0) {
-      throw new Error(`Provisioning the Sprite failed (exit ${result.exitCode}): ${tail(result)}`);
-    }
-    const installed = await installedVersion(name);
-    if (installed !== setup.version) {
-      throw new Error(
-        `Provisioning the Sprite recorded version ${installed ?? 'none'}, not ${setup.version}: ${tail(result)}`,
       );
+      if (result.exitCode === PROVISION_LOCKED_EXIT) {
+        throw new Error(
+          `Another provisioning of the Sprite is still running; try again once it ends: ${tail(result)}`,
+        );
+      }
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `Provisioning the Sprite failed (exit ${result.exitCode}): ${tail(result)}`,
+        );
+      }
+      const installed = await installedVersion(name);
+      if (installed !== setup.version) {
+        throw new Error(
+          `Provisioning the Sprite recorded version ${installed ?? 'none'}, not ${setup.version}: ${tail(result)}`,
+        );
+      }
+    } finally {
+      // As root: the API may have written the files as root, in a directory
+      // exec made as another user. One left by a failure here goes with the
+      // next attempt's sweep of old staging directories.
+      await api.exec(name, asRoot(`rm -rf ${staging}`)).catch(() => undefined);
     }
-    // As root: the API may have written the files as root, in a directory
-    // exec made as another user.
-    await api.exec(name, asRoot(`rm -rf ${PROVISION_STAGING_DIR}`)).catch(() => undefined);
   }
 
   /** Our holds on the Sprite (Tasks API tasks with our prefix); none unless it runs. */
@@ -450,15 +477,25 @@ function clearHome(): string {
   ].join('\n');
 }
 
+/** A staging directory of its own for one provisioning attempt. */
+export function stagingDir(): string {
+  return `${PROVISION_STAGING_DIR}-${randomBytes(8).toString('hex')}`;
+}
+
 /**
  * Makes the staging directory afresh, as root. It sits in /var/tmp, where the
  * Bots' commands can write: a directory or link they left at the path would
  * otherwise take the upload, and they could swap the script that then runs as
  * root. `mkdir` without -p fails if one appears again after the `rm`. It
  * belongs to the user exec runs as (sudo's caller), as `mkdir -p` made it before.
+ * Staging directories over an hour old (attempts that could not clean up,
+ * long past any provisioning's time limit) go first.
  */
-export function prepareStaging(dir = PROVISION_STAGING_DIR): string {
+export function prepareStaging(dir: string): string {
+  const parent = dir.slice(0, dir.lastIndexOf('/')) || '/';
+  const stem = PROVISION_STAGING_DIR.slice(PROVISION_STAGING_DIR.lastIndexOf('/') + 1);
   return [
+    `{ find ${parent} -mindepth 1 -maxdepth 1 -name '${stem}*' -mmin +60 -exec rm -rf -- {} + || true; }`,
     `rm -rf -- ${dir}`,
     `mkdir -m 0755 -- ${dir}`,
     `chown -- "\${SUDO_USER:-root}" ${dir}`,

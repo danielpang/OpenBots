@@ -139,8 +139,12 @@ export interface ComputerProvider {
   hold?(ref: ComputerRef, name: string, seconds: number): Promise<void>;
   /** Drops the hold `name`; one already gone is fine. Sprites only. */
   release?(ref: ComputerRef, name: string): Promise<void>;
-  /** Snapshots the machine's whole disk; resolves with the checkpoint's id. Sprites only. */
-  checkpoint?(ref: ComputerRef, comment?: string): Promise<string>;
+  /**
+   * Snapshots the machine's whole disk; resolves with the checkpoint's id, or
+   * null when it was made but cannot be told apart from others (give a unique
+   * `comment`). Sprites only.
+   */
+  checkpoint?(ref: ComputerRef, comment?: string): Promise<string | null>;
   /** Puts the whole disk back as it was at checkpoint `id`. Sprites only. */
   restore?(ref: ComputerRef, id: string): Promise<void>;
   listCheckpoints?(ref: ComputerRef): Promise<ComputerCheckpoint[]>;
