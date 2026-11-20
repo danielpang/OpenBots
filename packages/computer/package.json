@@ -26,6 +26,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fly/sprites": "0.2.4",
     "@openbots/computer-agent": "workspace:*",
     "@openbots/shared": "workspace:*",
     "dockerode": "^4.0.12",

@@ -13,7 +13,7 @@ This is not the personal-use setup in [deploy/sprites](../../deploy/sprites/READ
 
 ## The contract with the provider
 
-The server's Sprite provider uploads `provision.sh` and `agent-bundle.tgz` into the Sprite and runs, as root or as a user with passwordless sudo:
+The server's Sprite provider (`packages/computer/src/sprites.ts`, which calls the Sprites API through the official `@fly/sprites` SDK) uploads `provision.sh` and `agent-bundle.tgz` into the Sprite and runs, as root or as a user with passwordless sudo:
 
 ```sh
 bash provision.sh /path/to/agent-bundle.tgz

@@ -154,6 +154,9 @@ a Docker container. A self-hosted install does not need it and leaves these empt
 agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
 set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
 the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
+The server calls the Sprites API with Fly's `@fly/sprites` SDK, which adds coarse client headers
+(whether the process has a terminal, its parent's kind, CI) to its requests; set
+`SPRITES_CLIENT_SIGNALS=0` in the server's environment to leave them out.
 
 ### Egress proxy for the computers
 
