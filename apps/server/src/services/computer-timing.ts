@@ -1,0 +1,89 @@
+import {
+  SPRITES_RETIRE_INSIDE_MAX_MS,
+  SPRITES_RETIRE_MAX_MS,
+  SPRITES_UNRETIRE_MAX_MS,
+} from '@openbots/computer';
+
+// Every time bound the computers' claims rest on, in one place, with the
+// checks between them run as the server starts (this module's load): a claim
+// that could run out while its holder is still at work would let a second
+// actor in beside the first. computer.ts and computer-retire.ts take theirs
+// from here.
+
+/** Slack for the database writes around a provider's calls, and a slow event loop. */
+export const CLAIM_MARGIN_MS = 60_000;
+
+/**
+ * How often whoever holds a computer `stopping` (a stop, a reset) refreshes
+ * its `status_at` while its provider calls run (computer.ts `holdingStop`).
+ */
+export const STOPPING_HEARTBEAT_MS = 15_000;
+/**
+ * How long a `stopping` computer may go without that refresh before a start,
+ * a reset or the sweep takes it over: its holder died or stalled. A computer
+ * a reset retired is never taken over this way while its retirement is open
+ * (computer.ts `abandonedStop`): the retirement's own record holds it.
+ */
+export const STOPPING_TAKEOVER_MS = 4 * STOPPING_HEARTBEAT_MS;
+
+/** The longest a reset's own work on the record takes: the cut, then its undo. */
+export const RESET_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_UNRETIRE_MAX_MS;
+/** The longest a retire job takes on a record: the cut, then the steps inside or a read back. */
+export const JOB_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_RETIRE_INSIDE_MAX_MS;
+
+/**
+ * How long a retire's claim on its record lasts: past the longest the
+ * reset's cut and undo, or the job's cut and steps inside, can take, so the
+ * sweep does not take a record whose holder is still at work. The claim
+ * token keeps a late one from writing all the same.
+ */
+export const RETIRE_LEASE_MS = 5 * 60_000;
+/** How long a deletion's claim lasts before another worker may take the row again. */
+export const RETIRED_LEASE_MS = 30 * 60_000;
+/** How long an operator's restore may take before the sweep takes the machine back. */
+export const RESTORE_LEASE_MS = 30 * 60_000;
+
+/**
+ * How long a provisioning job may go without its heartbeat before a start or
+ * the sweep queues it again (computer.ts): counted from when it last showed
+ * it was running, not from when it was queued.
+ */
+export const PROVISION_HEARTBEAT_MS = 15_000;
+export const PROVISION_STALE_MS = 20 * 60_000;
+/**
+ * The longest a provisioning job can run once its computer moved on before
+ * it ends: it checks its claim every heartbeat and ends its provider call
+ * then, but a process cut off from the database is bounded only by the
+ * provisioning's own limits (packages/computer sprites.ts and sprites-api.ts:
+ * 2 minutes to make the Sprite, 5 for each upload, 15 for the script, 1 for
+ * the agent to answer).
+ */
+export const PROVISION_MAX_MS = 30 * 60_000;
+/**
+ * When a retired machine's steps inside it are run once more: past the
+ * longest a provisioning the reset cancelled could still be running, so an
+ * agent it installed after all is removed (computer-retire.ts).
+ */
+export const RETIRED_RECHECK_MS = PROVISION_MAX_MS + CLAIM_MARGIN_MS;
+
+function check(ok: boolean, what: string) {
+  if (!ok) throw new Error(`Computer time bounds: ${what}`);
+}
+
+check(
+  RETIRE_LEASE_MS > RESET_RETIRE_MAX_MS + CLAIM_MARGIN_MS,
+  "RETIRE_LEASE_MS must outlast a reset's cut and its undo",
+);
+check(
+  RETIRE_LEASE_MS > JOB_RETIRE_MAX_MS + CLAIM_MARGIN_MS,
+  "RETIRE_LEASE_MS must outlast a job's cut and its steps inside",
+);
+check(
+  STOPPING_TAKEOVER_MS >= 3 * STOPPING_HEARTBEAT_MS,
+  'STOPPING_TAKEOVER_MS must allow for two missed heartbeats',
+);
+check(
+  PROVISION_STALE_MS >= 10 * PROVISION_HEARTBEAT_MS,
+  'PROVISION_STALE_MS must allow for missed heartbeats',
+);
+check(RETIRED_LEASE_MS > CLAIM_MARGIN_MS, 'RETIRED_LEASE_MS must outlast a deletion');

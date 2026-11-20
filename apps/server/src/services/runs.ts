@@ -14,7 +14,8 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
-import { assertPerson } from './artifact-sharing.js';
+import { SHARE_AN_ARTIFACT } from './artifact-sharing.js';
+import { assertPerson } from './person.js';
 import { publishEvent } from '../infra/index.js';
 import { observeRun } from '../metrics.js';
 import { assertBotOwner } from '../ownership.js';
@@ -551,7 +552,7 @@ export async function actOnWidget(
     PERSON_ONLY_TOOLS.has(String((part.props as { tool_name?: unknown }).tool_name)) &&
     (action as { type?: unknown } | null)?.type === 'approve'
   ) {
-    await assertPerson(deps.db, owner);
+    await assertPerson(deps.db, owner, SHARE_AN_ARTIFACT);
   }
   return applyWidgetAction(deps, messageId, partIndex, action, owner.id);
 }

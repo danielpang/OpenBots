@@ -12,6 +12,7 @@ import { schema } from '../db/client.js';
 import { createTestApp, type TestApp } from '../test-app.js';
 import type { ComputerWorkRefusal, ComputerWorkRequest } from '../extensions.js';
 import { getComputer, setComputerProvider, sweepIdleComputers } from './computer.js';
+import { fenceOf, forgetFences, loadFences } from './computer-fence.js';
 import { NO_COMPUTER, STDIO_TOUCH_MS } from './computer-stdio.js';
 import { closeMcpManager, mcpManager } from './connectors.js';
 import { inEveryOrganization } from '../workers.js';
@@ -272,6 +273,36 @@ describe('stdio connectors in the computer (managed)', () => {
     );
     expect(textOf(echo)).toBe('back');
     expect((await computerOf('alice@example.com', orgA))!.status).toBe('running');
+  });
+
+  it("stops an owner's servers when a reset's fence reaches a process that missed the bus", async () => {
+    const manager = mcpManager(t.ownerDeps);
+    expect(manager.running(bobPg.id)).toBe(true);
+    const computer = (await computerOf('bob@example.com', orgA))!;
+    // Another process reset Bob's computer; this one only reads its record.
+    const since = new Date();
+    const [record] = await t.db
+      .insert(schema.retiredComputers)
+      .values({
+        workspaceId: orgA,
+        ownerId: computer.ownerId,
+        computerId: computer.id,
+        provider: computer.provider,
+        providerRef: `elsewhere-${computer.id}`,
+        status: 'deleted',
+        retiredAt: since,
+        deleteAfter: since,
+        fence: fenceOf(computer.agentToken),
+      })
+      .returning();
+    try {
+      await loadFences(t.db, since);
+      await vi.waitFor(() => expect(manager.running(bobPg.id)).toBe(false));
+      expect(manager.running(aliceFs.id)).toBe(true);
+    } finally {
+      await t.db.delete(schema.retiredComputers).where(eq(schema.retiredComputers.id, record!.id));
+      forgetFences();
+    }
   });
 
   it('does not wake a computer stopped between automatic preflight and launch', async () => {

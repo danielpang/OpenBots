@@ -17,8 +17,8 @@ import { DomainError, notFound } from '../errors.js';
 import { parseMasterKey } from '../secrets.js';
 import { effectiveSettings, getOrganization, isOrgAdmin, type Workspace } from '../workspace.js';
 import { recordAudit, type AuditActor } from './audit.js';
-import { isDeviceKey } from './devices.js';
 import { openFile } from './files.js';
+import { assertPerson } from './person.js';
 
 // Sharing Artifacts and the artifact host's rules (plan 21.11).
 //
@@ -58,27 +58,13 @@ export function requireArtifactHost(config: Pick<Config, 'artifactHost'>) {
   return config.artifactHost;
 }
 
-export const personRequired = () =>
-  new DomainError(
-    403,
-    'PERSON_REQUIRED',
-    'Only a person can share an Artifact: use the app or a paired device. An API key cannot.',
-  );
-
 /**
- * A person is behind the request: a signed-in session, or a device the
- * owner paired (the phone, the Mac app). A plain API key is a script's, and
- * so is anything a Bot could hold, so it may narrow what is shared but never
- * widen it.
+ * What only a person may do here (`assertPerson`, services/person.ts): a
+ * signed-in session, or a device the owner paired (the phone, the Mac app).
+ * A plain API key is a script's, and so is anything a Bot could hold, so it
+ * may narrow what is shared but never widen it.
  */
-export async function assertPerson(
-  db: Db,
-  caller: Pick<CurrentUser, 'workspaceId'> & { apiKeyId?: string | null },
-): Promise<void> {
-  if (!caller.apiKeyId) return;
-  if (await isDeviceKey(db, { workspaceId: caller.workspaceId, apiKeyId: caller.apiKeyId })) return;
-  throw personRequired();
-}
+export const SHARE_AN_ARTIFACT = 'share an Artifact';
 
 // --- Names on the artifact domain ------------------------------------------------
 
@@ -483,7 +469,7 @@ export async function setVisibility(
     if (change.visibility === 'public') await publicLinksLock(tx, owner.workspaceId, 'share');
     const row = await ownedArtifact(tx, owner, artifactId, true);
     if (options.caller && widens(row.visibility, change.visibility)) {
-      await assertPerson(tx, options.caller);
+      await assertPerson(tx, options.caller, SHARE_AN_ARTIFACT);
     }
     // An approval shares once: the approval row records its use, under the
     // Artifact's lock and in this transaction, so two runs of the same

@@ -30,6 +30,7 @@ import {
   RETIRED_COMPUTERS_QUEUE,
   RETIRE_LEASE_MS,
   RETIRED_LEASE_MS,
+  RETIRED_RECHECK_MS,
   RETIRED_MAX_ATTEMPTS,
   RETIRED_SWEEP_MS,
   retiredComputerHandler,
@@ -137,8 +138,36 @@ describe('retired computers', () => {
   const machines = () => computerProvider(t.ownerDeps)!;
   const sweep = (now?: Date) =>
     inEveryOrganization(t.deps, () => sweepRetiredComputers(t.deps, now));
-  const job = (retiredId: string, kind: 'retire' | 'delete') =>
-    t.inOrganization(() => runRetiredComputerJob(t.deps, machines(), { retiredId, kind }));
+  /** The row's job as the queue runs it: with the claim it was queued under (the row's now). */
+  const claimOf = async (retiredId: string) =>
+    (
+      await t.db
+        .select({ claim: schema.retiredComputers.claim })
+        .from(schema.retiredComputers)
+        .where(eq(schema.retiredComputers.id, retiredId))
+    )[0]?.claim ?? undefined;
+  const job = async (retiredId: string, kind: 'retire' | 'delete', now?: Date) => {
+    const claim = await claimOf(retiredId);
+    return t.inOrganization(() =>
+      runRetiredComputerJob(
+        t.deps,
+        machines(),
+        { retiredId, kind, ...(claim ? { claim } : {}) },
+        now,
+      ),
+    );
+  };
+  /**
+   * The sweep's one more run of a retired machine's steps inside, past
+   * `RETIRED_RECHECK_MS` (a provisioning the reset cancelled may have put an
+   * agent back): queued once, run, and not again.
+   */
+  const recheck = async (row: { id: string; retiredAt: Date }) => {
+    const at = new Date(row.retiredAt.getTime() + RETIRED_RECHECK_MS + 1);
+    expect(await sweep(at)).toBe(1);
+    await job(row.id, 'retire', at);
+    expect(await sweep(at)).toBe(0);
+  };
   const callsOn = (name: string, from = 0) =>
     sprites.api.calls.slice(from).filter((c) => c.name === name);
   /**
@@ -402,7 +431,7 @@ describe('retired computers', () => {
       expect(old.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
     });
 
-    it('when the old Sprite cannot be cut off, the reset fails and changes nothing', async () => {
+    it('when the old Sprite cannot be cut off, the reset fails, keeps the files and sign-ins, and rotates the agent token', async () => {
       const m = await member('nocut@example.com');
       const before = await m.row();
       const oldName = before.containerId!;
@@ -421,23 +450,35 @@ describe('retired computers', () => {
       }
       expect(res.status).toBe(503);
       const body = (await res.json()) as { detail?: string; message?: string };
-      expect(JSON.stringify(body)).toMatch(/nothing was changed/);
-      expect(JSON.stringify(body)).not.toMatch(/Sprite/);
-      // The member's computer is as it was, on its machine, with its agent.
+      // What happened, plainly: stopped, sessions ended, files and sign-ins kept.
+      expect(JSON.stringify(body)).toMatch(
+        /It was stopped and its coding sessions ended, but its files and sign-ins are as they were/,
+      );
+      expect(JSON.stringify(body)).not.toMatch(
+        /nothing was changed|Sprite|\u2013|\u2014|[\u2013\u2014]/,
+      );
+      // The member's computer has its machine back, with no agent: the old
+      // token was fenced when the reset began, so the next start provisions
+      // a new one.
       const after = await m.row();
       expect(after).toMatchObject({
         containerId: oldName,
-        agentUrl: before.agentUrl,
+        agentUrl: null,
+        agentToken: null,
         machineKey: before.machineKey,
+        status: 'stopped',
       });
-      expect(after.agentToken).not.toBeNull();
-      expect(after.status).not.toBe('error');
+      expect(() => agentFor(t.ownerDeps, before)).toThrow(/was reset/);
       expect(await retiredOf(m.ownerId)).toEqual([]);
       const old = sprites.api.sprites.get(oldName)!;
       expect(old.labels).not.toContain(SPRITES_RETIRED_LABEL);
       expect(old.urlAuth).toBe('public');
-      // And it starts as before; a reset tried again goes through.
-      expect((await m.start()).containerId).toBe(oldName);
+      // It starts on the same machine, with a new agent token; a reset tried again goes through.
+      const tokens = sprites.api.provisions.length;
+      const back = await m.start();
+      expect(back.containerId).toBe(oldName);
+      expect(sprites.api.provisions).toHaveLength(tokens + 1);
+      expect(back.agentToken).not.toEqual(before.agentToken);
       expect(provider.retire).toBeTypeOf('function');
       expect((await m.reset(true)).res.status).toBe(202);
       expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'retired' }]);
@@ -449,7 +490,15 @@ describe('retired computers', () => {
       const { res } = await m.reset(true, { deleteOldComputer: true });
       expect(res.status, await res.clone().text()).toBe(202);
       expect(sprites.api.sprites.has(oldName)).toBe(false);
-      expect(await retiredOf(m.ownerId)).toEqual([]);
+      // Deleted through its record: the job's check, retries and audit.
+      const [record] = await retiredOf(m.ownerId);
+      expect(record).toMatchObject({ providerRef: oldName, status: 'deleted' });
+      expect(record!.sealedAt).not.toBeNull();
+      expect(
+        (await audits('computer.retired_delete')).filter(
+          (a) => (a.metadata as { retiredId?: string }).retiredId === record!.id,
+        ),
+      ).toHaveLength(1);
       const [audit] = (await audits('computer.reset')).filter(
         (a) => (a.metadata as { oldComputer?: string }).oldComputer === 'deleted',
       );
@@ -461,28 +510,64 @@ describe('retired computers', () => {
       expect((await m.start()).status).toBe('running');
     });
 
-    it('refuses a reset while a job is starting the computer, and the job keeps it as it was', async () => {
+    it('a reset cancels a start under way: its job writes nothing after, and the old Sprite is retired', async () => {
       const m = await member('busy-reset@example.com');
       const row = await m.row();
-      await t.db
+      // A start queued its job, as `queueProvision` does: a new attempt, a new generation.
+      const [queued] = await t.db
         .update(schema.computers)
-        .set({ status: 'starting' })
-        .where(eq(schema.computers.id, row.id));
-      const error = await t
-        .inOrganization(() =>
-          destroyComputer(t.deps, { ...row, status: 'starting' }, { signIns: true }),
-        )
-        .then(
-          () => null,
-          (e: unknown) => e as { status?: number; code?: string },
+        .set({
+          status: 'starting',
+          generation: sql`${schema.computers.generation} + 1`,
+          spec: {
+            ...(row.spec as object),
+            provision: { attempt: 'attempt-x', at: new Date().toISOString() },
+          },
+        })
+        .where(eq(schema.computers.id, row.id))
+        .returning();
+      const provider = machines();
+      const start = provider.start;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let entered!: () => void;
+      const inside = new Promise<void>((resolve) => (entered = resolve));
+      provider.start = async (ref) => {
+        entered();
+        await gate;
+        return start.call(provider, ref);
+      };
+      try {
+        const running = t.inOrganization(() =>
+          provisionComputer(t.deps, {
+            computerId: row.id,
+            workspaceId,
+            by: { type: 'user', id: m.ownerId },
+            attempt: 'attempt-x',
+          }),
         );
-      expect(error).toMatchObject({ status: 409, code: 'COMPUTER_BUSY' });
-      expect(await retiredOf(m.ownerId)).toEqual([]);
-      expect((await m.row()).containerId).toBe(row.containerId);
-      await t.db
-        .update(schema.computers)
-        .set({ status: 'running' })
-        .where(eq(schema.computers.id, row.id));
+        await inside;
+        // The member resets meanwhile: not refused, and the old machine is out of reach at once.
+        const reset = await t.inOrganization(() =>
+          destroyComputer(t.deps, queued!, { signIns: true }),
+        );
+        expect(reset).toMatchObject({ status: 'stopped', containerId: null });
+        const old = sprites.api.sprites.get(row.containerId!)!;
+        expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
+        release();
+        await running;
+      } finally {
+        provider.start = start;
+      }
+      // The cancelled job wrote nothing: not `running` on the old machine, not `error`.
+      const after = await m.row();
+      expect(after).toMatchObject({ status: 'stopped', containerId: null, agentToken: null });
+      expect(after.machineKey).not.toBe(row.machineKey);
+      expect(await retiredOf(m.ownerId)).toMatchObject([
+        { providerRef: row.containerId, status: 'retiring' },
+      ]);
+      await finishRetires(m.ownerId);
+      expect((await m.start()).containerId).not.toBe(row.containerId);
     });
 
     it('fences the old agent: a row read before the reset no longer reaches it', async () => {
@@ -552,10 +637,11 @@ describe('retired computers', () => {
           }),
         );
         await inside;
-        // Another start gave the row its own attempt meanwhile.
+        // Another start gave the row its own attempt meanwhile, as `queueProvision` does.
         await t.db
           .update(schema.computers)
           .set({
+            generation: sql`${schema.computers.generation} + 1`,
             spec: {
               ...(row.spec as object),
               provision: { attempt: 'attempt-b', at: new Date().toISOString() },
@@ -586,6 +672,7 @@ describe('retired computers', () => {
       await isolate(m.ownerId);
       const [row] = await retiredOf(m.ownerId);
       expect(await sweep()).toBe(0);
+      await recheck(row!);
       expect(await sweep(new Date(row!.deleteAfter.getTime() - 1))).toBe(0);
       expect(sprites.api.sprites.has(row!.providerRef)).toBe(true);
       // Two workers sweep at once: one claims it.
@@ -707,6 +794,7 @@ describe('retired computers', () => {
       await endMembershipAccess(t.deps, { userId: m.ownerId, workspaceId, removed: true });
       const [row] = await retiredOf(m.ownerId);
       expect(row!.deleteAfter.getTime()).toBeLessThanOrEqual(Date.now());
+      // The next sweep takes it, and its job deletes it.
       expect(await sweep()).toBe(1);
       await job(row!.id, 'delete');
       expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'deleted' }]);
@@ -769,6 +857,7 @@ describe('retired computers', () => {
             runRetiredComputerJob({ ...t.deps, logger }, provider, {
               retiredId: row!.id,
               kind: 'retire',
+              claim: row!.claim!,
             }),
           );
         }
@@ -1118,7 +1207,8 @@ describe('retired computers', () => {
       expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
       expect(old.urlAuth).toBe('sprite');
       expect(old.policy).toEqual(SPRITES_DENY_ALL);
-      // Idempotent, and it can still be deleted when due, or restored.
+      // Idempotent past its one more run inside, and it can still be deleted when due, or restored.
+      await recheck((await retiredOf(m.ownerId))[0]!);
       expect(await sweep(later)).toBe(0);
       expect((await m.row()).containerId).toBeNull();
     });

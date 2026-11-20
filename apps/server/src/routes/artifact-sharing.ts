@@ -6,7 +6,6 @@ import { DomainError } from '../errors.js';
 import { requireUser } from '../middleware/auth.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
 import {
-  assertPerson,
   changeSharing,
   getShared,
   getSharing,
@@ -14,10 +13,12 @@ import {
   openLink,
   openShared,
   requireArtifactHost,
+  SHARE_AN_ARTIFACT,
   SHARED_PAGE,
   type SharedArtifact,
   type SharingState,
 } from '../services/artifact-sharing.js';
+import { assertPerson } from '../services/person.js';
 import { ArtifactVisibilitySchema, INLINE_MIME } from './artifacts.js';
 
 // Sharing Artifacts (plan 21.11; services/artifact-sharing.ts). Core routes,
@@ -218,7 +219,7 @@ export const artifactSharingRoutes = createRouter()
       // against the row it locks: whether it widens what is shared now.
       if (body.visibility === 'public') {
         requireArtifactHost(deps.config);
-        await assertPerson(deps.db, user);
+        await assertPerson(deps.db, user, SHARE_AN_ARTIFACT);
       }
       if (body.visibility === 'public' && body.confirmed !== true) {
         throw new DomainError(
