@@ -89,6 +89,13 @@ is no manual, untagged iOS release workflow; local builds remain available.
   server. On a busy machine, add `-- --maxWorkers=4` so Postgres gets CPU and tests stay clear of
   their 5 second timeout.
 
+- For changes to how files are stored or read (`apps/server/src/storage/`, `services/files.ts`,
+  or anything that calls them), also run the whole server suite with every test app on the S3
+  driver, against an S3 stand-in in the test process:
+  `pnpm --filter @openbots/server test:s3`. Nothing runs it on its own: the normal `test` run (and
+  so CI) covers the S3 driver with the storage tests and a few suites run a second time in S3
+  mode (`apps/server/src/s3-mode.test.ts`), not the whole suite. It takes `DATABASE_URL` as above.
+
 - The docs it affects: the README for anything an operator sees, `.env.example` for a new setting,
   and the rows of [TRACEABILITY.md](plans/TRACEABILITY.md) for the PRD requirements it touches.
 - Code that matches its neighbours. Read the module you change and follow its style.

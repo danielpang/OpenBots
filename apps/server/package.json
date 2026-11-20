@@ -23,6 +23,7 @@
     "start": "node dist/main.js",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:s3": "OPENBOTS_TEST_STORAGE=s3 vitest run",
     "typecheck": "tsc --noEmit",
     "openapi": "tsx --conditions=@openbots/source src/openapi-cli.ts",
     "db:generate": "drizzle-kit generate",
