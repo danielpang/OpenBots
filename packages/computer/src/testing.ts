@@ -606,6 +606,9 @@ export interface FakeSprite {
   /** Live Tasks API tasks by name, with their expiry in seconds. */
   tasks: Map<string, number>;
   checkpoints: (ComputerCheckpoint & { files: Map<string, Uint8Array> })[];
+  labels: string[];
+  /** Sprite services by name; the provision script registers the agent's. */
+  services: Set<string>;
 }
 
 export interface FakeSpritesCall {
@@ -653,6 +656,7 @@ export function fakeSpritesApi(): FakeSpritesApi {
     url: sprite.url,
     status: sprite.status,
     urlAuth: sprite.urlAuth,
+    ...(sprite.labels.length ? { labels: [...sprite.labels] } : {}),
   });
   const decode = (data: Uint8Array | string | undefined) =>
     typeof data === 'string' ? data : data ? new TextDecoder().decode(data) : '';
@@ -668,6 +672,8 @@ export function fakeSpritesApi(): FakeSpritesApi {
         '/opt/openbots/provision.version',
         new TextEncoder().encode(`${run.env.OPENBOTS_PROVISION_VERSION ?? ''}\n`),
       );
+      // As docker/sprites/provision.sh: the agent's service.
+      sprite.services.add('openbots-agent');
       return ok('provisioned');
     },
     async create(name, { urlAuth }) {
@@ -682,6 +688,8 @@ export function fakeSpritesApi(): FakeSpritesApi {
         policy: null,
         tasks: new Map(),
         checkpoints: [],
+        labels: [],
+        services: new Set(),
       };
       api.sprites.set(name, sprite);
       return info(sprite);
@@ -700,6 +708,12 @@ export function fakeSpritesApi(): FakeSpritesApi {
       const sprite = api.sprites.get(name);
       if (!sprite) throw missing(name);
       sprite.urlAuth = auth;
+    },
+    async setLabels(name, labels) {
+      api.calls.push({ op: 'setLabels', name, args: [labels] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      sprite.labels = [...labels];
     },
     async setNetworkPolicy(name, policy) {
       api.calls.push({ op: 'setNetworkPolicy', name, args: [policy] });
@@ -747,14 +761,21 @@ export function fakeSpritesApi(): FakeSpritesApi {
         return ok();
       }
       if (command === 'bash' && args[2] === 'as-root') {
-        // The home wipe (`find <home> -mindepth 1 -delete`) and `rm -rf <dir>`.
-        const home = /^find (\S+) -mindepth 1 -delete$/m.exec(args[3] ?? '')?.[1];
-        const removed = /^rm -rf (\S+)$/m.exec(args[3] ?? '')?.[1];
+        // The home wipe (`find <home> -mindepth 1 -delete`), `rm -rf <dir>`,
+        // `rm -f -- <files>` and deleting a service.
+        const script = args[3] ?? '';
+        const home = /^find (\S+) -mindepth 1 -delete$/m.exec(script)?.[1];
+        const removed = /^rm -rf (\S+)$/m.exec(script)?.[1];
+        const files = /^rm -f -- (.+)$/m.exec(script)?.[1]?.split(' ') ?? [];
         for (const path of [...sprite.files.keys()]) {
           if (home && path.startsWith(`${home}/`)) sprite.files.delete(path);
           if (removed && (path === removed || path.startsWith(`${removed}/`))) {
             sprite.files.delete(path);
           }
+          if (files.includes(path)) sprite.files.delete(path);
+        }
+        for (const [, service] of script.matchAll(/^sprite-env services delete (\S+)/gm)) {
+          sprite.services.delete(service!);
         }
         return ok();
       }
