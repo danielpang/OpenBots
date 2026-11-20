@@ -25,6 +25,7 @@ const SECTION_4_TABLES = [
   'computers',
   'bot_screens',
   'computer_usage_intervals',
+  'retired_computers',
   // Coding agents (I6).
   'coder_accounts',
   'repos',

@@ -47,6 +47,7 @@ import type { JobHandler } from '@openbots/shared';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { inRanges } from '../client-ip.js';
 import { schema, type Db } from '../db/client.js';
+import { inWorkspace } from '../db/scope.js';
 import { DomainError, notFound } from '../errors.js';
 import { publishEvent } from '../infra/index.js';
 import { assertBotOwner } from '../ownership.js';
@@ -62,6 +63,7 @@ import {
   type UseReason,
 } from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
+import { retainsOnReset, retireMachine } from './computer-retire.js';
 
 // The account's computer (plan 4.5, 9; K1 to K7). One `computers` row per
 // owner, created on first use through the configured provider (`remote` when
@@ -153,6 +155,8 @@ interface SandboxEnv {
 
 /** What `computers.spec` holds: how the machine was made, and a pending idle stop retry. */
 interface MachineSpec {
+  /** Names the machine instead of the row's id (`ComputerSpec.machineKey`). */
+  machineKey?: string;
   image?: string;
   /**
    * A fingerprint of the `SandboxEnv` it was made with, not the values: the
@@ -248,7 +252,10 @@ const REMOTE_TAKEN =
 const providers = new WeakMap<object, ComputerProvider | null>();
 
 /** Replaces the provider for one `AppDeps` (tests use a mocked dockerode or the fake agent). */
-export function setComputerProvider(deps: AppDeps, provider: ComputerProvider | null) {
+export function setComputerProvider(
+  deps: Pick<AppDeps, 'config'>,
+  provider: ComputerProvider | null,
+) {
   providers.set(deps.config, provider);
 }
 
@@ -257,7 +264,9 @@ export function setComputerProvider(deps: AppDeps, provider: ComputerProvider | 
  * else `sprites` when OPENBOTS_SPRITES_TOKEN is, else `docker` when
  * DOCKER_HOST is, else none.
  */
-export function computerProvider(deps: AppDeps): ComputerProvider | null {
+export function computerProvider(
+  deps: Pick<AppDeps, 'config' | 'logger'>,
+): ComputerProvider | null {
   if (!providers.has(deps.config)) {
     const { computerAgent, sprites, dockerHost } = deps.config;
     if (computerAgent?.shared) {
@@ -285,7 +294,7 @@ export function computerProvider(deps: AppDeps): ComputerProvider | null {
  * new release's files provision each Sprite again at its next start.
  */
 function spritesProvider(
-  deps: AppDeps,
+  deps: Pick<AppDeps, 'config'>,
   sprites: NonNullable<AppDeps['config']['sprites']>,
 ): ComputerProvider {
   const dir = sprites.provisionDir;
@@ -522,6 +531,8 @@ async function createMachine(
       agentToken,
       volumeName: row.volumeName ?? volumeName(row.id),
       ...env,
+      // Set by a full reset that kept the old machine (computer-retire.ts).
+      ...(specOf(row).machineKey ? { machineKey: specOf(row).machineKey } : {}),
     });
     const created = await setStatus(deps, row, 'stopped', {
       provider: ref.provider,
@@ -974,10 +985,34 @@ export function beginComputerUse(
   const machines = computerProvider(deps);
   let hold: Parameters<typeof beginUse>[1]['hold'];
   if (machines?.hold && machines.name === row.provider && row.agentUrl && row.agentToken) {
-    const ref = refOf(deps, row);
+    // The machine the use began on, until the provider refuses it: a reset
+    // may have retired it, which the provider refuses without waking it.
+    // Then the hold moves to the machine the row has now, if any, and the
+    // use goes on with that one. No read in the usual case, so the hold is
+    // in place before the work's first call.
+    let known = refOf(deps, row);
+    const current = () =>
+      inWorkspace(row.workspaceId, async () => {
+        const [now] = await deps.db
+          .select()
+          .from(schema.computers)
+          .where(eq(schema.computers.id, row.id));
+        return now?.agentUrl && now.agentToken && now.provider === machines.name
+          ? refOf(deps, now)
+          : null;
+      });
     hold = {
-      hold: (name, seconds) => machines.hold!(ref, name, seconds),
-      release: async (name) => machines.release?.(ref, name),
+      hold: async (name, seconds) => {
+        try {
+          await machines.hold!(known, name, seconds);
+        } catch (error) {
+          const now = await current();
+          if (!now || now.containerId === known.containerId) throw error;
+          known = now;
+          await machines.hold!(known, name, seconds);
+        }
+      },
+      release: async (name) => machines.release?.(known, name),
     };
   }
   return beginUse(
@@ -1089,6 +1124,11 @@ export async function restartComputer(
 export interface DestroyComputerOptions {
   /** Removes the state volume too: the cookie store and the coding agents' sign-ins. */
   signIns: boolean;
+  /**
+   * The checkpoint taken just before (`checkpointBeforeReset`), recorded
+   * with a machine that is retired rather than removed.
+   */
+  checkpointId?: string | null;
 }
 
 /**
@@ -1127,6 +1167,27 @@ export async function destroyComputer(
         deps.logger.warn({ err: error, computerId: row.id }, 'stopping coding sessions failed'),
       );
   }
+  // A full reset on a provider that can retire the machine keeps it for
+  // RETIRED_COMPUTER_DAYS instead (computer-retire.ts); the row gets a new
+  // machine key, so its next start makes a new machine.
+  if (options.signIns && retainsOnReset(machines) && row.containerId) {
+    if (row.provider === machines.name) {
+      try {
+        const { computer } = await retireMachine(deps, machines, row, {
+          checkpointId: options.checkpointId ?? null,
+          by,
+          reason: 'reset',
+        });
+        return computer;
+      } catch (error) {
+        if (error instanceof DomainError) throw error;
+        const message = failureText(deps, error);
+        deps.logger.error({ err: error, computerId: row.id }, 'computer reset failed');
+        await setStatus(deps, row, 'error', {}, message);
+        throw computerUnavailable(`The computer could not be reset: ${message}`);
+      }
+    }
+  }
   if (row.agentUrl && row.agentToken && row.containerId) {
     try {
       await machines.destroy(refOf(deps, row), {
@@ -1151,12 +1212,12 @@ export async function destroyComputer(
 
 /**
  * Before a reset that keeps the machine (a Sprite reset without its
- * sign-ins clears the home in place), a checkpoint of its whole disk, so an
- * operator can undo a mistaken reset (`restore`). Returns its id, or null
- * when the provider takes none or the machine goes with the reset (a Sprite
- * deleted with its sign-ins takes its checkpoints with it). A checkpoint that
- * fails does not stop the reset: a computer that will not work is when a
- * reset helps most.
+ * sign-ins clears the home in place; one with them retires the Sprite, kept
+ * seven days), a checkpoint of its whole disk, so an operator can undo a
+ * mistaken reset (`restore`). Returns its id, or null when the provider
+ * takes none or the machine goes with the reset (one that cannot retire it).
+ * A checkpoint that fails does not stop the reset: a computer that will not
+ * work is when a reset helps most.
  */
 export async function checkpointBeforeReset(
   deps: AppDeps,
@@ -1164,7 +1225,8 @@ export async function checkpointBeforeReset(
   options: DestroyComputerOptions,
 ): Promise<string | null> {
   const machines = provider(deps);
-  if (!machines.checkpoint || options.signIns || !row.agentUrl || !row.agentToken) return null;
+  if (!machines.checkpoint || !row.agentUrl || !row.agentToken) return null;
+  if (options.signIns && !retainsOnReset(machines)) return null;
   if (machines.name !== row.provider || !row.containerId) return null;
   try {
     return await machines.checkpoint(

@@ -137,6 +137,10 @@ const ResetStatusSchema = z
       )
       .openapi({ description: 'Coding sessions a reset would stop; warn before confirming' }),
     expiresAt: z.iso.datetime().openapi({ description: 'Confirm the reset before this' }),
+    keptDays: z.number().int().nullable().optional().openapi({
+      description:
+        'With `resetSignIns`, the old computer is kept this many days in case support needs to restore it, then deleted for good. Null where it is deleted at once.',
+    }),
   })
   .openapi('ComputerResetStatus');
 
@@ -456,7 +460,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Where the reset status gives `keptDays` (the hosted service), a reset with `resetSignIns` keeps the old computer that many days, out of service and reachable only by an operator, in case support needs to restore it, then deletes it for good. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
