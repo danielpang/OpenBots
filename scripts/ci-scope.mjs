@@ -48,6 +48,10 @@ export function ciScope(paths) {
       enable('check', 'images');
     } else if (path.startsWith('apps/desktop/')) {
       enable('check');
+    } else if (path.startsWith('apps/artifact-worker/')) {
+      // The edge Worker imports no workspace package and nothing imports it (it calls the
+      // server over HTTP), and no image builds it: its own suite in `check` is what tests it.
+      enable('check');
     } else if (
       path.startsWith('docker/') ||
       ['compose.yaml', '.env.example', '.hadolint.yaml', 'install.sh'].includes(path)
