@@ -460,7 +460,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Where the reset status gives `keptDays` (the hosted service), a reset with `resetSignIns` keeps the old computer that many days, out of service and reachable only by an operator, in case support needs to restore it, then deletes it for good. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Where the reset status gives `keptDays` (the hosted service), a reset with `resetSignIns` keeps the old computer that many days, out of service and reachable only by an operator, in case support needs to restore it, then deletes it for good; with `deleteOldComputer` it is deleted at once instead. The reset answers only once the old computer is out of reach or deleted; if that fails it answers 503 and the computer is left as it was. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -475,6 +475,10 @@ export const computerRoutes = createRouter()
                     description:
                       "Also remove the cookie store and the coding agents' sign-ins on the computer",
                   }),
+                  deleteOldComputer: z.boolean().optional().openapi({
+                    description:
+                      'With `resetSignIns`, where the reset status gives `keptDays`: delete the old computer now instead of keeping it, for example when someone else got into it. Support cannot restore it then. Ignored without `resetSignIns`.',
+                  }),
                 })
                 .openapi('ComputerReset'),
             },
@@ -487,14 +491,18 @@ export const computerRoutes = createRouter()
         ...authProblems,
         404: problemResponse('The account has no computer yet'),
         409: problemResponse(
-          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), or a computer that cannot be reset from here (`RESET_UNSUPPORTED`)',
+          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), a computer that cannot be reset from here (`RESET_UNSUPPORTED`), one being made, started or stopped (`COMPUTER_BUSY`), or one another reset changed meanwhile (`COMPUTER_CHANGED`)',
         ),
         503: unavailable,
       },
     }),
     async (c) => {
-      const { requestId, resetSignIns } = c.req.valid('json');
-      const row = await resetComputer(c.var.deps, c.var.user, { requestId, resetSignIns });
+      const { requestId, resetSignIns, deleteOldComputer } = c.req.valid('json');
+      const row = await resetComputer(c.var.deps, c.var.user, {
+        requestId,
+        resetSignIns,
+        deleteOldComputer,
+      });
       return c.json(await computerOut(c, row), 202);
     },
   )

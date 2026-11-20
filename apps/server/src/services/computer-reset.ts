@@ -41,7 +41,9 @@ import {
 // checkpoint taken first where the provider keeps one, so an operator can
 // restore a mistaken reset. On a provider that can retire a machine (Sprites)
 // a reset that forgets the sign-ins keeps the old machine for seven days
-// rather than deleting it (computer-retire.ts). The next start makes
+// rather than deleting it (computer-retire.ts), unless the owner asks to
+// delete it now; either way the reset answers only once the old machine is
+// out of reach or gone, or fails having changed nothing. The next start makes
 // a fresh computer, and its reconcile clones the `keep_cloned` repositories
 // again.
 //
@@ -225,6 +227,11 @@ export interface ResetOptions {
   requestId: string;
   /** Removes the cookie store and the coding agents' sign-ins too. */
   resetSignIns?: boolean;
+  /**
+   * With `resetSignIns`, where the old computer would be kept for `keptDays`:
+   * deletes it now instead. Support cannot restore it then.
+   */
+  deleteOldComputer?: boolean;
 }
 
 /**
@@ -238,7 +245,7 @@ export interface ResetOptions {
 export async function resetComputer(
   deps: AppDeps,
   owner: Owner,
-  { requestId, resetSignIns = false }: ResetOptions,
+  { requestId, resetSignIns = false, deleteOldComputer = false }: ResetOptions,
 ): Promise<ComputerRow> {
   const row = await computerOf(deps, owner);
   await listen(deps);
@@ -265,11 +272,13 @@ export async function resetComputer(
   }
   prepared.delete(requestId);
   const by = userActor(owner);
-  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns });
+  const deleteOld = resetSignIns && deleteOldComputer;
+  const kept = resetSignIns && !deleteOld && retainedDays(computerProvider(deps)) !== null;
+  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns, deleteOld });
   const reset = await destroyComputer(
     deps,
     row,
-    { signIns: resetSignIns, checkpointId: checkpoint },
+    { signIns: resetSignIns, deleteOld, checkpointId: checkpoint },
     by,
   );
   await deps.db.transaction(async (tx) => {
@@ -318,6 +327,10 @@ export async function resetComputer(
         checkouts: checkouts.length,
         unsaved: unsavedWork(done.results).length,
         rescueFailed: !!done.error,
+        // Where a reset with the sign-ins would keep the old computer: kept, or deleted now.
+        ...(resetSignIns && retainedDays(computerProvider(deps)) !== null
+          ? { oldComputer: kept ? 'kept' : 'deleted' }
+          : {}),
         // The disk as it was, for an operator to restore a mistaken reset (Sprites).
         ...(checkpoint ? { checkpoint } : {}),
       },

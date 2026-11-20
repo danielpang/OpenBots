@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
 import {
   createSpritesProvider,
@@ -26,6 +26,7 @@ import {
   SPRITES_AGENT_TOKEN_FILES,
   SPRITES_DENY_ALL,
   SPRITES_RETIRED_LABEL,
+  SPRITES_RETIRED_MARKER,
   SpriteRetiredError,
   spriteName,
   spritesEgressPolicy,
@@ -494,6 +495,7 @@ describe('the sprites provider', () => {
       for (const file of SPRITES_AGENT_TOKEN_FILES) sprite.files.set(file, new Uint8Array([2]));
       const checkpoint = await provider.checkpoint!(ref, 'OpenBots: before a full reset, 1');
       await provider.retire!(ref);
+      await provider.retireInside!(ref);
       return { api, provider, ref, sprite, checkpoint };
     }
 
@@ -547,12 +549,77 @@ describe('the sprites provider', () => {
       expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
     });
 
+    it('cuts off reach first, with metadata calls that need no command and do not wake it', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      sprite.status = 'cold';
+      // Commands fail: a Sprite that will not wake, or an exec API that is down.
+      api.execHook = () => {
+        throw new Error('exec is down');
+      };
+      api.calls.length = 0;
+      await provider.retire!(ref);
+      expect(api.calls.map((c) => c.op)).toEqual([
+        'get',
+        'setLabels',
+        'setUrlAuth',
+        'setNetworkPolicy',
+      ]);
+      expect(sprite.labels).toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.urlAuth).toBe('sprite');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+      expect(sprite.status).toBe('cold');
+      // What needs a command inside it is a step of its own, which a retry finishes.
+      await expect(provider.retireInside!(ref)).rejects.toThrow(/exec is down/);
+      api.execHook = undefined;
+      await provider.retireInside!(ref);
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
+    });
+
+    it('never runs the inside steps on a Sprite that was not retired first', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      await expect(provider.retireInside!(ref)).rejects.toThrow(/not retired/);
+      expect(api.sprites.get(NAME)!.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
+    });
+
+    it('a hold placed while the Sprite is being retired does not outlive the retire', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      // The hold read the metadata before the label; its command lands after the retire.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const exec = api.exec.bind(api);
+      let held = false;
+      api.exec = async (name, argv, options) => {
+        if (!held && argv.some((arg) => arg.includes('"expire"'))) {
+          held = true;
+          await gate;
+        }
+        return exec(name, argv, options);
+      };
+      const hold = provider.hold!(ref, 'run-9', 900).then(
+        () => 'held',
+        (error: Error) => error.name,
+      );
+      await vi.waitFor(() => expect(held).toBe(true));
+      await provider.retire!(ref);
+      await provider.retireInside?.(ref);
+      release();
+      expect(await hold).toBe('SpriteRetiredError');
+      expect([...sprite.tasks.keys()].filter((t) => t.startsWith('openbots-'))).toEqual([]);
+    });
+
     it('is safe to repeat, and does nothing for a Sprite already gone', async () => {
       const { api, provider, ref, sprite } = await retired();
       await provider.retire!(ref);
+      await provider.retireInside!(ref);
       expect(sprite.labels.filter((l) => l === SPRITES_RETIRED_LABEL)).toHaveLength(1);
       api.sprites.delete(NAME);
       await provider.retire!(ref);
+      await provider.retireInside!(ref);
       expect(api.sprites.has(NAME)).toBe(false);
     });
 
@@ -569,6 +636,7 @@ describe('the sprites provider', () => {
       expect(sprite.files.has('/home/bot/notes.md')).toBe(true);
       await provider.unretire!(ref);
       expect(sprite.labels).not.toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.files.has(SPRITES_RETIRED_MARKER)).toBe(false);
       expect(sprite.urlAuth).toBe('public');
       expect(sprite.policy).toEqual(spritesEgressPolicy());
       // The next create provisions the same Sprite again, with the new token.
@@ -576,6 +644,23 @@ describe('the sprites provider', () => {
       expect(back.containerId).toBe(NAME);
       expect(api.provisions.at(-1)!.token).toBe('a-new-agent-token');
       expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
+    });
+
+    it('refuses an agent client for a Sprite it retired, and makes a named one ready again', async () => {
+      const { api, provider, ref } = await retired();
+      expect(() => provider.agent(ref)).toThrow(SpriteRetiredError);
+      await provider.unretire!(ref);
+      expect(() => provider.agent(ref)).not.toThrow();
+      // A restored Sprite is made ready again by its name, recorded as the key.
+      const other = { ...spec, computerId: '44444444-4444-4444-8444-444444444444' };
+      const back = await provider.create({ ...other, machineKey: NAME });
+      expect(back.containerId).toBe(NAME);
+      expect(api.sprites.size).toBe(1);
+      // A key that only looks like a name elsewhere is a key, named as usual.
+      const key = '55555555-5555-4555-8555-555555555555';
+      expect((await provider.create({ ...other, machineKey: key })).containerId).toBe(
+        spriteName(key),
+      );
     });
 
     it('names the next machine from its key, leaving the retired one alone', async () => {

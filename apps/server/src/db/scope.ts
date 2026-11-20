@@ -281,7 +281,7 @@ export async function githubInstallationWorkspaces(
   return rowsOf<{ id: string }>(result).map((r) => r.id);
 }
 
-/** postgres.js answers an array of rows, PGlite `{ rows }`. */
-function rowsOf<T>(result: unknown): T[] {
+/** The rows of a raw `execute`: postgres.js answers an array of rows, PGlite `{ rows }`. */
+export function rowsOf<T>(result: unknown): T[] {
   return Array.isArray(result) ? (result as T[]) : ((result as { rows: T[] }).rows ?? []);
 }

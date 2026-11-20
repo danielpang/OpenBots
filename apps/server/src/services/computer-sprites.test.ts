@@ -143,7 +143,7 @@ describe('computers on Sprites', () => {
       await until(() => expect(holds(computer)).toEqual([`openbots-${USE_HOLD_NAME}`]));
       const puts = () =>
         sprites.api.calls.filter(
-          (c) => c.op === 'exec' && JSON.stringify(c.args[0]).includes('"PUT"'),
+          (c) => c.op === 'exec' && (c.args[0] as string[]).includes('openbots-hold'),
         ).length;
       const before = puts();
       await until(() => expect(puts()).toBeGreaterThan(before + 1));
@@ -306,7 +306,7 @@ describe('computers on Sprites', () => {
     expect(sprites.api.sprites.size).toBe(1);
     expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
     expect((await start()).status).toBe(200);
-    const key = ((await row()).spec as { machineKey: string }).machineKey;
+    const key = (await row()).machineKey!;
     const fresh = sprites.api.sprites.get(spriteName(key))!;
     expect(fresh.files.has('/var/lib/openbots/x')).toBe(false);
     expect(sprites.api.sprites.size).toBe(2);
@@ -326,10 +326,9 @@ describe('computers on Sprites', () => {
       .where(eq(schema.computers.id, computer.id));
     expect((await start()).status).toBe(200);
     // Named from the row's machine key, which the reset above gave it.
-    const { machineKey } = computer.spec as { machineKey?: string };
     expect(await row()).toMatchObject({
       provider: 'sprites',
-      containerId: spriteName(machineKey ?? computer.id),
+      containerId: spriteName(computer.machineKey ?? computer.id),
     });
   });
 });

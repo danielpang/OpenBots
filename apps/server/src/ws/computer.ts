@@ -28,6 +28,7 @@ import {
   type ComputerRow,
 } from '../services/computer.js';
 import { MEMBERSHIP_ENDED_CHANNEL, type MembershipEnded } from '../membership.js';
+import { fenceOf, isFenced, listenForFences, watchFences } from '../services/computer-fence.js';
 import { reject, toHeaders, type UpgradeSource } from './gateway.js';
 import { inWorkspace } from '../db/scope.js';
 import { KEY_RECHECK_MS, watchApiKeys } from './key-watch.js';
@@ -199,6 +200,11 @@ export async function attachComputerProxies(
     upstream.once('open', () => {
       socket.off('close', leave);
       if (socket.destroyed) return upstream.terminate();
+      // Reset while the socket was opening: its machine is out of reach.
+      if (isFenced(target.computer)) {
+        upstream.terminate();
+        return reject(socket, 503);
+      }
       (req as IncomingMessage & { upstreamProtocol?: string }).upstreamProtocol = upstream.protocol;
       wss.handleUpgrade(req, socket, head, (client) => pipe(client, upstream, target));
     });
@@ -369,6 +375,19 @@ export async function attachComputerProxies(
     },
   );
 
+  // A reset took the machine away (computer-fence.ts): its terminal and
+  // screens close now, in every API process, not when the agent goes.
+  await listenForFences(deps);
+  const unwatchFences = watchFences(({ computerId, fence }) => {
+    for (const [client, target] of open) {
+      if (target.computerId !== computerId || fenceOf(target.computer.agentToken) !== fence) {
+        continue;
+      }
+      open.delete(client);
+      client.close(1012, 'computer reset');
+    }
+  });
+
   const keys = await watchApiKeys(
     deps,
     function* () {
@@ -389,6 +408,7 @@ export async function attachComputerProxies(
       server.off('upgrade', onUpgrade);
       await keys.stop();
       await unsubscribeDisabled();
+      unwatchFences();
       for (const timer of graces) clearTimeout(timer);
       graces.clear();
       for (const client of open.keys()) client.close(1001, 'server shutting down');
