@@ -22,6 +22,11 @@ import {
   PROVISION_STAGING_DIR,
   PROVISION_VERSION_FILE,
   prepareStaging,
+  SPRITES_AGENT_SERVICE,
+  SPRITES_AGENT_TOKEN_FILES,
+  SPRITES_DENY_ALL,
+  SPRITES_RETIRED_LABEL,
+  SpriteRetiredError,
   spriteName,
   spritesEgressPolicy,
   type SpritesProviderOptions,
@@ -474,6 +479,116 @@ describe('the sprites provider', () => {
       };
       await provider.destroy(ref, { computerId: spec.computerId, home: true, state: true });
       expect(api.sprites.has(NAME)).toBe(false);
+    });
+  });
+
+  describe('retire', () => {
+    /** A provisioned Sprite in use: a hold, a file in the home and the agent's token. */
+    async function retired() {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      await provider.hold!(ref, 'run-1', 600);
+      const sprite = api.sprites.get(NAME)!;
+      sprite.files.set('/home/bot/notes.md', new Uint8Array([1]));
+      // Where provision.sh stores the agent token, and the copy the agent reads.
+      for (const file of SPRITES_AGENT_TOKEN_FILES) sprite.files.set(file, new Uint8Array([2]));
+      const checkpoint = await provider.checkpoint!(ref, 'OpenBots: before a full reset, 1');
+      await provider.retire!(ref);
+      return { api, provider, ref, sprite, checkpoint };
+    }
+
+    it('takes the Sprite out of service and keeps its disk and checkpoints', async () => {
+      const { api, sprite, checkpoint } = await retired();
+      expect(api.sprites.has(NAME)).toBe(true);
+      expect(sprite.labels).toContain(SPRITES_RETIRED_LABEL);
+      // Its holds are gone, so it pauses; its URL is private; it may reach nothing.
+      expect([...sprite.tasks.keys()]).toEqual([]);
+      expect(sprite.urlAuth).toBe('sprite');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+      expect(sprite.policy).toEqual({ rules: [{ domain: '*', action: 'deny' }] });
+      // The member's files stay, and so does the checkpoint taken before.
+      expect(sprite.files.has('/home/bot/notes.md')).toBe(true);
+      expect(sprite.checkpoints.map((c) => c.id)).toEqual([checkpoint]);
+    });
+
+    it('revokes the agent: its service is removed and its token deleted from the disk', async () => {
+      const { api, sprite } = await retired();
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
+      for (const file of SPRITES_AGENT_TOKEN_FILES) expect(sprite.files.has(file)).toBe(false);
+      const script = execs(api).find((line) => line.includes('services delete'))!;
+      expect(script).toContain(`sprite-env services stop ${SPRITES_AGENT_SERVICE}`);
+      expect(script).toContain('pkill -KILL -u bot');
+      // The token itself never travels in a command line.
+      expect(execs(api).join('\n')).not.toContain(spec.agentToken);
+    });
+
+    it('refuses everything on a retired Sprite without waking it', async () => {
+      const { api, provider, ref, sprite } = await retired();
+      sprite.status = 'cold';
+      api.calls.length = 0;
+      await expect(provider.start(ref)).rejects.toBeInstanceOf(SpriteRetiredError);
+      await expect(provider.hold!(ref, 'run-2', 60)).rejects.toThrow(/is retired/);
+      await expect(provider.checkpoint!(ref, 'x')).rejects.toThrow(/is retired/);
+      await expect(provider.applyEgressPolicy!(ref, spritesEgressPolicy())).rejects.toThrow(
+        /is retired/,
+      );
+      await expect(
+        provider.destroy(ref, { computerId: spec.computerId, home: true }),
+      ).rejects.toThrow(/is retired/);
+      await expect(provider.create(spec)).rejects.toThrow(/is retired/);
+      await provider.stop(ref);
+      await provider.release!(ref, 'run-1');
+      await provider.destroy(ref);
+      // It serves nothing, so it reads as missing.
+      expect(await provider.status(ref)).toBe('missing');
+      // Only metadata was read: no command ran, nothing was written, it is still paused.
+      expect(new Set(api.calls.map((c) => c.op))).toEqual(new Set(['get']));
+      expect(sprite.status).toBe('cold');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+    });
+
+    it('is safe to repeat, and does nothing for a Sprite already gone', async () => {
+      const { api, provider, ref, sprite } = await retired();
+      await provider.retire!(ref);
+      expect(sprite.labels.filter((l) => l === SPRITES_RETIRED_LABEL)).toHaveLength(1);
+      api.sprites.delete(NAME);
+      await provider.retire!(ref);
+      expect(api.sprites.has(NAME)).toBe(false);
+    });
+
+    it('is deleted for good with destroy, home and state', async () => {
+      const { api, provider, ref } = await retired();
+      await provider.destroy(ref, { computerId: spec.computerId, home: true, state: true });
+      expect(api.sprites.has(NAME)).toBe(false);
+    });
+
+    it('lets an operator restore its checkpoint and put it back, with a new token', async () => {
+      const { api, provider, ref, sprite, checkpoint } = await retired();
+      sprite.files.delete('/home/bot/notes.md');
+      await provider.restore!(ref, checkpoint!);
+      expect(sprite.files.has('/home/bot/notes.md')).toBe(true);
+      await provider.unretire!(ref);
+      expect(sprite.labels).not.toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.urlAuth).toBe('public');
+      expect(sprite.policy).toEqual(spritesEgressPolicy());
+      // The next create provisions the same Sprite again, with the new token.
+      const back = await provider.create({ ...spec, agentToken: 'a-new-agent-token' });
+      expect(back.containerId).toBe(NAME);
+      expect(api.provisions.at(-1)!.token).toBe('a-new-agent-token');
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
+    });
+
+    it('names the next machine from its key, leaving the retired one alone', async () => {
+      const { api, provider } = await retired();
+      const key = '33333333-3333-4333-8333-333333333333';
+      const fresh = await provider.create({ ...spec, machineKey: key });
+      expect(fresh.containerId).toBe(spriteName(key));
+      expect(fresh.containerId).not.toBe(NAME);
+      expect(api.sprites.get(NAME)!.labels).toContain(SPRITES_RETIRED_LABEL);
+      expect(api.sprites.size).toBe(2);
+      // A create retried after a crash finds the same new Sprite, not a third.
+      await provider.create({ ...spec, machineKey: key });
+      expect(api.sprites.size).toBe(2);
     });
   });
 

@@ -46,6 +46,12 @@ export interface ResetCheck {
   error?: string | null;
   /** Set with `error` when the computer could not be started for the check (a plan limit, say). */
   errorCode?: string | null;
+  /**
+   * With "Also forget sign-ins", the days the old computer is kept in case
+   * support needs to restore it; null or absent (an older server) where it
+   * is deleted at once.
+   */
+  keptDays?: number | null;
 }
 
 /** The server's 409 code when the reset's request id has no finished check. */

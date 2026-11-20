@@ -1,4 +1,4 @@
-import { PROVISION_VERSION_FILE, spriteName } from '@openbots/computer';
+import { PROVISION_VERSION_FILE, SPRITES_RETIRED_LABEL, spriteName } from '@openbots/computer';
 import { EVENTS_CHANNEL, type WsEvent } from '@openbots/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -297,16 +297,19 @@ describe('computers on Sprites', () => {
     expect(sprites.api.provisions[2]!.token).not.toBe(sprites.api.provisions[1]!.token);
   });
 
-  it('resets with the sign-ins by deleting the Sprite; the next start makes a new one', async () => {
+  it('resets with the sign-ins by retiring the Sprite for seven days; the next start makes a new one', async () => {
     const computer = await row();
-    sprites.api.sprites
-      .get(computer.containerId!)!
-      .files.set('/var/lib/openbots/x', new Uint8Array([1]));
+    const old = sprites.api.sprites.get(computer.containerId!)!;
+    old.files.set('/var/lib/openbots/x', new Uint8Array([1]));
     await t.inOrganization(() => destroyComputer(t.deps, computer, { signIns: true }));
-    expect(sprites.api.sprites.size).toBe(0);
+    // Kept, out of service (computer-retire.test.ts covers the rest).
+    expect(sprites.api.sprites.size).toBe(1);
+    expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
     expect((await start()).status).toBe(200);
-    const fresh = sprites.api.sprites.get(computer.containerId!)!;
+    const key = ((await row()).spec as { machineKey: string }).machineKey;
+    const fresh = sprites.api.sprites.get(spriteName(key))!;
     expect(fresh.files.has('/var/lib/openbots/x')).toBe(false);
+    expect(sprites.api.sprites.size).toBe(2);
   });
 
   it('makes a Sprite for a remote row on a loopback agent instead of adopting it into Docker', async () => {
@@ -322,9 +325,11 @@ describe('computers on Sprites', () => {
       })
       .where(eq(schema.computers.id, computer.id));
     expect((await start()).status).toBe(200);
+    // Named from the row's machine key, which the reset above gave it.
+    const { machineKey } = computer.spec as { machineKey?: string };
     expect(await row()).toMatchObject({
       provider: 'sprites',
-      containerId: spriteName(computer.id),
+      containerId: spriteName(machineKey ?? computer.id),
     });
   });
 });

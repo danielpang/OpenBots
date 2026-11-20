@@ -15,12 +15,19 @@ import { createCoderWorker } from './services/coder-runner.js';
 import { PAIRING_SWEEP_MS, expireDuePairings } from './services/devices.js';
 import {
   COMPUTERS_QUEUE,
+  computerProvider,
   IDLE_SWEEP_MS,
   provisionHandler,
   recoverProvisioning,
   refreshSandboxImage,
   sweepIdleComputers,
 } from './services/computer.js';
+import {
+  RETIRED_COMPUTERS_QUEUE,
+  RETIRED_SWEEP_MS,
+  retiredComputerHandler,
+  sweepRetiredComputers,
+} from './services/computer-retire.js';
 import { closeDanglingUsage } from './services/computer-usage.js';
 import { endAllComputerUses } from './services/computer-use.js';
 import { expireDueLoginRequests, LOGINS_QUEUE, loginExpiryHandler } from './services/logins.js';
@@ -59,6 +66,11 @@ export const JOB_HANDLERS: Record<
   [MEMORIES_QUEUE]: { handler: (deps) => reembedHandler(deps) as JobHandler, concurrency: 2 },
   // Making and provisioning Sprites (plan 9.5), one job per computer at a time (groupKey).
   [COMPUTERS_QUEUE]: { handler: (deps) => provisionHandler(deps) as JobHandler, concurrency: 4 },
+  // Retired computers finished retiring, or deleted for good after their seven days.
+  [RETIRED_COMPUTERS_QUEUE]: {
+    handler: (deps) => retiredComputerHandler(deps, () => computerProvider(deps)) as JobHandler,
+    concurrency: 2,
+  },
 };
 
 /**
@@ -118,6 +130,17 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     );
   }, IDLE_SWEEP_MS);
   sweep.unref();
+  // Retired computers past their seven days are deleted, and one whose
+  // retiring a crash cut short is finished; now and hourly, in every worker
+  // (each row is claimed by one of them).
+  const sweepRetired = () =>
+    inEveryOrganization(deps, () => sweepRetiredComputers(deps)).then(
+      (queued) => queued && logger.info({ computers: queued }, 'queued retired computers'),
+      (err: unknown) => logger.error({ err }, 'retired computer sweep failed'),
+    );
+  void sweepRetired();
+  const retired = setInterval(sweepRetired, RETIRED_SWEEP_MS);
+  retired.unref();
   // Every running computer gets its repositories back now (GH4): it may have
   // started while no worker ran, or its reconcile job been lost.
   inEveryOrganization(deps, () => queueRepoReconciles(deps)).catch((err: unknown) =>
@@ -164,6 +187,7 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
   return {
     stop: async () => {
       clearInterval(sweep);
+      clearInterval(retired);
       clearInterval(refreshRepos);
       clearInterval(trim);
       clearInterval(pairings);
