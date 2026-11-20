@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   handleArtifactRequest,
   hostLabel,
+  LINK_HELPER,
   PAGE_CSP,
   parseHostname,
   presentation,
   STATIC_CSP,
   VIEW_COOKIE,
+  WRAPPER_SCRIPT,
   type ArtifactHostDeps,
   type ArtifactKind,
   type HostView,
@@ -151,25 +153,116 @@ describe('what each kind is served as', () => {
 });
 
 describe('artifact host responses', () => {
-  it('sandboxes an HTML page: scripts in an opaque origin, no network, no framing', async () => {
+  it('serves an HTML page as a small wrapper that frames it in a sandbox', async () => {
     const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html', body: '<p>hi</p>' } });
     const res = await serve(deps, `/${ID}/`);
     expect(res.status).toBe(200);
-    const csp = res.headers.get('content-security-policy')!;
-    expect(csp).toBe(PAGE_CSP);
-    expect(csp).toContain('sandbox allow-scripts');
-    expect(csp).not.toContain('allow-same-origin');
-    expect(csp).toContain("connect-src 'none'");
-    expect(csp).toContain("frame-ancestors 'none'");
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    const csp = res.headers.get('content-security-policy')!;
+    // The wrapper runs only its own script, frames only this host, and is framed by nobody.
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("frame-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toMatch(/script-src 'sha256-[A-Za-z0-9+/]+=*'/);
+    expect(csp).not.toContain('unsafe-inline');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
     expect(res.headers.get('x-robots-tag')).toContain('noindex');
     expect(res.headers.get('x-frame-options')).toBe('DENY');
-    expect(res.headers.get('content-disposition')).toBe(`inline; filename*=UTF-8''Report%20_Q3_`);
     for (const name of res.headers.keys()) expect(name).not.toMatch(/^access-control-/);
-    expect(await res.text()).toBe('<p>hi</p>');
+    const html = await res.text();
+    expect(html).not.toContain('<p>hi</p>');
+    // No allow-same-origin, no top navigation, no popups, no forms.
+    expect(html).toContain(
+      `<iframe src="/${ID}/content" sandbox="allow-scripts" referrerpolicy="no-referrer"`,
+    );
+    expect(html).toContain('<title>Report &quot;Q3&quot;</title>');
+    expect(html).toContain(WRAPPER_SCRIPT);
+    const hash = Buffer.from(
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(WRAPPER_SCRIPT)),
+    ).toString('base64');
+    expect(csp).toContain(`'sha256-${hash}'`);
+  });
+
+  it('escapes the title in the wrapper', async () => {
+    const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html' } });
+    const evil = {
+      ...deps,
+      resolve: async (...args: Parameters<ArtifactHostDeps['resolve']>) => {
+        const view = await deps.resolve(...args);
+        return view && { ...view, title: '</title><script>alert(1)</script>' };
+      },
+    };
+    const html = await (await serve(evil, `/${ID}/`)).text();
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it("serves the page itself only into the wrapper's frame, sandboxed with no network", async () => {
+    const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html', body: '<p>hi</p>' } });
+    const framed = await serve(deps, `/${ID}/content`, {
+      headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' },
+    });
+    expect(framed.status).toBe(200);
+    // The page as stored, then the link helper (a convenience the page could equally fake).
+    const body = await framed.text();
+    expect(body).toBe(`<p>hi</p>\n${LINK_HELPER}\n`);
+    expect(Number(framed.headers.get('content-length'))).toBe(
+      new TextEncoder().encode(body).byteLength,
+    );
+    const csp = framed.headers.get('content-security-policy')!;
+    expect(csp).toBe(PAGE_CSP);
+    expect(csp).toContain('sandbox allow-scripts');
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).not.toContain('allow-top-navigation');
+    expect(csp).not.toContain('allow-popups');
+    expect(csp).not.toContain('allow-forms');
+    expect(csp).toContain("connect-src 'none'");
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain("frame-src 'none'");
+    // Framed by the wrapper on this host only.
+    expect(csp).toContain("frame-ancestors 'self'");
+    expect(framed.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(framed.headers.get('vary')).toMatch(/Sec-Fetch-Dest/);
+    expect(framed.headers.get('content-disposition')).toBe(
+      `inline; filename*=UTF-8''Report%20_Q3_`,
+    );
+
+    // Opened as a page of its own, it sends the browser to the wrapper instead.
+    const top = await serve(deps, `/${ID}/content`, {
+      headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' },
+    });
+    expect(top.status).toBe(303);
+    expect(top.headers.get('location')).toBe(`/${ID}/`);
+    expect(top.body).toBeNull();
+
+    // Without the browser's word for where it goes (an old browser, a script),
+    // or framed by anything but this host, it is served with no script at all.
+    for (const headers of [
+      {},
+      { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' },
+      { 'sec-fetch-dest': 'object' },
+      { 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'same-origin' },
+    ] as Record<string, string>[]) {
+      const res = await serve(deps, `/${ID}/content`, { headers });
+      expect(res.status, JSON.stringify(headers)).toBe(200);
+      expect(await res.text()).toBe('<p>hi</p>');
+      const scriptless = res.headers.get('content-security-policy')!;
+      expect(scriptless).toMatch(/; sandbox$/);
+      expect(scriptless).not.toContain('script-src');
+      expect(scriptless).toContain("frame-ancestors 'self'");
+    }
+  });
+
+  it('has no content path for anything that is not a page', async () => {
+    const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/plain' } });
+    const res = await serve(deps, `/${ID}/content`, {
+      headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' },
+    });
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe('Not found');
   });
 
   it('runs nothing in anything that is not a page', async () => {
@@ -287,5 +380,108 @@ describe('the rate limit', () => {
     expect(limited.headers.get('retry-after')).toBe('60');
     // Another address is not held back.
     expect((await serve(deps, `/${ID}/`, {}, '203.0.113.9')).status).toBe(200);
+  });
+});
+
+describe('leaving an Artifact page', () => {
+  const page = () =>
+    fakeDeps({
+      [ID]: {
+        visibility: 'public',
+        mime: 'text/html',
+        body: '<a href="https://example.com">x</a>',
+      },
+      [OTHER]: { visibility: 'private', mime: 'text/html' },
+    });
+  const fromPage = { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
+  const leave = (deps: ArtifactHostDeps, to: string, headers: Record<string, string> = fromPage) =>
+    serve(deps, `/${ID}/leave?to=${encodeURIComponent(to)}`, { headers });
+
+  it('shows the whole destination and goes there only on a click', async () => {
+    const res = await leave(page(), 'https://example.com/path?d=secret#frag');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('refresh')).toBeNull();
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    const csp = res.headers.get('content-security-policy')!;
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).not.toContain('script-src');
+    expect(csp).toContain("frame-ancestors 'none'");
+    const html = await res.text();
+    expect(html).toContain('You are leaving this page');
+    expect(html).toContain('<code>https://example.com/path?d=secret#frag</code>');
+    expect(html).toContain('example.com');
+    expect(html).toContain(
+      '<a class="go" href="https://example.com/path?d=secret#frag" rel="noopener noreferrer">',
+    );
+    expect(html).toContain(`<a href="/${ID}/">`);
+    expect(html).not.toMatch(/<script|http-equiv/i);
+  });
+
+  it('shows an internationalized host as the browser would send it', async () => {
+    const html = await (await leave(page(), 'https://еxample.com/')).text();
+    expect(html).toContain('https://xn--xample-2of.com/');
+  });
+
+  it('escapes what it shows', async () => {
+    const html = await (
+      await leave(page(), 'https://evil.example/"><script>alert(1)</script>')
+    ).text();
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('"><script');
+  });
+
+  it('allows only http and https, with no name or password in the address', async () => {
+    for (const to of [
+      'javascript:alert(1)',
+      'data:text/html,<p>x</p>',
+      'file:///etc/passwd',
+      'ftp://example.com/',
+      'https://bank.example@evil.example/',
+      'https://user:pass@evil.example/',
+      'not a url',
+      '',
+      `https://example.com/${'a'.repeat(5000)}`,
+    ]) {
+      const res = await leave(page(), to);
+      expect(res.status, to).toBe(404);
+      expect(await res.text()).toBe('Not found');
+    }
+    expect((await serve(page(), `/${ID}/leave`, { headers: fromPage })).status).toBe(404);
+  });
+
+  it('is not served to a request that did not come from the Artifact page', async () => {
+    const deps = page();
+    // A link elsewhere (another site, a typed or emailed address), or anything but a top-level page.
+    for (const headers of [
+      { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' },
+      { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-site' },
+      { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' },
+      { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' },
+      { 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'same-origin' },
+    ]) {
+      expect(
+        (await leave(deps, 'https://example.com/', headers)).status,
+        JSON.stringify(headers),
+      ).toBe(404);
+    }
+    // A browser that sends no such headers cannot be told apart; it still needs the click.
+    expect((await leave(deps, 'https://example.com/', {})).status).toBe(200);
+  });
+
+  it('is only for an Artifact page the viewer may see', async () => {
+    const deps = page();
+    const res = await serve(
+      deps,
+      `/${OTHER}/leave?to=${encodeURIComponent('https://example.com/')}`,
+      {
+        headers: fromPage,
+      },
+    );
+    expect(res.status).toBe(404);
+    const text = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/plain' } });
+    expect((await leave(text, 'https://example.com/')).status).toBe(404);
   });
 });

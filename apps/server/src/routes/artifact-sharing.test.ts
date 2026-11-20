@@ -703,6 +703,8 @@ describe('sharing Artifacts (plan 21.11)', () => {
       host(`http://${DOMAIN}/${privateId}/`),
       host(`http://a.${label}.${DOMAIN}/${privateId}/`),
       host(`${origin}/${privateId}/extra/path`),
+      host(`${origin}/${privateId}/content`),
+      host(`${origin}/${privateId}/leave?to=${encodeURIComponent('https://example.com/')}`),
       host(`${origin}//evil.example/`),
     ]);
     const shapes = await Promise.all(
@@ -716,6 +718,46 @@ describe('sharing Artifacts (plan 21.11)', () => {
     );
     for (const shape of shapes) expect(shape).toEqual(shapes[0]);
     expect(shapes[0]!.status).toBe(404);
+  });
+
+  it("serves an HTML Artifact in the host's wrapper, and its content only into the wrapper's frame", async () => {
+    const { artifact } = await createArtifact(
+      t.ownerDeps,
+      { id: aliceId, workspaceId },
+      {
+        title: 'Page.html',
+        kind: 'document',
+        botId,
+        content: '<a href="https://example.com/">out</a>',
+      },
+      { userId: aliceId },
+    );
+    const { link, viewCookie } = await openAs(alice, artifact.id);
+    const origin = new URL(link.url).origin;
+    const wrapper = await host(`${origin}/${artifact.id}/`, viewCookie);
+    expect(wrapper.status).toBe(200);
+    expect(wrapper.headers.get('content-security-policy')).toContain("frame-src 'self'");
+    expect(wrapper.headers.get('cache-control')).toBe('private, no-store');
+    const html = await wrapper.text();
+    expect(html).toContain(`<iframe src="/${artifact.id}/content" sandbox="allow-scripts"`);
+    expect(html).not.toContain('example.com');
+    const framed = await t.app.request(`/${artifact.id}/content`, {
+      headers: {
+        host: new URL(origin).host,
+        cookie: viewCookie!,
+        'sec-fetch-dest': 'iframe',
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    expect(framed.status).toBe(200);
+    expect(await framed.text()).toContain('<a href="https://example.com/">out</a>');
+    expect(framed.headers.get('content-security-policy')).toContain('sandbox allow-scripts');
+    // The same cookie, asked for the content as a page of its own: back to the wrapper.
+    const top = await t.app.request(`/${artifact.id}/content`, {
+      headers: { host: new URL(origin).host, cookie: viewCookie!, 'sec-fetch-dest': 'document' },
+    });
+    expect(top.status).toBe(303);
+    expect(top.headers.get('location')).toBe(`/${artifact.id}/`);
   });
 
   it('is not an open redirect', async () => {

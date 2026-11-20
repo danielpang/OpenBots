@@ -8,13 +8,17 @@ a wildcard certificate of its own:
 
 - It forwards each request to the server's `/artifact-host/<path>` with the shared secret
   (`EDGE_SECRET`, the server's `OPENBOTS_ARTIFACT_EDGE_SECRET`), the hostname it answered for and
-  the client's address. Only a few request headers go through (the cookie among them); anything
-  else the client sent, including its own copy of those headers, does not.
+  the client's address. Only a few request headers go through (the cookie and the browser's
+  `Sec-Fetch-Dest` and `Sec-Fetch-Site` among them); anything else the client sent, including its
+  own copy of the Worker's headers, does not.
 - The server decides everything else: who may see what, the sandboxing headers, the view token
   and cookie, the 404s and the rate limit.
-- It caches only answers the server marks `Cache-Control: public` (the public version of a public
-  Artifact, for 60 seconds), and only for a GET with no cookie, no token and no credentials. A
-  private or organization view is never stored at the edge.
+- It caches only answers the server marks `Cache-Control: public` (a public Artifact, for 60
+  seconds), and only for a GET with no cookie, no token and no credentials. A private or
+  organization view is never stored at the edge, and neither is the page that asks before a viewer
+  leaves an Artifact (`/<id>/leave`). The cache key is the path with `Sec-Fetch-Dest` and
+  `Sec-Fetch-Site`, since the server serves an HTML page's content with its scripts only into the
+  frame of the host's wrapper (`/<id>/content`), and differently to anything else.
 
 Nothing here is deployed by CI. The artifact domain is not bought yet.
 
