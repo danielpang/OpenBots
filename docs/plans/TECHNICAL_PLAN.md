@@ -25,7 +25,7 @@ Deliberate differences from Grok Bot: the computer is a Docker sandbox (Firecrac
        └─────────┬──────────┘                        │ POST /hooks/...
                  ▼                                   ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│  openbots-server  (Node 22, TypeScript, Hono)                      │
+│  openbots-server  (Node 24, TypeScript, Hono)                      │
 │                                                                   │
 │  REST API · WS gateway · Webhook ingress · Auth (better-auth)     │
 │  Router (who replies) · Agent runtime (run workers) · Scheduler   │
@@ -64,7 +64,7 @@ One server image runs three roles: `api` (HTTP and WebSocket), `worker` (runs, R
 | Area | Choice | Why | Considered |
 | --- | --- | --- | --- |
 | Language | TypeScript everywhere | One type system across server, web, and desktop; the MCP SDK and the AI SDK are first class | Python (second frontend language), Go (weaker MCP and LLM tooling) |
-| Runtime | Node 22 LTS | Stable, broad library support | Bun (native module and sandbox maturity risk) |
+| Runtime | Node 24 LTS | Stable, broad library support | Bun (native module and sandbox maturity risk) |
 | Server | Hono with zod-openapi | Typed routes, generated OpenAPI, clean streaming and WebSocket support | Fastify, NestJS |
 | Monorepo | pnpm workspaces + Turborepo | Cached builds, shared packages | Nx |
 | Database | Postgres 16 + Drizzle ORM, pgvector | Relational fit for Bots, transcripts, Routines, Artifacts; vector search for memory without another service; Drizzle can target SQLite for a later lite mode | Prisma, SQLite only |
