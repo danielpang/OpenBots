@@ -16,6 +16,7 @@ import {
   ScreenLocks,
   screenNumber,
   spritesEgressPolicy,
+  SpritesApiError,
   volumeName,
   type ComputerAgentClient,
   type ComputerProvider,
@@ -338,6 +339,15 @@ export function idleSettingsApply(row: Pick<ComputerRow, 'provider'>) {
   return row.provider !== 'sprites';
 }
 
+/**
+ * The provider as members and their organization are told it: `docker`, or
+ * `remote` for a machine somewhere else. The hosted service's sandbox vendor
+ * is not named to them.
+ */
+export function shownProvider(name: string): 'docker' | 'remote' {
+  return name === 'docker' ? 'docker' : 'remote';
+}
+
 function provider(deps: AppDeps) {
   const found = computerProvider(deps);
   if (!found) throw computerUnavailable(NO_PROVIDER);
@@ -441,7 +451,9 @@ function refOf(deps: AppDeps, row: ComputerRow): ComputerRef {
 }
 
 export function agentFor(deps: AppDeps, row: ComputerRow): ComputerAgentClient {
-  return provider(deps).agent(refOf(deps, row));
+  const machines = provider(deps);
+  const agent = machines.agent(refOf(deps, row));
+  return provisionsInBackground(machines) ? quietAgent(deps, agent, row.id) : agent;
 }
 
 /** The owner's computer row, creating the machine behind it on first use. */
@@ -591,7 +603,8 @@ async function createMachine(
       guard,
     );
     await auditComputer(deps, created, by, 'computer.create', {
-      provider: ref.provider,
+      // As the organization's audit log shows it: the hosted service's vendor is not named.
+      provider: shownProvider(ref.provider),
       ...(status === 'updating' ? { updated: true, image: deps.config.sandboxImage } : {}),
     });
     return created;
@@ -632,7 +645,15 @@ export function startComputer(
 async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Started> {
   const machines = provider(deps);
   let row = await ensureComputer(deps, owner, by);
-  const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
+  let machine: Awaited<ReturnType<ComputerProvider['status']>>;
+  try {
+    machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    // The row is left as it was: nothing was asked of the machine yet.
+    deps.logger.error({ err: error, computerId: row.id }, 'reading the computer status failed');
+    throw computerUnavailable(`The computer did not start: ${failureText(deps, error)}`);
+  }
   if (machine === 'running' && row.status === 'running') {
     return { computer: await touch(deps, row), durationMs: null, updated: false };
   }
@@ -2002,6 +2023,109 @@ export const HOSTED_FAILURE = 'something went wrong on our side. Try again short
  * self-hosted owner runs the machine themselves and reads the real reason.
  */
 function failureText(deps: AppDeps, error: unknown) {
+  return hostedMachines(deps) ? HOSTED_FAILURE : errorText(error);
+}
+
+/** `HOSTED_FAILURE` as a sentence of its own. */
+export const HOSTED_FAILURE_SENTENCE = HOSTED_FAILURE[0]!.toUpperCase() + HOSTED_FAILURE.slice(1);
+
+function hostedMachines(deps: Pick<AppDeps, 'config' | 'logger'>) {
   const machines = computerProvider(deps);
-  return machines && provisionsInBackground(machines) ? HOSTED_FAILURE : errorText(error);
+  return !!machines && provisionsInBackground(machines);
+}
+
+/**
+ * Text that names the hosted service's sandbox provider or its hosts: the
+ * provider's API errors, its machines' names and URLs (a socket that could
+ * not reach one says its host name).
+ */
+const PROVIDER_WORDS = /sprite|fly\.io|fly\.dev|flyctl/i;
+
+function namesProvider(error: unknown): boolean {
+  return error instanceof SpritesApiError || PROVIDER_WORDS.test(errorText(error));
+}
+
+/**
+ * A failure's text where its reader is the member or their Bot (a reset's
+ * rescue, a checkout's error, a coding session's end, a sign-in, a tool's
+ * result), for a failure that is not only the provider's: git's own words, an
+ * agent's refusal and the server's own reasons stay as they are. On the
+ * hosted service, one that comes from the sandbox provider or names it reads
+ * `HOSTED_FAILURE` instead (`inline`: after a colon), as `failureText` does,
+ * and the real failure goes to the log. Self-hosted, the text as it is.
+ */
+export function shownFailure(
+  deps: Pick<AppDeps, 'config' | 'logger'>,
+  error: unknown,
+  { inline = false }: { inline?: boolean } = {},
+): string {
+  if (!hostedMachines(deps) || !namesProvider(error)) return errorText(error);
+  deps.logger.warn({ err: error }, 'a failure on the hosted computer, shown in plain words');
+  return inline ? HOSTED_FAILURE : HOSTED_FAILURE_SENTENCE;
+}
+
+/**
+ * The agent client of a hosted computer, whose failures read as
+ * `shownFailure` says: its requests and sockets go to the provider's URL
+ * for the machine, so a connection that fails names that host. An agent
+ * error keeps its status and code. The real failure goes to the log.
+ */
+function quietAgent(
+  deps: AppDeps,
+  agent: ComputerAgentClient,
+  computerId: string,
+): ComputerAgentClient {
+  const quiet = (error: unknown): unknown => {
+    if (!namesProvider(error)) return error;
+    deps.logger.warn({ err: error, computerId }, 'the computer agent could not be reached');
+    return error instanceof AgentError
+      ? new AgentError(error.status, HOSTED_FAILURE_SENTENCE, error.code)
+      : new Error(HOSTED_FAILURE_SENTENCE);
+  };
+  const said = (text: string) => {
+    if (!PROVIDER_WORDS.test(text)) return text;
+    deps.logger.warn({ computerId, error: text }, 'the computer agent could not be reached');
+    return HOSTED_FAILURE_SENTENCE;
+  };
+  const rethrow = (error: unknown): never => {
+    throw quiet(error);
+  };
+  const wrapped: Record<string, unknown> = { ...agent };
+  for (const [key, value] of Object.entries(agent)) {
+    if (typeof value !== 'function' || key === 'socket') continue;
+    wrapped[key] = (...args: unknown[]) => {
+      try {
+        const out: unknown = (value as (...a: unknown[]) => unknown)(...args);
+        return out instanceof Promise ? out.catch(rethrow) : out;
+      } catch (error) {
+        return rethrow(error);
+      }
+    };
+  }
+  const quieter = <T extends { error?: string }>(info: T): T =>
+    info.error ? { ...info, error: said(info.error) } : info;
+  const client = wrapped as unknown as ComputerAgentClient;
+  client.mcpStdio = (launch, handlers, options) =>
+    agent
+      .mcpStdio(launch, { ...handlers, exit: (info) => handlers.exit(quieter(info)) }, options)
+      .catch(rethrow);
+  client.coder = (start, handlers, options) =>
+    agent
+      .coder(
+        start,
+        {
+          ...handlers,
+          exit: (info) => handlers.exit(quieter(info)),
+          ...(handlers.error ? { error: (message) => handlers.error!(said(message)) } : {}),
+        },
+        options,
+      )
+      .then((proc) => {
+        const started = proc.started.catch(rethrow);
+        // Unread unless the caller waits for it, as the agent's own.
+        started.catch(() => {});
+        return { ...proc, started };
+      })
+      .catch(rethrow);
+  return client;
 }

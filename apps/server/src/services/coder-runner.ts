@@ -74,7 +74,13 @@ import {
   settleSession,
   type CodingSessionRow,
 } from './coder-state.js';
-import { agentFor, beginComputerUse, EXEC_TOUCH_MS, startComputer } from './computer.js';
+import {
+  agentFor,
+  beginComputerUse,
+  EXEC_TOUCH_MS,
+  shownFailure,
+  startComputer,
+} from './computer.js';
 import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
 import { runSource } from './policy.js';
@@ -218,8 +224,6 @@ export function createCoderWorker(
     }
   };
 }
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** The policy's decision for every action class, for the launch spec's `actions`. */
 function decisions(
@@ -407,7 +411,7 @@ class SessionRunner {
       await this.finish(exit);
     } catch (error) {
       deps.logger.warn({ err: error, sessionId: this.id }, 'coding session failed');
-      await this.fail(errorText(error));
+      await this.fail(shownFailure(deps, error));
     } finally {
       for (const timer of this.timers) clearTimeout(timer);
       await this.proc?.close().catch(() => {});
@@ -842,7 +846,7 @@ class SessionRunner {
           this.proc?.answer({
             request_id: request.request_id,
             decision: 'deny',
-            message: this.scrub(errorText(error)),
+            message: this.scrub(shownFailure(this.deps, error)),
           }),
         );
       }
@@ -1146,7 +1150,7 @@ class SessionRunner {
       await assertRunnable(this.git, this.repoPath, this.repo);
       return null;
     } catch (error) {
-      return errorText(error);
+      return shownFailure(this.deps, error);
     }
   }
 

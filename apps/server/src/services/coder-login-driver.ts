@@ -17,7 +17,7 @@ import {
   signInErrorForOwner,
   type CoderLoginRow,
 } from './coder-login.js';
-import { agentFor, startComputer } from './computer.js';
+import { agentFor, shownFailure, startComputer } from './computer.js';
 import { fenceOf, isFenced, watchFences } from './computer-fence.js';
 
 // The sign-in driver (docs/plans/TECHNICAL_PLAN.md 22.5): the runner's `login` job.
@@ -104,7 +104,7 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
     ({ computer } = await startComputer(deps, owner, SYSTEM_ACTOR));
   } catch (error) {
     await endLogin(deps, row, 'failed', {
-      error: `The computer did not start: ${(error as Error).message}`,
+      error: `The computer did not start: ${shownFailure(deps, error, { inline: true })}`,
     });
     return;
   }
@@ -259,7 +259,7 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
         },
       );
     } catch (error) {
-      settle({ type: 'exit', error: (error as Error).message });
+      settle({ type: 'exit', error: shownFailure(deps, error) });
     }
     const result = await outcome;
     clearTimeout(timer);

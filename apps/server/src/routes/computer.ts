@@ -22,6 +22,7 @@ import {
   restartComputer,
   runningComputer,
   setScreenControl,
+  shownProvider,
   startComputer,
   stopComputer,
   updateComputerSettings,
@@ -62,9 +63,6 @@ const ScreenSchema = z
  * them.
  */
 const PublicProviderSchema = z.enum(['docker', 'remote']);
-function publicProvider(provider: string): z.infer<typeof PublicProviderSchema> {
-  return provider === 'docker' ? 'docker' : 'remote';
-}
 
 const ComputerSchema = z
   .object({
@@ -160,7 +158,7 @@ function toScreen(row: ScreenRow): z.infer<typeof ScreenSchema> {
 function toComputer(row: ComputerRow, screens: ScreenRow[]): z.infer<typeof ComputerSchema> {
   return {
     id: row.id,
-    provider: publicProvider(row.provider),
+    provider: shownProvider(row.provider),
     status: ComputerStatusSchema.catch('error').parse(row.status),
     alwaysOn: row.alwaysOn,
     idleTimeoutMin: row.idleTimeoutMin,

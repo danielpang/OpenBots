@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { SYSTEM_ACTOR } from './audit.js';
-import { agentFor, computerOff, startComputer } from './computer.js';
+import { agentFor, computerOff, shownFailure, startComputer } from './computer.js';
 import { fenceOf, isFenced } from './computer-fence.js';
 import { parseRepoUrl, type ParsedRepoUrl } from './repos.js';
 import {
@@ -766,7 +766,7 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
       .returning();
     return { ...ready!, defaultBranch: branch };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = shownFailure(deps, error);
     await deps.db
       .update(schema.repoCheckouts)
       .set({ state: 'error', error: message.slice(0, 2_000), updatedAt: new Date() })
