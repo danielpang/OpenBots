@@ -4,22 +4,28 @@ import {
   type EventBus,
   type RepoRescueResult,
 } from '@openbots/shared';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { AppDeps, CurrentUser } from '../context.js';
-import { schema } from '../db/client.js';
+import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
-import { recordAudit, userActor } from './audit.js';
+import { userActor } from './audit.js';
 import {
   assertResettable,
   checkpointBeforeReset,
   computerAvailable,
   computerProvider,
   computerUnavailable,
-  destroyComputer,
   getComputer,
+  resetMachine,
   type ComputerRow,
 } from './computer.js';
-import { retainedDays } from './computer-retire.js';
+import {
+  auditReset,
+  cleanupAfterReset,
+  retainedDays,
+  type ResetRecord,
+} from './computer-retire.js';
+import { assertPerson } from './person.js';
 import {
   RESCUE_CHANNEL,
   rescueStatus,
@@ -229,7 +235,8 @@ export interface ResetOptions {
   resetSignIns?: boolean;
   /**
    * With `resetSignIns`, where the old computer would be kept for `keptDays`:
-   * deletes it now instead. Support cannot restore it then.
+   * deletes it now instead. Support cannot restore it then. Only a person
+   * may ask for it (403 `PERSON_REQUIRED` for an API key).
    */
   deleteOldComputer?: boolean;
 }
@@ -244,10 +251,15 @@ export interface ResetOptions {
  */
 export async function resetComputer(
   deps: AppDeps,
-  owner: Owner,
+  owner: Owner & { apiKeyId?: string | null },
   { requestId, resetSignIns = false, deleteOldComputer = false }: ResetOptions,
 ): Promise<ComputerRow> {
   const row = await computerOf(deps, owner);
+  // Nothing can bring a machine deleted now back, so a person asks for it:
+  // a session, or the member's own paired phone or Mac app, never a script.
+  if (resetSignIns && deleteOldComputer) {
+    await assertPerson(deps.db, owner, 'delete the old computer at once');
+  }
   await listen(deps);
   prune();
   const record = prepared.get(requestId);
@@ -275,66 +287,31 @@ export async function resetComputer(
   const deleteOld = resetSignIns && deleteOldComputer;
   const kept = resetSignIns && !deleteOld && retainedDays(computerProvider(deps)) !== null;
   const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns, deleteOld });
-  const reset = await destroyComputer(
+  const resetRecord: ResetRecord = {
+    requestId,
+    signIns: resetSignIns,
+    unsaved: unsavedWork(done.results).length,
+    rescueFailed: !!done.error,
+    // Where a reset with the sign-ins would keep the old computer: kept, or deleted now.
+    ...(resetSignIns && retainedDays(computerProvider(deps)) !== null
+      ? { oldComputer: kept ? ('kept' as const) : ('deleted' as const) }
+      : {}),
+    // The disk as it was, for an operator to restore a mistaken reset (Sprites).
+    ...(checkpoint ? { checkpoint } : {}),
+  };
+  const { computer: reset, retired } = await resetMachine(
     deps,
     row,
-    { signIns: resetSignIns, deleteOld, checkpointId: checkpoint },
+    { signIns: resetSignIns, deleteOld, checkpointId: checkpoint, reset: resetRecord },
     by,
   );
-  await deps.db.transaction(async (tx) => {
-    const checkouts = await tx
-      .update(schema.repoCheckouts)
-      .set({ state: 'missing', error: null, updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.computerId, row.id))
-      .returning({ id: schema.repoCheckouts.id });
-    await tx
-      .update(schema.codingSessions)
-      .set({ worktreePath: null })
-      .where(
-        and(
-          eq(schema.codingSessions.ownerId, owner.id),
-          eq(schema.codingSessions.workspaceId, owner.workspaceId),
-        ),
-      );
-    if (resetSignIns) {
-      // Sign-ins the CLIs held on the state volume are gone; a Settings > Models key is not.
-      await tx
-        .update(schema.coderAccounts)
-        .set({
-          authKind: 'none',
-          accountLabel: null,
-          signedInAt: null,
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.coderAccounts.ownerId, owner.id),
-            eq(schema.coderAccounts.workspaceId, owner.workspaceId),
-            isNull(schema.coderAccounts.providerId),
-          ),
-        );
-    }
-    await recordAudit(tx, {
-      workspaceId: row.workspaceId,
-      actor: by,
-      action: 'computer.reset',
-      targetType: 'computer',
-      targetId: row.id,
-      metadata: {
-        requestId,
-        signIns: resetSignIns,
-        checkouts: checkouts.length,
-        unsaved: unsavedWork(done.results).length,
-        rescueFailed: !!done.error,
-        // Where a reset with the sign-ins would keep the old computer: kept, or deleted now.
-        ...(resetSignIns && retainedDays(computerProvider(deps)) !== null
-          ? { oldComputer: kept ? 'kept' : 'deleted' }
-          : {}),
-        // The disk as it was, for an operator to restore a mistaken reset (Sprites).
-        ...(checkpoint ? { checkpoint } : {}),
-      },
+  // A machine retired took the reset's cleanup with it, and its audit is
+  // written once it is out of reach (computer-retire.ts).
+  if (!retired) {
+    await deps.db.transaction(async (tx) => {
+      const checkouts = await cleanupAfterReset(tx as unknown as Db, row, resetSignIns);
+      await auditReset(tx as unknown as Db, row, by, { ...resetRecord, checkouts });
     });
-  });
+  }
   return reset;
 }

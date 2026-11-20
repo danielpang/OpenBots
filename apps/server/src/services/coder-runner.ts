@@ -81,6 +81,7 @@ import {
   shownFailure,
   startComputer,
 } from './computer.js';
+import { fenceOf, watchFences } from './computer-fence.js';
 import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
 import { runSource } from './policy.js';
@@ -161,6 +162,11 @@ export interface CoderRunnerOptions {
   touchMs?: number;
   /** The session's time limit; DEFAULT_SESSION_MINUTES by default. */
   sessionMinutes?: number;
+  /**
+   * Arms the session's time limit: `setTimeout` by default. A test takes
+   * `expire` to reach the limit at the point it means to, not by the clock.
+   */
+  armLimit?: (expire: () => void, ms: number) => ReturnType<typeof setTimeout> | undefined;
   stopGraceMs?: number;
   runWaitMs?: number;
   /** The GitHub REST API base, for the pull request; tests stand in a fake. */
@@ -177,6 +183,8 @@ export interface CoderRunnerOptions {
 interface LiveSession {
   workspaceId: string;
   computerId: string | null;
+  /** The fence of the machine's agent token the session runs on (computer-fence.ts). */
+  fence: string | null;
   control(msg: CoderControl): void;
 }
 
@@ -189,15 +197,26 @@ export function createCoderWorker(
 ): JobHandler<CoderJob> {
   const live: LiveSessions = new Map();
   let subscribed: Promise<unknown> | null = null;
+  // A reset took the machine away (computer-fence.ts): the sessions on it
+  // stop, from the bus or from the database's fences, so a process that
+  // missed the stop message stops them all the same.
+  let fences: (() => void) | null = null;
   const listen = () =>
-    (subscribed ??= subscribeCoderControl(deps, (msg) => {
-      if (msg.type === 'stop_all') {
+    (subscribed ??= Promise.resolve().then(() => {
+      fences ??= watchFences(({ fence }) => {
         for (const [sessionId, session] of live) {
-          if (session.computerId === msg.computerId) session.control({ type: 'stop', sessionId });
+          if (session.fence === fence) session.control({ type: 'stop', sessionId });
         }
-        return;
-      }
-      live.get(msg.sessionId)?.control(msg);
+      });
+      return subscribeCoderControl(deps, (msg) => {
+        if (msg.type === 'stop_all') {
+          for (const [sessionId, session] of live) {
+            if (session.computerId === msg.computerId) session.control({ type: 'stop', sessionId });
+          }
+          return;
+        }
+        live.get(msg.sessionId)?.control(msg);
+      });
     }));
   return async (job) => {
     await listen();
@@ -299,6 +318,9 @@ export async function runSession(
     get computerId() {
       return runner.computerId;
     },
+    get fence() {
+      return runner.fence;
+    },
     control: (msg) => {
       inWorkspace(claimed.workspaceId, () => runner.control(msg)).catch((error: unknown) =>
         deps.logger.warn({ err: error, sessionId }, 'coder control failed'),
@@ -322,6 +344,7 @@ type AccountRow = typeof schema.coderAccounts.$inferSelect;
 /** One session's job: everything it holds while the CLI runs. */
 class SessionRunner {
   computerId: string | null = null;
+  fence: string | null = null;
   private session: CodingSessionRow;
   private proc: CoderProcess | null = null;
   /** The adapter's protocol session, for a `jsonrpc` transport: it answers prompts, not `proc`. */
@@ -456,6 +479,7 @@ class SessionRunner {
 
     const { computer } = await startComputer(deps, this.owner, { type: 'bot', id: bot.id });
     this.computerId = computer.id;
+    this.fence = fenceOf(computer.agentToken);
     this.use = beginComputerUse(deps, computer, 'coding_session', {
       touchMs: this.options.touchMs ?? EXEC_TOUCH_MS,
     });
@@ -666,15 +690,19 @@ class SessionRunner {
         // It never started; the exit says why.
       });
     const minutes = this.options.sessionMinutes ?? DEFAULT_SESSION_MINUTES;
-    const limit = setTimeout(() => {
+    const arm = this.options.armLimit ?? ((expire, ms) => setTimeout(expire, ms));
+    const limit = arm(() => {
+      if (this.timedOut) return;
       this.timedOut = true;
       this.publicationAbort.abort();
       for (const resolve of this.waiters.values()) resolve('expired');
       this.wake?.();
       this.stopProcess();
     }, minutes * 60_000);
-    limit.unref?.();
-    this.timers.push(limit);
+    if (limit) {
+      limit.unref?.();
+      this.timers.push(limit);
+    }
 
     const exit = await exited;
     if (partial.trim()) onLine(partial);

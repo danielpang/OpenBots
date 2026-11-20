@@ -39,6 +39,19 @@ export const computers = pgTable(
      */
     machineKey: text('machine_key'),
     status: text('status').notNull(),
+    /**
+     * When `status` last changed (a trigger keeps it, drizzle/0045): a busy
+     * status a process left behind when it died is found by its age, from
+     * any process (computer.ts `recoverStaleComputers`).
+     */
+    statusAt: timestamptz('status_at').notNull().defaultNow(),
+    /**
+     * Bumped by every reset, stop, start and claim of the row (not by a
+     * provisioning job's own writes): a job writes only while the row still
+     * has the generation it read, so nothing that moved the row on meanwhile
+     * is overwritten.
+     */
+    generation: integer('generation').notNull().default(0),
     containerId: text('container_id'),
     agentUrl: text('agent_url'),
     agentToken: bytea('agent_token'),
@@ -164,11 +177,48 @@ export const retiredComputers = pgTable(
     lastError: text('last_error'),
     deletedAt: timestamptz('deleted_at'),
     restoredAt: timestamptz('restored_at'),
+    /**
+     * Who holds the record now (the reset that made it, a job, an undo, a
+     * restore): set by the conditional update that took it, and required by
+     * every write that follows, so one that lost the record writes nothing.
+     */
+    claim: uuid('claim'),
+    /**
+     * The SHA-256, hex, of the computer's sealed agent token when the machine
+     * was taken off it (computer-fence.ts): any process refuses that token
+     * from the moment the record commits, whatever it missed on the bus.
+     */
+    fence: text('fence'),
+    /**
+     * Why and by whom it was retired, and the member's reset if one did it
+     * (`RetireContext`): for its audit and the reset's cleanup, written by
+     * whoever finishes it, in any process.
+     */
+    context: jsonb('context'),
+    /**
+     * When the retire's audit (and a reset's) and the reset's cleanup were
+     * written, with the member's computer released: once, by whoever sealed it.
+     */
+    auditedAt: timestamptz('audited_at'),
+    /**
+     * The member asked for it to be deleted at once rather than kept: written
+     * with the record (`delete_after` is then its retire time), honoured by
+     * every actor that finishes it, and never restorable.
+     */
+    deleteNow: boolean('delete_now').notNull().default(false),
+    /**
+     * When its steps inside were run once more, past the longest a
+     * provisioning the reset cancelled could still run (computer-retire.ts).
+     */
+    checkedAt: timestamptz('checked_at'),
     createdAt: createdAt(),
   },
   (t) => [
     index('retired_computers_owner').on(t.workspaceId, t.ownerId, t.retiredAt),
     index('retired_computers_due').on(t.status, t.deleteAfter),
+    index('retired_computers_fence')
+      .on(t.createdAt)
+      .where(sql`fence is not null`),
     // One live record per machine: two resets racing cannot record it twice.
     uniqueIndex('retired_computers_live_ref')
       .on(t.provider, t.providerRef)

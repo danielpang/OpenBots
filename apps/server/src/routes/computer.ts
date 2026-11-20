@@ -458,7 +458,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Where the reset status gives `keptDays` (the hosted service), a reset with `resetSignIns` keeps the old computer that many days, out of service and reachable only by an operator, in case support needs to restore it, then deletes it for good; with `deleteOldComputer` it is deleted at once instead. The reset answers only once the old computer is out of reach or deleted; if that fails it answers 503 and the computer is left as it was. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Where the reset status gives `keptDays` (the hosted service), a reset with `resetSignIns` keeps the old computer that many days, out of service and reachable only by an operator, in case support needs to restore it, then deletes it for good; with `deleteOldComputer` it is deleted at once instead, which only a person may ask for: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). The reset answers only once the old computer is out of reach or deleted; if that fails it answers 503, with the computer stopped and its files and sign-ins kept, or finishing in the background. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -475,7 +475,7 @@ export const computerRoutes = createRouter()
                   }),
                   deleteOldComputer: z.boolean().optional().openapi({
                     description:
-                      'With `resetSignIns`, where the reset status gives `keptDays`: delete the old computer now instead of keeping it, for example when someone else got into it. Support cannot restore it then. Ignored without `resetSignIns`.',
+                      'With `resetSignIns`, where the reset status gives `keptDays`: delete the old computer now instead of keeping it, for example when someone else got into it. Support cannot restore it then. Only a person may ask for it: a signed-in session or a paired device, not an API key. Ignored without `resetSignIns`.',
                   }),
                 })
                 .openapi('ComputerReset'),
@@ -487,9 +487,12 @@ export const computerRoutes = createRouter()
       responses: {
         202: computerResponse('Reset: stopped with no machine; the next start makes a fresh one'),
         ...authProblems,
+        403: problemResponse(
+          '`deleteOldComputer` from an API key: only a person may ask for it (`PERSON_REQUIRED`)',
+        ),
         404: problemResponse('The account has no computer yet'),
         409: problemResponse(
-          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), a computer that cannot be reset from here (`RESET_UNSUPPORTED`), one being made, started or stopped (`COMPUTER_BUSY`), or one another reset changed meanwhile (`COMPUTER_CHANGED`)',
+          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), a computer that cannot be reset from here (`RESET_UNSUPPORTED`), one being stopped for less than two minutes (`COMPUTER_BUSY`), or one another reset changed meanwhile (`COMPUTER_CHANGED`)',
         ),
         503: unavailable,
       },
