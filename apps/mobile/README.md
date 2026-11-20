@@ -4,7 +4,7 @@ Expo SDK 55 / React Native companion to the OpenBots server. The app lives in th
 
 ## Run
 
-From the repository root, using Node 22 and the pinned pnpm version:
+From the repository root, using Node 24 and the pinned pnpm version:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -60,7 +60,7 @@ The release profiles explicitly disable `developmentClient`. Store builds still 
 ### EAS dependency-install failures
 
 - **Symptom:** an EAS build fails before installing dependencies with `Failed to switch pnpm` or `Unknown system error -8`.
-- **Cause:** the build image defaults to older Node and pnpm. Every profile pins Node 22.23.4 and pnpm 12.11.2 in the `base` profile of `eas.json`; keep them in line with the root Node requirement and `packageManager`.
+- **Cause:** the build image defaults to older Node and pnpm. Every profile pins Node 24.22.1 and pnpm 12.11.2 in the `base` profile of `eas.json`; keep them in line with the root Node requirement and `packageManager`.
 - **Fix:** start a new build from `apps/mobile` so the updated configuration is uploaded. Signing credentials need no change.
 
 ```sh

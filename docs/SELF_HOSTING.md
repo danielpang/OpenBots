@@ -239,6 +239,14 @@ the run's event row say it is updating). A running computer is never replaced un
 moves after it next stops, at its idle timeout or when you press Stop on its Computer page and
 start it again.
 
+Upgrading to the release that moves to Node 24: the server, the relay and the Bots' computer now
+need Node 24. The official images (server, computer, relay and standalone) already include it, so a
+Docker, compose bundle, Fly or standalone install needs no change. A server or relay run from a
+checkout without Docker needs Node 24 first: run `bash scripts/dev-setup.sh` again (it installs
+Node 24 when the one it finds is another major version), or install Node 24 yourself, then run
+`pnpm install` and `pnpm rebuild` so native modules are built for it. Node 22 is no longer
+accepted by `pnpm install`.
+
 Upgrading from a version without `docker-guard`:
 
 1. Set `DOCKER_HOST=tcp://docker-guard:2375` in `.env` (the computer refuses the socket proxy
@@ -505,11 +513,11 @@ current prices: [Fly.io](https://fly.io/docs/about/pricing/),
 Requirements: Linux or macOS with `curl`, `tar` and `xz`. Nothing else needs to be preinstalled.
 
 ```sh
-bash scripts/dev-setup.sh            # Node 22, pnpm (via corepack), pnpm install
+bash scripts/dev-setup.sh            # Node 24, pnpm (via corepack), pnpm install
 bash scripts/dev-setup.sh --services # also Postgres 16 + pgvector and Redis (Ubuntu, apt)
 ```
 
-The script is idempotent. It reuses a Node 22 on `PATH`, or installs one into a toolchain directory
+The script is idempotent. It reuses a Node 24 on `PATH`, or installs one into a toolchain directory
 (`/workspace/.openbots-toolchain` when it has room, else `~/.local/openbots-toolchain`; set
 `OPENBOTS_TOOLCHAIN_DIR` to choose). It prints the exports to add to your shell and writes them to
 `<toolchain dir>/env.sh`.
