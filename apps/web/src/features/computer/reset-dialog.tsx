@@ -61,6 +61,7 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   const queryClient = useQueryClient();
   const [requestId, setRequestId] = useState<string | null>(null);
   const [resetSignIns, setResetSignIns] = useState(false);
+  const [deleteOld, setDeleteOld] = useState(false);
   const prepare = useMutation({
     mutationFn: prepareReset,
     onSuccess: (answer) => setRequestId(answer.requestId),
@@ -81,7 +82,7 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
     refetchInterval: (query) => (query.state.data?.status === 'done' ? false : pollMs),
   });
   const reset = useMutation({
-    mutationFn: () => resetComputer(requestId!, resetSignIns),
+    mutationFn: () => resetComputer(requestId!, resetSignIns, deleteOld && !!check.data?.keptDays),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: computerQuery.queryKey, exact: true });
       void queryClient.invalidateQueries({ queryKey: reposQuery.queryKey });
@@ -91,6 +92,7 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   });
 
   const done = check.data?.status === 'done' ? check.data : null;
+  const keptDays = done?.keptDays ?? null;
   const checkError = prepare.error ?? check.error;
   const stale = reset.error instanceof ApiError && reset.error.code === RESET_NOT_PREPARED;
   const checkAgain = () => {
@@ -119,7 +121,19 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
           Also forget sign-ins: the coding agents' logins and the browser logins the Bots share
         </label>
       )}
-      {done && resetSignIns && <ForgetNotice days={done.keptDays ?? null} />}
+      {done && resetSignIns && keptDays ? (
+        <label className="flex items-center gap-2 pl-6">
+          <input
+            type="checkbox"
+            name="deleteOldComputer"
+            checked={deleteOld}
+            onChange={(event) => setDeleteOld(event.currentTarget.checked)}
+          />
+          Delete the old computer now instead of keeping it. Choose this if someone else may have
+          used your sign-ins.
+        </label>
+      ) : null}
+      {done && resetSignIns && <ForgetNotice days={deleteOld ? null : keptDays} />}
       <ErrorText error={checkError} />
       {stale ? (
         <p className="text-sm text-destructive">

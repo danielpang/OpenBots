@@ -997,6 +997,40 @@ describe('Reset computer', () => {
   );
 
   it(
+    'can delete the old computer now instead of keeping it, and says so',
+    { timeout: 15_000 },
+    async () => {
+      resetServer();
+      render(<ComputerPage />);
+      await until(() => !!button('Reset computer'), 'Reset computer');
+      click(button('Reset computer'));
+      await until(() => !!document.querySelector('[data-reset="checked"]'), 'the results');
+      const dialog = document.querySelector('[data-reset]')!;
+      // Only once the sign-ins go too.
+      expect(dialog.querySelector('input[name="deleteOldComputer"]')).toBeNull();
+      click(dialog.querySelector('input[name="resetSignIns"]'));
+      await until(() => !!dialog.querySelector('input[name="deleteOldComputer"]'), 'the option');
+      expect(dialog.textContent).toContain(
+        'Delete the old computer now instead of keeping it. Choose this if someone else may have used your sign-ins.',
+      );
+      click(dialog.querySelector('input[name="deleteOldComputer"]'));
+      await until(() => !!dialog.querySelector('[data-reset-kept="none"]'), 'the notice');
+      expect(dialog.querySelector('[data-reset-kept]')!.textContent).toBe(
+        'The old computer and its sign-ins are deleted for good. This cannot be undone.',
+      );
+      expect(document.body.textContent).not.toMatch(/[–—]| - /);
+      click(button('Reset'));
+      await until(() => posts('/api/v1/computer/reset').length === 1, 'the reset');
+      expect(JSON.parse(posts('/api/v1/computer/reset')[0]!)).toEqual({
+        requestId: 'r1',
+        confirm: true,
+        resetSignIns: true,
+        deleteOldComputer: true,
+      });
+    },
+  );
+
+  it(
     'says the old computer is deleted for good where the server does not keep it',
     { timeout: 15_000 },
     async () => {
