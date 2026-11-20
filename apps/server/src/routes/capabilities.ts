@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { createRouter } from '../openapi.js';
 import { computerAvailable } from '../services/computer.js';
+import { folderConnectorsOn } from '../services/connectors.js';
 import { RELAY_PROTOCOL_VERSION, serverVersion } from '../version.js';
 
 // What this install has turned on, for clients deciding what to show before
@@ -29,7 +30,7 @@ const CapabilitiesSchema = z
     }),
     folderConnectors: z.boolean().optional().openapi({
       description:
-        'Folder (filesystem) connectors can be added and run (OPENBOTS_FOLDER_CONNECTORS; off by default on the managed service). Off: the catalog leaves them out, adding one answers 403 `FOLDER_CONNECTORS_UNAVAILABLE`, and one that exists reads as disabled and offers no tools.',
+        "Folder (filesystem) connectors can be added and run. Always where stdio connectors run in each member's computer (OPENBOTS_STDIO_RUNNER=computer, the managed service's default), where the folder is in that computer; where they run on the server, as OPENBOTS_FOLDER_CONNECTORS says (on by default self-hosted, off by default managed). Off: the catalog leaves them out, adding one answers 403 `FOLDER_CONNECTORS_UNAVAILABLE`, and one that exists reads as disabled and offers no tools.",
     }),
     localEndpoints: z.boolean().optional().openapi({
       description:
@@ -81,15 +82,14 @@ export const capabilityRoutes = createRouter().openapi(
     },
   }),
   (c) => {
-    const { oauth, deployment, localToken, customStdio, folderConnectors, localEndpoints } =
-      c.var.deps.config;
+    const { oauth, deployment, localToken, customStdio, localEndpoints } = c.var.deps.config;
     return c.json(
       {
         oauth: { github: !!oauth.github, google: !!oauth.google },
         computer: computerAvailable(c.var.deps),
         deployment,
         customStdio,
-        folderConnectors,
+        folderConnectors: folderConnectorsOn(c.var.deps.config),
         localEndpoints,
         relay: !!c.var.deps.config.relayUrl,
         version: serverVersion(),

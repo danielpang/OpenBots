@@ -387,11 +387,14 @@ export interface Config {
    */
   customStdio: boolean;
   /**
-   * Whether folder (filesystem) connectors may be added and run
-   * (OPENBOTS_FOLDER_CONNECTORS): each serves a folder of its owner's on
-   * this server's disk, under `<filesDir>/connectors/`, which one machine
-   * of several does not share. On by default for a self-hosted install;
-   * off by default on the managed service. Off, adding one is refused and
+   * Whether folder (filesystem) connectors may be added and run. Always on
+   * with the `computer` stdio runner: each runs in its owner's computer
+   * and serves a folder there. With the `host` runner each serves a folder
+   * on this server's disk, under `<filesDir>/connectors/`, which one
+   * machine of several does not share, so OPENBOTS_FOLDER_CONNECTORS
+   * decides: on by default for a self-hosted install, off by default for a
+   * managed one (which runs host stdio only with OPENBOTS_ALLOW_HOST_STDIO,
+   * every organization's on one server). Off, adding one is refused and
    * one that exists does not run and reads as unavailable.
    */
   folderConnectors: boolean;
@@ -408,9 +411,9 @@ export interface Config {
   /**
    * OPENBOTS_FILES_DIR: uploads, Artifact blobs and coding session logs
    * (`coders/`) with the local storage driver; with s3, only the spools of
-   * the sessions this machine runs (services/coder-log.ts). Folder
-   * connectors' folders (`connectors/`) are here with either driver, when
-   * they are on.
+   * session logs this machine has not stored yet (services/coder-log.ts).
+   * Folder connectors' folders (`connectors/`) are here with either driver
+   * when they run on this server (the `host` stdio runner).
    */
   filesDir: string;
   /**
@@ -482,14 +485,17 @@ export const DEFAULT_GITHUB_CONNECTOR_APP_SLUG = 'openbots-github';
 /**
  * What the server warns about at start in how storage is set up, or null.
  * The s3 driver is for a server on several machines, but folder connectors
- * keep their folders on one machine's disk (`<filesDir>/connectors/`), so a
- * folder made on one is missing on the others. Names the setting only.
+ * that run on the server (the `host` stdio runner) keep their folders on
+ * one machine's disk (`<filesDir>/connectors/`), so a folder made on one is
+ * missing on the others. With the `computer` runner a folder is in its
+ * owner's computer, which every machine reaches. Names the settings only.
  */
 export function storageWarning(
-  config: Pick<Config, 'storage' | 'folderConnectors'>,
+  config: Pick<Config, 'storage' | 'folderConnectors' | 'stdioRunner'>,
 ): string | null {
-  if (config.storage.driver !== 's3' || !config.folderConnectors) return null;
-  return "OPENBOTS_STORAGE_DRIVER=s3 with folder connectors on (OPENBOTS_FOLDER_CONNECTORS): their folders stay on each machine's own disk, so on several machines a connector finds a different folder, or none; set OPENBOTS_FOLDER_CONNECTORS=false";
+  if (config.storage.driver !== 's3' || config.stdioRunner !== 'host' || !config.folderConnectors)
+    return null;
+  return "OPENBOTS_STORAGE_DRIVER=s3 with folder connectors on the server (OPENBOTS_STDIO_RUNNER=host, OPENBOTS_FOLDER_CONNECTORS): their folders stay on each machine's own disk, so on several machines a connector finds a different folder, or none; set OPENBOTS_FOLDER_CONNECTORS=false, or run stdio connectors in computers (OPENBOTS_STDIO_RUNNER=computer)";
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -593,7 +599,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     signupMode: e.OPENBOTS_SIGNUP_MODE,
     localEndpoints: e.OPENBOTS_LOCAL_ENDPOINTS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
     customStdio: e.OPENBOTS_CUSTOM_STDIO ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
-    folderConnectors: e.OPENBOTS_FOLDER_CONNECTORS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
+    // In the computer a folder is the member's own; on the server, the setting decides.
+    folderConnectors:
+      stdioRunner === 'computer' ||
+      (e.OPENBOTS_FOLDER_CONNECTORS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted'),
     stdioRunner,
     filesDir: e.OPENBOTS_FILES_DIR,
     storage,

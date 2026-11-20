@@ -11960,7 +11960,7 @@ export interface components {
       deployment: 'self_hosted' | 'managed';
       /** @description Admins may turn on custom command (stdio) connectors (OPENBOTS_CUSTOM_STDIO; off by default on the managed service) */
       customStdio?: boolean;
-      /** @description Folder (filesystem) connectors can be added and run (OPENBOTS_FOLDER_CONNECTORS; off by default on the managed service). Off: the catalog leaves them out, adding one answers 403 `FOLDER_CONNECTORS_UNAVAILABLE`, and one that exists reads as disabled and offers no tools. */
+      /** @description Folder (filesystem) connectors can be added and run. Always where stdio connectors run in each member's computer (OPENBOTS_STDIO_RUNNER=computer, the managed service's default), where the folder is in that computer; where they run on the server, as OPENBOTS_FOLDER_CONNECTORS says (on by default self-hosted, off by default managed). Off: the catalog leaves them out, adding one answers 403 `FOLDER_CONNECTORS_UNAVAILABLE`, and one that exists reads as disabled and offers no tools. */
       folderConnectors?: boolean;
       /** @description Admins may mark endpoints as on their own network (OPENBOTS_LOCAL_ENDPOINTS; off by default on the managed service) */
       localEndpoints?: boolean;

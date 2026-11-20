@@ -108,7 +108,8 @@ describe('/api/v1/connectors', () => {
       OPENBOTS_SIGNUP_MODE: 'open',
       OPENBOTS_FILES_DIR: filesDir,
       OPENBOTS_MCP_DIR: mcpDir,
-      // These stay off on the hosted service (plan 21.6); this suite covers them.
+      // Off by default on the hosted service (plan 21.6), and folder connectors
+      // with host stdio there; this suite covers them.
       OPENBOTS_CUSTOM_STDIO: 'true',
       OPENBOTS_FOLDER_CONNECTORS: 'true',
       OPENBOTS_LOCAL_ENDPOINTS: 'true',

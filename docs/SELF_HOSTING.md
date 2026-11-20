@@ -253,13 +253,16 @@ survives, the spool is stored the next time the worker starts there. Because the
 listing the bucket, the key needs list permission (`s3:ListBucket` on AWS, below).
 
 `OPENBOTS_FILES_DIR` stays in use with the `s3` driver for those spools and for folder (Filesystem)
-connectors, whose folders are on the disk of the machine that runs them. On several machines a
-folder made on one is missing on the others, so turn them off there with
-`OPENBOTS_FOLDER_CONNECTORS=false` (the server warns at start when the `s3` driver runs with them
-on). Off, adding one is refused with 403 `FOLDER_CONNECTORS_UNAVAILABLE`, the catalog leaves them
-out, and one that exists does not run and shows as disabled. A self-hosted install keeps them on
-unless you set it. The Artifact host keeps serving through the server with either driver (the
-Cloudflare Worker forwards to it).
+connectors that run on the server. With `OPENBOTS_STDIO_RUNNER=host` a folder connector's folder is
+on the disk of the machine that runs it, so on several machines a folder made on one is missing on
+the others: turn them off there with `OPENBOTS_FOLDER_CONNECTORS=false` (the server warns at start
+when the `s3` driver runs with them on the host). Off, adding one is refused with 403
+`FOLDER_CONNECTORS_UNAVAILABLE`, the catalog leaves them out, and one that exists does not run and
+shows as disabled. A self-hosted install keeps them on unless you set it. With
+`OPENBOTS_STDIO_RUNNER=computer` each folder connector runs in its owner's computer and serves a
+folder there, which every machine reaches, so they stay available and the setting is not read. The
+Artifact host keeps serving through the server with either driver (the Cloudflare Worker forwards
+to it).
 
 **Moving an install that already has files.** Rows written before stay as they are; only where
 their bytes live changes. The last copy runs with the server stopped, so a file uploaded during the

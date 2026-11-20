@@ -16,12 +16,16 @@ import {
 import { botToolDefaults } from '../services/policy.js';
 import { createTestApp, type TestApp } from '../test-app.js';
 
-// Folder (filesystem) connectors where OPENBOTS_FOLDER_CONNECTORS is off,
-// the managed service's default: its machines share no disk. Adding one is
-// refused with a clear error, the catalog leaves them out, the capabilities
-// say so, one that exists reads as disabled and gives a run no tools, and
-// nothing is made under `<filesDir>/connectors/`. A self-hosted install
-// keeps them, unchanged.
+// Folder (filesystem) connectors. Where stdio connectors run in the
+// member's own computer (OPENBOTS_STDIO_RUNNER=computer, the managed
+// service's default) a folder connector's folder is in that computer, so
+// they are always available there. Where they run on the server
+// (`host`), their folders are under `<filesDir>/connectors/` on that
+// machine, and OPENBOTS_FOLDER_CONNECTORS decides: on by default for a
+// self-hosted install, off by default for a managed one that allows host
+// stdio. Off, adding one is refused with a clear error, the catalog leaves
+// them out, the capabilities say so, one that exists reads as disabled and
+// gives a run no tools, and nothing is made under `<filesDir>/connectors/`.
 
 const configFrom = (env: Record<string, string>) =>
   loadConfig({
@@ -31,14 +35,29 @@ const configFrom = (env: Record<string, string>) =>
   });
 
 describe('OPENBOTS_FOLDER_CONNECTORS', () => {
-  it('is on for a self-hosted install and off on the managed service, unless set', () => {
-    expect(configFrom({}).folderConnectors).toBe(true);
-    expect(configFrom({ OPENBOTS_DEPLOYMENT: 'managed' }).folderConnectors).toBe(false);
+  const managedHost = {
+    OPENBOTS_DEPLOYMENT: 'managed',
+    OPENBOTS_STDIO_RUNNER: 'host',
+    OPENBOTS_ALLOW_HOST_STDIO: '1',
+  };
+  it('is always on where stdio connectors run in the computer', () => {
+    expect(configFrom({ OPENBOTS_DEPLOYMENT: 'managed' }).folderConnectors).toBe(true);
     expect(
-      configFrom({ OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_FOLDER_CONNECTORS: 'true' })
+      configFrom({ OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_FOLDER_CONNECTORS: 'false' })
         .folderConnectors,
     ).toBe(true);
+    expect(
+      configFrom({ OPENBOTS_STDIO_RUNNER: 'computer', OPENBOTS_FOLDER_CONNECTORS: 'off' })
+        .folderConnectors,
+    ).toBe(true);
+  });
+  it('follows the setting where they run on the server: on self-hosted, off managed, unless set', () => {
+    expect(configFrom({}).folderConnectors).toBe(true);
     expect(configFrom({ OPENBOTS_FOLDER_CONNECTORS: 'off' }).folderConnectors).toBe(false);
+    expect(configFrom(managedHost).folderConnectors).toBe(false);
+    expect(
+      configFrom({ ...managedHost, OPENBOTS_FOLDER_CONNECTORS: 'true' }).folderConnectors,
+    ).toBe(true);
     expect(() => configFrom({ OPENBOTS_FOLDER_CONNECTORS: 'maybe' })).toThrow(
       /OPENBOTS_FOLDER_CONNECTORS/,
     );
@@ -58,14 +77,27 @@ describe('the storage warning at start', () => {
     expect(warning).toContain('OPENBOTS_FOLDER_CONNECTORS');
     for (const value of Object.values(s3).slice(1)) expect(warning).not.toContain(value);
   });
-  it('is quiet with the local driver, or with folder connectors off', () => {
+  it('is quiet with the local driver, with folder connectors off, or with them in the computer', () => {
     expect(storageWarning(configFrom({}))).toBeNull();
     expect(storageWarning(configFrom({ ...s3, OPENBOTS_FOLDER_CONNECTORS: 'false' }))).toBeNull();
+    // Managed: stdio connectors, folders included, run in each member's computer.
     expect(storageWarning(configFrom({ ...s3, OPENBOTS_DEPLOYMENT: 'managed' }))).toBeNull();
+    expect(storageWarning(configFrom({ ...s3, OPENBOTS_STDIO_RUNNER: 'computer' }))).toBeNull();
+    expect(
+      storageWarning(
+        configFrom({
+          ...s3,
+          OPENBOTS_DEPLOYMENT: 'managed',
+          OPENBOTS_STDIO_RUNNER: 'host',
+          OPENBOTS_ALLOW_HOST_STDIO: '1',
+          OPENBOTS_FOLDER_CONNECTORS: 'true',
+        }),
+      ),
+    ).toContain('OPENBOTS_FOLDER_CONNECTORS');
   });
 });
 
-describe('folder connectors where they are off', () => {
+describe('folder connectors on the server where they are off (managed, host stdio)', () => {
   let t: TestApp;
   let filesDir: string;
   let cookie: string;
@@ -89,7 +121,7 @@ describe('folder connectors where they are off', () => {
       id: await t.userId('owner@example.com'),
       workspaceId: await t.defaultOrganization(),
     };
-    // A row from when they were on (none exist on the hosted service, but one may).
+    // A row from when they were on, or from the computer runner.
     const on = { ...t.deps, config: { ...t.deps.config, folderConnectors: true } };
     const record = await t.inOrganization(() =>
       createConnector(on, viewer, { catalogId: 'filesystem', params: { root: 'notes' } }),
@@ -219,5 +251,49 @@ describe('folder connectors on a self-hosted install', () => {
     });
     expect(res.status).toBe(201);
     expect(((await res.json()) as { disabledByAdmin: boolean }).disabledByAdmin).toBe(false);
+  });
+});
+
+describe('folder connectors in the computer on the managed service', () => {
+  let t: TestApp;
+  let filesDir: string;
+
+  beforeAll(async () => {
+    filesDir = mkdtempSync(join(tmpdir(), 'openbots-folders-computer-'));
+    // The managed defaults: stdio connectors run in each member's computer.
+    t = await createTestApp({
+      OPENBOTS_DEPLOYMENT: 'managed',
+      OPENBOTS_SIGNUP_MODE: 'open',
+      OPENBOTS_FILES_DIR: filesDir,
+    });
+    expect(t.deps.config.stdioRunner).toBe('computer');
+  });
+  afterAll(async () => {
+    await closeMcpManager(t.ownerDeps);
+    await t.close();
+    rmSync(filesDir, { recursive: true, force: true });
+  });
+
+  it('offers and adds them, and makes nothing on this server', async () => {
+    const cookie = (await t.signUp('member@example.com')).cookie!;
+    const request = (method: string, path: string, body?: unknown) =>
+      t.app.request(`/api/v1${path}`, {
+        method,
+        headers: { cookie, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const caps = await (await t.app.request('/api/v1/capabilities')).json();
+    expect(caps).toMatchObject({ deployment: 'managed', folderConnectors: true });
+    const catalog = (await (await request('GET', '/connectors/catalog')).json()) as {
+      items: { id: string }[];
+    };
+    expect(catalog.items.map((e) => e.id)).toContain('filesystem');
+    const res = await request('POST', '/connectors', {
+      catalogId: 'filesystem',
+      params: { root: 'notes' },
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { disabledByAdmin: boolean }).disabledByAdmin).toBe(false);
+    expect(existsSync(join(filesDir, 'connectors'))).toBe(false);
   });
 });

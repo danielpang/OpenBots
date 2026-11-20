@@ -194,7 +194,7 @@ export const customStdioDisabled = () =>
     `Command (stdio) servers are off for this workspace. ${STDIO_INSTEAD}`,
   );
 
-/** Folder connectors are off on this install (OPENBOTS_FOLDER_CONNECTORS). */
+/** Folder connectors run on the server here and are off (OPENBOTS_FOLDER_CONNECTORS). */
 export const folderConnectorsUnavailable = () =>
   new DomainError(
     403,
@@ -501,16 +501,27 @@ export function isFolderConnector(row: Pick<ConnectorRow, 'kind' | 'catalogId'>)
 }
 
 /**
+ * Whether folder connectors may be added and run here: always where stdio
+ * connectors run in their owner's computer (the folder is in that
+ * computer), and where they run on the server (`host`) only when
+ * OPENBOTS_FOLDER_CONNECTORS is on, since their folders are then on one
+ * machine's disk.
+ */
+export const folderConnectorsOn = (
+  config: Pick<AppDeps['config'], 'folderConnectors' | 'stdioRunner'>,
+): boolean => config.stdioRunner === 'computer' || config.folderConnectors;
+
+/**
  * Whether the install keeps the connector from running whoever asks: a
- * folder connector where OPENBOTS_FOLDER_CONNECTORS is off (the managed
- * service's default, whose machines share no disk). One that exists reads
- * as disabled and offers no tools, rather than failing a run.
+ * folder connector that would run on the server (the `host` stdio runner)
+ * where OPENBOTS_FOLDER_CONNECTORS is off. One that exists reads as
+ * disabled and offers no tools, rather than failing a run.
  */
 export function unavailableHere(
-  config: Pick<AppDeps['config'], 'folderConnectors'>,
+  config: Pick<AppDeps['config'], 'folderConnectors' | 'stdioRunner'>,
   row: Pick<ConnectorRow, 'kind' | 'catalogId'>,
 ): boolean {
-  return !config.folderConnectors && isFolderConnector(row);
+  return !folderConnectorsOn(config) && isFolderConnector(row);
 }
 
 /**
@@ -679,11 +690,12 @@ async function checkConfined(
 export async function catalogWithPolicy(
   db: Db,
   viewer: Viewer,
-  config: Pick<AppDeps['config'], 'folderConnectors'>,
+  config: Pick<AppDeps['config'], 'folderConnectors' | 'stdioRunner'>,
 ) {
   const rules = await blockRules(db, viewer.workspaceId);
+  const on = folderConnectorsOn(config);
   const entries = loadCatalog().entries.filter(
-    (entry) => config.folderConnectors || !entry.params?.some((p) => p.user_dir),
+    (entry) => on || !entry.params?.some((p) => p.user_dir),
   );
   return entries.map((entry) => {
     const config =
