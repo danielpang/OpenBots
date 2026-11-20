@@ -14,7 +14,7 @@ import { schema } from '../../../db/client.js';
 import { useTestComputer, type TestComputer } from '../../../test-computer.js';
 import { createTestApp, type TestApp } from '../../../test-app.js';
 import { enqueueCoderJob } from '../../coder-jobs.js';
-import { setComputerProvider } from '../../computer.js';
+import { setComputerProvider, startWorkSettled } from '../../computer.js';
 import { RUNNER_GIT_CONFIG } from '../../repos-checkout.js';
 import { storeMessage } from '../../messages.js';
 
@@ -326,6 +326,13 @@ export async function coderWorld(
   expect(res.status).toBe(201);
   const bot = (await res.json()) as CoderWorld['bot'];
   expect((await call('POST', '/computer/start')).status).toBe(200);
+  // The git identity writes the start left running end before the test
+  // counts or indexes agent calls (computer.ts `afterStart`).
+  const [started] = await t.db
+    .select({ id: schema.computers.id })
+    .from(schema.computers)
+    .where(eq(schema.computers.ownerId, ownerId));
+  await startWorkSettled(started!.id);
   const [repo] = await t.db
     .insert(schema.repos)
     .values({
