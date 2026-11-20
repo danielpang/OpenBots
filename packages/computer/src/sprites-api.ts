@@ -76,6 +76,8 @@ export interface SpriteExecOptions {
    * `DEFAULT_MAX_RUN_AFTER_DISCONNECT`.
    */
   maxRunAfterDisconnect?: string;
+  /** Ends the command as its time limit would: a job that lost the machine stops at once. */
+  signal?: AbortSignal;
 }
 
 export interface SpriteExecResult {
@@ -105,6 +107,8 @@ export interface SpritesApi {
     policy: SpriteEgressPolicy,
     options?: SpriteCallOptions,
   ): Promise<void>;
+  /** The Sprite's network policy as the API holds it; null when it has none. */
+  getNetworkPolicy(name: string, options?: SpriteCallOptions): Promise<SpriteEgressPolicy | null>;
   /** Runs `argv` (no shell) and waits for it; a non-zero exit is a result, not an error. */
   exec(name: string, argv: string[], options?: SpriteExecOptions): Promise<SpriteExecResult>;
   writeFile(
@@ -170,8 +174,12 @@ const DEFAULT_EXEC_TIMEOUT_MS = 10 * 60_000;
 const WRITE_TIMEOUT_MS = 5 * 60_000;
 /** Checkpoints take 10 to 30 seconds by the docs; restores are similar. */
 const CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
-/** Ending a session: the API signals, waits up to 10 s, then kills. */
-const KILL_TIMEOUT_MS = 20_000;
+/**
+ * Ending a session: the API signals, waits up to 10 s, then kills. An exec
+ * that is ended (its time limit, its signal) rejects at most this long after.
+ */
+export const SPRITES_EXEC_KILL_MS = 20_000;
+const KILL_TIMEOUT_MS = SPRITES_EXEC_KILL_MS;
 /** How much of the API's own answer an error keeps. */
 const UPSTREAM_TEXT_LIMIT = 500;
 
@@ -303,6 +311,26 @@ export function createSpritesApi({
         );
         if (!response.ok) await refused(response);
         await response.body?.cancel();
+      });
+    },
+    // Raw, as setting it: the same endpoint, read.
+    async getNetworkPolicy(name, options = {}) {
+      const ms = options.timeoutMs ?? timeoutMs;
+      return call('network policy read', name, ms, async () => {
+        const response = await fetch(
+          `${base}/v1/sprites/${encodeURIComponent(name)}/policy/network`,
+          {
+            headers: { authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(ms),
+          },
+        );
+        if (response.status === 404) {
+          await response.body?.cancel();
+          return null;
+        }
+        if (!response.ok) await refused(response);
+        const body = (await response.json()) as { rules?: unknown } | null;
+        return Array.isArray(body?.rules) ? { rules: body.rules as SpriteEgressRule[] } : null;
       });
     },
     async exec(name, argv, options = {}) {
@@ -566,6 +594,10 @@ function run(
     const timer = setTimeout(() => {
       void abort(new SpritesApiError(0, `exec timed out after ${timeoutMs} ms`));
     }, timeoutMs);
+    const signal = options.signal;
+    const ended = () => void abort(new SpritesApiError(0, 'exec was ended by its caller'));
+    if (signal?.aborted) ended();
+    else signal?.addEventListener('abort', ended, { once: true });
     const take = (parts: Buffer[]) => (chunk: Buffer) => {
       if (settled) return;
       size += chunk.length;

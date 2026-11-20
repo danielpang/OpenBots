@@ -56,6 +56,10 @@ readonly VERSION_FILE="$OPT/provision.version"
 # Exit code when another provisioning holds the lock (EX_TEMPFAIL);
 # PROVISION_LOCKED_EXIT in packages/computer/src/sprites.ts.
 readonly LOCKED_EXIT=75
+# Exit code on a Sprite a reset retired; PROVISION_RETIRED_EXIT in sprites.ts.
+readonly RETIRED_EXIT=76
+# Written by the server when it retires the Sprite (SPRITES_RETIRED_MARKER).
+readonly RETIRED_MARKER="$OPT/retired"
 
 # The image's packages (docker/computer.Dockerfile, runtime stage), which all
 # exist under these names on Ubuntu 26.04 (checked against the ubuntu:26.04
@@ -204,6 +208,19 @@ else
   fi
   log "holding $LOCK_FILE"
 fi
+
+# A Sprite a reset retired gets no agent. Checked now, with the lock held,
+# and again just before the service is registered: the server marks the
+# Sprite first, then removes the agent under this same lock, so a run either
+# ends before that removal or finds the mark.
+refuse_if_retired() {
+  if ! dry && [ -e "$RETIRED_MARKER" ]; then
+    rm -f -- "$TOKEN_STORE" /var/lib/openbots/token
+    printf '[provision] this Sprite is retired, so no agent is installed on it.\n' >&2
+    exit "$RETIRED_EXIT"
+  fi
+}
+refuse_if_retired
 
 # --- the bundle ----------------------------------------------------------------
 
@@ -701,6 +718,7 @@ if dry; then
   log "[dry-run] sprite-env services create $SERVICE --cmd $LAUNCHER --dir $HOME_DIR --http-port $PORT --no-stream"
 else
   command -v sprite-env >/dev/null || die "sprite-env is not on PATH; is this a Sprite?"
+  refuse_if_retired
   # 9>&-: what sprite-env starts must not hold the lock.
   if sprite-env services get "$SERVICE" >/dev/null 2>&1 9>&-; then
     sprite-env services stop "$SERVICE" >/dev/null 2>&1 9>&- || true

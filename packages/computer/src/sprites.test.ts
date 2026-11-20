@@ -29,7 +29,10 @@ import {
   SPRITES_RETIRED_MARKER,
   SpriteRetiredError,
   SPRITES_CUT_CALL_MS,
+  SPRITES_INSIDE_CALL_MS,
+  SPRITES_RETIRE_INSIDE_MAX_MS,
   SPRITES_RETIRE_MAX_MS,
+  PROVISION_LOCK_FILE,
   spriteName,
   spritesEgressPolicy,
   type SpritesProviderOptions,
@@ -577,6 +580,117 @@ describe('the sprites provider', () => {
       api.execHook = undefined;
       await provider.retireInside!(ref);
       expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
+    });
+
+    it('bounds every call inside, and the whole, within its limit', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      await provider.hold!(ref, 'run-1', 600);
+      await provider.retire!(ref);
+      const from = api.calls.length;
+      await provider.retireInside!(ref);
+      const calls = api.calls.slice(from);
+      const inside = calls.filter((c) => c.op === 'exec');
+      expect(inside.length).toBeGreaterThanOrEqual(4);
+      for (const call of inside) {
+        const { timeoutMs } = call.args[1] as { timeoutMs?: number };
+        expect(timeoutMs).toBeDefined();
+        expect(timeoutMs!).toBeLessThanOrEqual(SPRITES_INSIDE_CALL_MS);
+      }
+      // The label read again before every step that changes it.
+      expect(calls.filter((c) => c.op === 'get').length).toBeGreaterThanOrEqual(inside.length);
+      expect(SPRITES_RETIRE_INSIDE_MAX_MS).toBeLessThan(5 * 60_000);
+    });
+
+    it('stops at the step where it finds the Sprite put back in service', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      await provider.retire!(ref);
+      // An operator's restore lands after the mark: the agent must not be removed.
+      const exec = api.exec.bind(api);
+      let restored = false;
+      api.exec = async (name, argv, options) => {
+        const out = await exec(name, argv, options);
+        if (!restored && argv.join(' ').includes(`touch -- ${SPRITES_RETIRED_MARKER}`)) {
+          restored = true;
+          await provider.unretire!(ref);
+        }
+        return out;
+      };
+      await expect(provider.retireInside!(ref)).rejects.toThrow(/not retired/);
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
+    });
+
+    it("stops before a step once its caller's check says it no longer holds the machine", async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      await provider.retire!(ref);
+      let checks = 0;
+      const lost = new Error('the claim was taken');
+      await expect(
+        provider.retireInside!(ref, {
+          check: async () => {
+            if (++checks > 1) throw lost;
+          },
+        }),
+      ).rejects.toBe(lost);
+      expect(sprite.files.has(SPRITES_RETIRED_MARKER)).toBe(true);
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
+    });
+
+    it('removes the agent under the provisioning lock', async () => {
+      const { api } = await retired();
+      const script = execs(api).find((line) => line.includes('services delete'))!;
+      expect(script).toContain(`exec 9>>${PROVISION_LOCK_FILE}`);
+      expect(script.indexOf('flock')).toBeLessThan(script.indexOf('services stop'));
+    });
+
+    it('reads every part of the cut back: a policy that lets anything out is not retired', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      await provider.retire!(ref);
+      expect(await provider.retiredState!(ref)).toBe('retired');
+      api.sprites.get(NAME)!.policy = { rules: [{ domain: '*', action: 'allow' }] };
+      expect(await provider.retiredState!(ref)).toBe('in_service');
+      api.sprites.get(NAME)!.policy = null;
+      expect(await provider.retiredState!(ref)).toBe('in_service');
+    });
+
+    it('a provisioning on a Sprite marked retired registers no agent', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      sprite.services.clear();
+      sprite.files.delete(PROVISION_VERSION_FILE);
+      sprite.files.set(SPRITES_RETIRED_MARKER, new Uint8Array());
+      await expect(provider.start(ref)).rejects.toBeInstanceOf(SpriteRetiredError);
+      expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
+    });
+
+    it('a make whose caller gave it up ends at its next call, and ends the provisioning command', async () => {
+      const { api, provider } = setup();
+      const stop = new AbortController();
+      const exec = api.exec.bind(api);
+      let provisioning: AbortSignal | undefined;
+      api.exec = async (name, argv, options) => {
+        if (argv[2]?.includes('read -r OPENBOTS_AGENT_TOKEN')) {
+          provisioning = options?.signal;
+          stop.abort(new Error('the computer moved on'));
+          if (options?.signal?.aborted) throw new Error('exec was ended by its caller');
+        }
+        return exec(name, argv, options);
+      };
+      await expect(provider.create({ ...spec, signal: stop.signal })).rejects.toThrow(
+        /ended by its caller/,
+      );
+      expect(provisioning).toBe(stop.signal);
+      expect(api.sprites.get(NAME)!.services.has(SPRITES_AGENT_SERVICE)).toBe(false);
+      // Already given up: not a single call.
+      const calls = api.calls.length;
+      await expect(provider.create({ ...spec, signal: stop.signal })).rejects.toThrow();
+      expect(api.calls.length).toBe(calls);
     });
 
     it('never runs the inside steps on a Sprite that was not retired first', async () => {

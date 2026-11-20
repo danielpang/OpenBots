@@ -55,6 +55,26 @@ export interface ComputerSpec {
    * operator restored), which then names exactly that machine.
    */
   machineKey?: string;
+  /**
+   * Ends the make where the provider can (Sprites: between its calls, and the
+   * provisioning command itself): a job whose computer moved on stops at once.
+   */
+  signal?: AbortSignal;
+}
+
+/** What `ComputerProvider.start` takes besides the machine. */
+export interface StartOptions {
+  /** As `ComputerSpec.signal`. */
+  signal?: AbortSignal;
+}
+
+/** What `ComputerProvider.retireInside` takes besides the machine. */
+export interface RetireInsideOptions {
+  /**
+   * Called before each step that changes the machine; throws when the caller
+   * no longer holds it (its claim on the record ran out), which ends the call.
+   */
+  check?: () => Promise<void>;
 }
 
 /** What skips the egress proxy unless `noProxy` says otherwise: the computer itself. */
@@ -80,6 +100,11 @@ export interface DestroyOptions {
   computerId: string;
   home: boolean;
   state?: boolean;
+  /**
+   * Ends a home clearing where the provider can (Sprites: the command): a
+   * reset that lost its claim on the computer stops before it clears more.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -122,7 +147,7 @@ export interface ComputerProvider {
   readonly version?: string;
   create(spec: ComputerSpec): Promise<ComputerRef>;
   /** Starts the machine and resolves once its control agent answers. */
-  start(ref: ComputerRef): Promise<void>;
+  start(ref: ComputerRef, options?: StartOptions): Promise<void>;
   stop(ref: ComputerRef): Promise<void>;
   /**
    * Removes the machine; the home volume is kept (K7) unless `options` says
@@ -177,17 +202,21 @@ export interface ComputerProvider {
   retire?(ref: ComputerRef): Promise<void>;
   /**
    * What the provider itself says of the machine, from metadata that does
-   * not wake it: `retired` (out of reach as `retire` leaves it), `in_service`,
-   * or `gone`. For a check that must not take the server's record on trust.
+   * not wake it: `retired` (every part of the cut read back as `retire`
+   * leaves it: label, private URL, an egress policy that denies everything),
+   * `in_service`, or `gone`. For a check that must not take the server's
+   * record on trust.
    */
   retiredState?(ref: ComputerRef): Promise<'retired' | 'in_service' | 'gone'>;
   /**
    * The rest of a retire, inside the machine (it wakes it): its holds are
    * dropped so it pauses, a hold racing with this one is refused, and its
    * agent is stopped and removed and its agent token deleted. Refused on a
-   * machine `retire` did not take out of reach first. Safe to call again.
+   * machine `retire` did not take out of reach first, checked again before
+   * each step, as is `options.check`. Its time is bounded (Sprites:
+   * `SPRITES_RETIRE_INSIDE_MAX_MS`). Safe to call again.
    */
-  retireInside?(ref: ComputerRef): Promise<void>;
+  retireInside?(ref: ComputerRef, options?: RetireInsideOptions): Promise<void>;
   /**
    * Puts a retired machine back in service as far as the provider goes: its
    * URL and egress policy as configured. Its agent comes back with the next
