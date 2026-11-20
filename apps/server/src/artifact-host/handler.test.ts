@@ -411,6 +411,38 @@ describe('artifact host responses', () => {
     );
   });
 
+  it('opens the blob for a HEAD only of a framed page, whose length needs it read', async () => {
+    let opened = 0;
+    const counting = (fixtures: Record<string, Fixture>) => {
+      const deps = fakeDeps(fixtures);
+      const resolve = deps.resolve;
+      deps.resolve = async (target, viewer) => {
+        const view = await resolve(target, viewer);
+        return view && { ...view, body: () => (opened++, view.body()) };
+      };
+      return deps;
+    };
+    const page = counting({ [ID]: { visibility: 'public', mime: 'text/html', body: '<p>hi</p>' } });
+    const text = counting({ [ID]: { visibility: 'public' } });
+    for (const [deps, path, headers] of [
+      [text, `/${ID}/`, {}],
+      [page, `/${ID}/`, {}],
+      [page, `/${ID}/content`, {}],
+    ] as const) {
+      const res = await serve(deps, path, { method: 'HEAD', headers });
+      expect(res.status, path).toBeLessThan(400);
+    }
+    expect(opened).toBe(0);
+    const framed = await serve(page, `/${ID}/content`, {
+      method: 'HEAD',
+      headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' },
+    });
+    expect(opened).toBe(1);
+    expect(Number(framed.headers.get('content-length'))).toBe(
+      new TextEncoder().encode(`<p>hi</p>\n${LINK_HELPER}\n`).byteLength,
+    );
+  });
+
   it('answers HEAD without a body, and refuses other methods', async () => {
     const deps = fakeDeps({ [ID]: { visibility: 'public' } });
     const head = await serve(deps, `/${ID}/`, { method: 'HEAD' });

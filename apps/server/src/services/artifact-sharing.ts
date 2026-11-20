@@ -980,7 +980,11 @@ export async function resolveHostView(
     const view = await viewOf(deps, row.artifact, viewerId);
     if (!view) return null;
     // The row is checked now; the blob is opened only when the body is read,
-    // so a HEAD, a redirect or a wrapper page never reaches the store.
+    // so a redirect, a wrapper page or a HEAD never reaches the store. The
+    // one exception is a HEAD of a page framed in the wrapper, small enough
+    // for the link helper: whether the helper fits depends on the page's
+    // markup, so the length that HEAD reports needs the page read
+    // (artifact-host/handler.ts).
     const file = await findFile(
       deps,
       { id: row.artifact.ownerId, workspaceId },
