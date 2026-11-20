@@ -110,13 +110,12 @@ async function spritesOf(db: Db, workspaceId: string, namePrefix: string): Promi
       id: schema.computers.id,
       provider: schema.computers.provider,
       containerId: schema.computers.containerId,
-      spec: schema.computers.spec,
+      machineKey: schema.computers.machineKey,
     })
     .from(schema.computers)
     .where(eq(schema.computers.workspaceId, workspaceId));
   for (const computer of computers) {
-    const machineKey = (computer.spec as { machineKey?: string } | null)?.machineKey;
-    names.add(spriteName(machineKey ?? computer.id, namePrefix));
+    names.add(spriteName(computer.machineKey ?? computer.id, namePrefix));
     if (computer.provider === 'sprites' && computer.containerId) names.add(computer.containerId);
   }
   const retired = await db

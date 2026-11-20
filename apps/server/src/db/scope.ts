@@ -312,7 +312,7 @@ export async function artifactHostWorkspace(db: Db, botSlug: string): Promise<st
   return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
 }
 
-/** postgres.js answers an array of rows, PGlite `{ rows }`. */
-function rowsOf<T>(result: unknown): T[] {
+/** The rows of a raw `execute`: postgres.js answers an array of rows, PGlite `{ rows }`. */
+export function rowsOf<T>(result: unknown): T[] {
   return Array.isArray(result) ? (result as T[]) : ((result as { rows: T[] }).rows ?? []);
 }

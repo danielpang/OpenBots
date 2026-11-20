@@ -14,6 +14,7 @@ import { PI_SIGN_IN_INSTRUCTIONS } from './coder-adapters/pi.js';
 import { type CoderJob } from './coder-jobs.js';
 import { startLogin } from './coder-login.js';
 import { runCoderLogin } from './coder-login-driver.js';
+import { destroyComputer, startWorkSettled } from './computer.js';
 import { createCoderWorker } from './coder-runner.js';
 import { coderServices } from './coder-tool.js';
 import { DIFF_MAX_CHARS, DIFF_TRUNCATED } from './session-git.js';
@@ -629,5 +630,36 @@ describe('coding agent accounts and their sessions', () => {
       expect.any(String),
     );
     warn.mockRestore();
+  });
+
+  it('ends a sign-in under way when a reset takes the computer away, and does not count it', async () => {
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => (started = resolve));
+    w.coder.agent = (io) => {
+      if (io.call.launch.args?.includes('--version')) return io.exit(0);
+      // The device flow: a link, then it waits for the owner (forever, here).
+      io.stdout('Open https://auth.openai.com/codex/device and enter ABCD-1234\r\n');
+      started();
+    };
+    const asked = await w.t.inOrganization(() =>
+      startLogin(w.t.ownerDeps, { id: w.ownerId, workspaceId: w.workspaceId }, 'codex'),
+    );
+    const login = w.t.inOrganization(() => runCoderLogin(w.t.deps, asked.login.id));
+    await running;
+    const [computer] = await w.t.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.ownerId, w.ownerId));
+    await w.t.inOrganization(() => destroyComputer(w.t.ownerDeps, computer!, { signIns: true }));
+    await login;
+    const [row] = await w.t.db
+      .select()
+      .from(schema.coderLogins)
+      .where(eq(schema.coderLogins.id, asked.login.id));
+    expect(row).toMatchObject({ status: 'failed' });
+    expect(row!.error).toMatch(/reset during the sign-in/);
+    w.coder.agent = (io) => io.exit(0);
+    expect((await w.call('POST', '/computer/start')).status).toBe(200);
+    await startWorkSettled(computer!.id);
   });
 });

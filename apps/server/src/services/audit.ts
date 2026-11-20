@@ -105,9 +105,27 @@ export async function listAudit(
     .limit(limit + 1);
   const page = rows.slice(0, limit);
   return {
-    items: page.map((r) => ({ ...r.entry, actorLabel: r.userEmail ?? r.botName ?? null })),
+    items: page.map((r) => ({
+      ...r.entry,
+      metadata: shownMetadata(r.entry),
+      actorLabel: r.userEmail ?? r.botName ?? null,
+    })),
     nextCursor: rows.length > limit ? page[page.length - 1]!.entry.id : null,
   };
+}
+
+/**
+ * A row's metadata as the organization reads it. A computer's provider is
+ * `docker` or `remote`, as the computer routes say it: rows written before
+ * `computer.create` recorded it that way name the hosted service's vendor.
+ */
+function shownMetadata(entry: AuditRow): AuditRow['metadata'] {
+  const metadata = entry.metadata as Record<string, unknown> | null;
+  if (!entry.action.startsWith('computer.') || !metadata || !('provider' in metadata)) {
+    return entry.metadata;
+  }
+  const provider = metadata.provider === 'docker' ? 'docker' : 'remote';
+  return { ...metadata, provider };
 }
 
 /** Deletes rows older than each workspace's retention period; returns how many. */

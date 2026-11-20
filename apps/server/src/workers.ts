@@ -28,6 +28,7 @@ import {
   retiredComputerHandler,
   sweepRetiredComputers,
 } from './services/computer-retire.js';
+import { listenForFences } from './services/computer-fence.js';
 import { closeDanglingUsage } from './services/computer-usage.js';
 import { endAllComputerUses } from './services/computer-use.js';
 import { expireDueLoginRequests, LOGINS_QUEUE, loginExpiryHandler } from './services/logins.js';
@@ -88,6 +89,9 @@ export async function inEveryOrganization(
 /** Background work for the `worker` and `all` roles (queues, scheduler). */
 export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<void> }> {
   const { infra, logger } = deps;
+  // A reset in another process fences the machine it took away here too
+  // (computer-fence.ts): jobs and sign-ins that read the row before it stop.
+  await listenForFences(deps);
   // In-process queues cannot outlive the process, so its running runs are queued again.
   if (infra.kind === 'memory') {
     const recovered = await inEveryOrganization(deps, () => recoverInterruptedRuns(deps));
@@ -130,9 +134,9 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     );
   }, IDLE_SWEEP_MS);
   sweep.unref();
-  // Retired computers past their seven days are deleted, and one whose
-  // retiring a crash cut short is finished; now and hourly, in every worker
-  // (each row is claimed by one of them).
+  // Retired computers past their seven days are deleted, one whose retiring
+  // a crash cut short is finished, and a restore cut short is taken back; now
+  // and every five minutes, in every worker (each row is claimed by one).
   const sweepRetired = () =>
     inEveryOrganization(deps, () => sweepRetiredComputers(deps)).then(
       (queued) => queued && logger.info({ computers: queued }, 'queued retired computers'),

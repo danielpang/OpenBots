@@ -143,7 +143,7 @@ describe('reconciliation after a full reset', () => {
           ownerId: d.id,
           provider: 'sprites',
           status: 'stopped',
-          spec: { machineKey },
+          machineKey,
         })
         .returning({ id: schema.computers.id })
     )[0]!.id;

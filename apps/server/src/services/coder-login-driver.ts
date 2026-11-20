@@ -17,7 +17,8 @@ import {
   signInErrorForOwner,
   type CoderLoginRow,
 } from './coder-login.js';
-import { agentFor, startComputer } from './computer.js';
+import { agentFor, shownFailure, startComputer } from './computer.js';
+import { fenceOf, isFenced, watchFences } from './computer-fence.js';
 
 // The sign-in driver (docs/plans/TECHNICAL_PLAN.md 22.5): the runner's `login` job.
 // It runs the adapter's login in a PTY on the computer as `coder` with the
@@ -67,6 +68,7 @@ export function loginLink(
 
 type Outcome =
   | { type: 'signed_in' }
+  | { type: 'reset' }
   | { type: 'exit'; error?: string }
   | { type: 'cancelled' }
   | { type: 'timeout' };
@@ -104,7 +106,7 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
     ({ computer } = await startComputer(deps, owner, SYSTEM_ACTOR));
   } catch (error) {
     await endLogin(deps, row, 'failed', {
-      error: `The computer did not start: ${(error as Error).message}`,
+      error: `The computer did not start: ${shownFailure(deps, error, { inline: true })}`,
     });
     return;
   }
@@ -226,6 +228,13 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
     }
   });
 
+  // A reset took the computer's machine away: the sign-in it ran there ends
+  // now, and is not recorded as done for the computer the member has next.
+  const fence = fenceOf(computer.agentToken);
+  const unwatch = watchFences((fenced) => {
+    if (fenced.computerId === computer.id && fenced.fence === fence) settle({ type: 'reset' });
+  });
+  if (isFenced(computer)) settle({ type: 'reset' });
   const expiresIn = row.expiresAt ? row.expiresAt.getTime() - Date.now() : plan.timeoutMs;
   const timer = setTimeout(() => settle({ type: 'timeout' }), Math.min(plan.timeoutMs, expiresIn));
   try {
@@ -252,7 +261,7 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
         },
       );
     } catch (error) {
-      settle({ type: 'exit', error: (error as Error).message });
+      settle({ type: 'exit', error: shownFailure(deps, error) });
     }
     const result = await outcome;
     clearTimeout(timer);
@@ -265,6 +274,10 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
     await scoped(async () => {
       if (result.type === 'signed_in') {
         await signedIn(deps, row, agent, parse.accountLabel?.trim() || null);
+      } else if (result.type === 'reset') {
+        await endLogin(deps, row, 'failed', {
+          error: 'The computer was reset during the sign-in. Sign in again.',
+        });
       } else if (result.type === 'timeout') {
         await endLogin(deps, row, 'expired', { error: 'The sign-in expired' });
       } else if (result.type === 'exit') {
@@ -280,6 +293,7 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
     });
   } finally {
     clearTimeout(timer);
+    unwatch();
     await unsubscribe();
   }
 }

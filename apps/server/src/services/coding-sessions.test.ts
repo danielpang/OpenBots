@@ -31,7 +31,7 @@ import { skillIndex } from './skills.js';
 import { coderContextFor, coderServices } from './coder-tool.js';
 import { resumeIfCoderWidgetDone } from './coder-widget-actions.js';
 import { sessionBranch } from './repos-checkout.js';
-import { setComputerProvider } from './computer.js';
+import { setComputerProvider, startWorkSettled } from './computer.js';
 import { listRepos, parseRepoUrl, updateRepo } from './repos.js';
 import { registerRunHooks, type RunState } from './runs.js';
 
@@ -117,6 +117,12 @@ describe('coding agents', () => {
     expect(res.status).toBe(201);
     bot = (await res.json()) as typeof bot;
     expect((await call(dana, 'POST', '/computer/start')).status).toBe(200);
+    // The start's git identity writes end before any test counts agent calls.
+    const [started] = await t.db
+      .select({ id: schema.computers.id })
+      .from(schema.computers)
+      .where(eq(schema.computers.ownerId, danaId));
+    await startWorkSettled(started!.id);
   });
   afterAll(async () => {
     restoreAdapter();
