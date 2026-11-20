@@ -297,9 +297,9 @@ export interface CoderWorld {
  */
 export async function coderWorld(
   email = 'coder-owner@example.com',
-  { fakeAgent = false }: { fakeAgent?: boolean } = {},
+  { fakeAgent = false, env = {} }: { fakeAgent?: boolean; env?: Record<string, string> } = {},
 ): Promise<CoderWorld> {
-  const t = await createTestApp({ OPENBOTS_SIGNUP_MODE: 'open' });
+  const t = await createTestApp({ OPENBOTS_SIGNUP_MODE: 'open', ...env });
   const computer = await useTestComputer(t.ownerDeps);
   const coder = scriptedCoder();
   const inner = computer.provider;

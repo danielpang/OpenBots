@@ -10,7 +10,7 @@ import {
 import { APPROVALS_QUEUE, expireDueApprovals, expiryHandler } from './services/approvals.js';
 import { AUDIT_TRIM_MS, trimAuditLog } from './services/audit.js';
 import { BOT_STATE_QUEUE, settleHandler } from './services/bot-state.js';
-import { recoverInterruptedCoderSessions } from './services/coder-recovery.js';
+import { recoverInterruptedCoderSessions, sweepSessionLogs } from './services/coder-recovery.js';
 import { createCoderWorker } from './services/coder-runner.js';
 import { PAIRING_SWEEP_MS, expireDuePairings } from './services/devices.js';
 import {
@@ -84,6 +84,13 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     if (sessions) logger.warn({ sessions }, 'recovered coding sessions interrupted by a restart');
     const requeued = await inEveryOrganization(deps, () => requeuePendingEventDeliveries(deps));
     if (requeued) logger.info({ deliveries: requeued }, 'requeued pending event deliveries');
+  } else if (deps.config.storage.driver === 's3') {
+    // Shared queues keep their sessions; the logs in the shared store still
+    // want their upkeep (recoverInterruptedCoderSessions does it above).
+    await inEveryOrganization(deps, async () => {
+      await sweepSessionLogs(deps);
+      return 0;
+    });
   }
   // Requests that came due while no worker was up, or whose in-memory job was lost.
   const expired = await inEveryOrganization(deps, () => expireDueApprovals(deps));

@@ -1,11 +1,10 @@
-import { readdir, rm } from 'node:fs/promises';
-import path from 'node:path';
 import type { CodingSessionStatus } from '@openbots/shared';
 import { widgetToolResult } from '@openbots/widgets';
 import { inArray } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { expireSessionApprovals } from './approvals.js';
+import { removeOrphanLogs, storeLeftoverSpools } from './coder-log.js';
 import { enqueueCoderJob } from './coder-jobs.js';
 import { resumeWaitingRun } from './coder-run-resume.js';
 import { settleSession, type CodingSessionRow } from './coder-state.js';
@@ -39,7 +38,9 @@ export async function interruptSession(
  * infra, as `recoverInterruptedRuns`): a session that was running fails
  * with RESTART_NOTE and its run resumes with that (its log stays, since the
  * owner can continue it); a queued one, whose job died with the process, is
- * queued again. Logs whose session is gone are removed.
+ * queued again. With the s3 storage driver, the log spools a run on this
+ * machine left behind are stored (coder-log.ts). Logs whose session is gone
+ * are removed.
  */
 export async function recoverInterruptedCoderSessions(deps: AppDeps): Promise<number> {
   const rows = await deps.db
@@ -53,33 +54,22 @@ export async function recoverInterruptedCoderSessions(deps: AppDeps): Promise<nu
       await interruptSession(deps, row);
     }
   }
-  await removeOrphanLogs(deps).catch((error: unknown) =>
-    deps.logger.warn({ err: error }, 'coding session logs not swept'),
-  );
+  await sweepSessionLogs(deps);
   return rows.length;
 }
 
-/** Session logs on the server whose `coding_sessions` row is gone. */
-export async function removeOrphanLogs(deps: AppDeps): Promise<number> {
-  const dir = path.join(deps.config.filesDir, 'coders');
-  const names = await readdir(dir).catch(() => [] as string[]);
-  const ids = names
-    .map((name) => /^([0-9a-f-]{36})\.log$/i.exec(name)?.[1])
-    .filter((id): id is string => !!id);
-  if (!ids.length) return 0;
-  const known = new Set(
-    (
-      await deps.db
-        .select({ id: schema.codingSessions.id })
-        .from(schema.codingSessions)
-        .where(inArray(schema.codingSessions.id, ids))
-    ).map((row) => row.id),
+/**
+ * The upkeep of session logs at a worker's start, in an organization's
+ * scope: spools left on this machine stored (s3 driver), then logs whose
+ * session is gone removed. Never fails the start.
+ */
+export async function sweepSessionLogs(deps: AppDeps): Promise<void> {
+  await storeLeftoverSpools(deps).catch((error: unknown) =>
+    deps.logger.warn({ err: error }, 'coding session log spools not stored'),
   );
-  let removed = 0;
-  for (const id of ids) {
-    if (known.has(id)) continue;
-    await rm(path.join(dir, `${id}.log`), { force: true });
-    removed++;
-  }
-  return removed;
+  await removeOrphanLogs(deps).catch((error: unknown) =>
+    deps.logger.warn({ err: error }, 'coding session logs not swept'),
+  );
 }
+
+export { removeOrphanLogs } from './coder-log.js';

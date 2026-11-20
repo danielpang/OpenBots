@@ -1,5 +1,3 @@
-import { appendFile, mkdir, stat } from 'node:fs/promises';
-import path from 'node:path';
 import type { CoderExit, CoderPermissionRequest, CoderProcess } from '@openbots/computer';
 import {
   CODER_AGENT_LABELS,
@@ -59,15 +57,13 @@ import { runCoderLogin } from './coder-login-driver.js';
 import { accountBilling, coderProviderEnv, maskKey } from './coder-provider-env.js';
 import { interruptSession, LIVE } from './coder-recovery.js';
 import { resumeWaitingRun } from './coder-run-resume.js';
+import { SessionLogWriter } from './coder-log.js';
 import { recordEntry } from './coder-transcript.js';
 import {
   appendFeed,
   applyEvent,
   feedLine,
   flushFeed,
-  SESSION_LOG_FULL,
-  SESSION_LOG_MAX,
-  sessionLogPath,
   setApproval,
   setApprovalStatus,
   setSessionStatus,
@@ -166,6 +162,9 @@ export interface CoderRunnerOptions {
   rateLimitMaxWaitMs?: number;
   /** Starts the vendor sign-in a session that is not signed in waits on; tests stand in a fake. */
   startLogin?: typeof startLogin;
+  /** When the s3 storage driver stores a part of the log (coder-log.ts); tests set them small. */
+  logPartBytes?: number;
+  logPartMs?: number;
 }
 
 /** A session this process runs: how the control channel reaches it. */
@@ -361,11 +360,9 @@ class SessionRunner {
   private identity: SessionIdentity = {};
   /** Events and prompts in arrival order. */
   private chain: Promise<unknown> = Promise.resolve();
-  private logChain: Promise<unknown> = Promise.resolve();
-  private logPath: string | null = null;
-  /** The log's size; at SESSION_LOG_MAX it gets one marker line and nothing more. */
-  private logBytes = 0;
-  private logFull = false;
+  /** The session log (coder-log.ts): at SESSION_LOG_MAX it gets one marker line and nothing more. */
+  private logWriter: SessionLogWriter | null = null;
+  private logClosed: Promise<void> | null = null;
   private timers: ReturnType<typeof setTimeout>[] = [];
   /** The session's use of the computer (holds a Sprite awake, records usage), from its start to its end. */
   private use: ComputerUse | null = null;
@@ -411,6 +408,7 @@ class SessionRunner {
       await this.fail(errorText(error));
     } finally {
       for (const timer of this.timers) clearTimeout(timer);
+      await this.closeLog().catch(() => {});
       await this.proc?.close().catch(() => {});
       await this.use?.end();
     }
@@ -500,20 +498,22 @@ class SessionRunner {
     if (!continuing || !worktree) {
       worktree = await ensureWorktree(this.git, checkout.path, branch, base);
     }
-    this.logPath = sessionLogPath(deps, this.id);
-    await mkdir(path.dirname(this.logPath), { recursive: true });
-    this.logBytes = await stat(this.logPath).then(
-      (info) => info.size,
-      () => 0,
+    this.logWriter = await SessionLogWriter.open(
+      deps,
+      { id: this.id, workspaceId: session.workspaceId },
+      {
+        ...(this.options.logPartBytes ? { partBytes: this.options.logPartBytes } : {}),
+        ...(this.options.logPartMs ? { partMs: this.options.logPartMs } : {}),
+      },
     );
-    this.logFull = this.logBytes >= SESSION_LOG_MAX;
     const startedAt = session.startedAt ?? new Date();
     await setSessionStatus(deps, this.id, 'running', {
       worktreePath: worktree,
       branch,
       base,
       startedAt,
-      logPath: this.logPath,
+      // On this server's disk with the local driver; the store keeps it with s3.
+      ...(this.logWriter.localPath ? { logPath: this.logWriter.localPath } : {}),
       ...(branchExisted !== null ? { branchExisted } : {}),
     });
     this.session = { ...session, worktreePath: worktree, branch, base, startedAt, branchExisted };
@@ -693,7 +693,6 @@ class SessionRunner {
       (this.rpc as CoderSession | null)?.end();
     }
     await this.chain;
-    await this.logChain;
     return exit;
   }
 
@@ -763,20 +762,13 @@ class SessionRunner {
   }
 
   private log(line: string) {
-    const file = this.logPath;
-    if (!file || this.logFull) return;
-    let text = `${line}\n`;
-    const bytes = Buffer.byteLength(text);
-    if (this.logBytes + bytes > SESSION_LOG_MAX) {
-      this.logFull = true;
-      text = `${SESSION_LOG_FULL}\n`;
-    }
-    this.logBytes += Buffer.byteLength(text);
-    this.logChain = this.logChain
-      .then(() => appendFile(file, text))
-      .catch((error: unknown) =>
-        this.deps.logger.warn({ err: error, sessionId: this.id }, 'session log not written'),
-      );
+    this.logWriter?.write(line);
+  }
+
+  /** Every log line written and, with the s3 driver, stored: before the session settles. */
+  private closeLog(): Promise<void> {
+    this.logClosed ??= this.logWriter ? this.logWriter.close() : Promise.resolve();
+    return this.logClosed;
   }
 
   private async onEvent(event: CoderEvent) {
@@ -1497,6 +1489,8 @@ class SessionRunner {
     widgetError?: string,
   ): Promise<CodingSessionState> {
     this.ending = true;
+    // The whole log is readable, from any server, once the session reads as ended.
+    await this.closeLog().catch(() => {});
     await expireSessionApprovals(this.deps, this.id).catch((err: unknown) =>
       this.deps.logger.warn({ err, sessionId: this.id }, 'session approvals not expired'),
     );

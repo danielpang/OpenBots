@@ -7,8 +7,6 @@ import {
   type CoderUsage,
   type CodingSessionStatus,
 } from '@openbots/shared';
-import { open, rm } from 'node:fs/promises';
-import path from 'node:path';
 import type {
   CodingSessionApproval,
   CodingSessionState,
@@ -43,53 +41,15 @@ export type CodingSessionRow = typeof schema.codingSessions.$inferSelect;
 /** At most one feed write and publish per session this often. */
 export const FEED_FLUSH_MS = 500;
 
-// The session log: the CLI's raw output, kept on the server under
-// `<filesDir>/coders/<session id>.log` (the runner appends it, at most
-// SESSION_LOG_MAX bytes). The path is always made from the id, never read
-// from the row.
-
-/** The most a session log grows to; the runner writes SESSION_LOG_FULL once and stops. */
-export const SESSION_LOG_MAX = 8 * 1024 * 1024;
-export const SESSION_LOG_FULL = '[openbots] The session log reached 8 MB; later output is not kept';
-
-type LogDeps = { config: Pick<AppDeps['config'], 'filesDir'> };
-
-/** Where a session's log is on the server. */
-export function sessionLogPath(deps: LogDeps, sessionId: string): string {
-  if (!/^[0-9a-f-]{8,64}$/i.test(sessionId)) throw new Error('Not a session id');
-  return path.join(deps.config.filesDir, 'coders', `${sessionId}.log`);
-}
-
-/** The last `maxBytes` of a session's log; empty when it has none. */
-export async function readSessionLog(
-  deps: LogDeps,
-  session: Pick<CodingSessionRow, 'id'>,
-  maxBytes: number,
-): Promise<string> {
-  let file;
-  try {
-    file = await open(sessionLogPath(deps, session.id), 'r');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-    throw error;
-  }
-  try {
-    const { size } = await file.stat();
-    const length = Math.max(0, Math.min(size, Math.floor(maxBytes)));
-    const buffer = Buffer.alloc(length);
-    await file.read(buffer, 0, length, size - length);
-    return buffer.toString('utf8');
-  } finally {
-    await file.close();
-  }
-}
-
-export async function removeSessionLog(
-  deps: LogDeps,
-  session: Pick<CodingSessionRow, 'id'>,
-): Promise<void> {
-  await rm(sessionLogPath(deps, session.id), { force: true });
-}
+// The session log (the CLI's raw output) is coder-log.ts's; these are its
+// names as this module has always exported them.
+export {
+  readSessionLog,
+  removeSessionLog,
+  SESSION_LOG_FULL,
+  SESSION_LOG_MAX,
+  sessionLogPath,
+} from './coder-log.js';
 
 const EMPTY: CodingSessionState = { status: 'queued', feed: [], approvals: [] };
 

@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { and, asc, eq, gt } from 'drizzle-orm';
 import { schema } from '../db/client.js';
 import { forEachWorkspace } from '../db/scope.js';
+import { copySessionLog } from '../services/coder-log.js';
 import {
   blobStore,
   isStorageError,
@@ -28,6 +29,11 @@ import type { CliContext, CliResult } from './context.js';
 // sorts after the page being read, and otherwise by the next run (which is
 // why the move to s3 ends with a run while the server is stopped). It never
 // deletes anything, from either side. Lines name files by their id only.
+//
+// Coding session logs this server kept under `<filesDir>/coders/` go too,
+// each as the first part of its log (services/coder-log.ts), unless the
+// store has some of that log already; a log on another machine's disk stays
+// there.
 
 export const STORAGE_USAGE = 'usage: openbots storage copy [--dry-run]';
 
@@ -80,8 +86,38 @@ export async function runStorage(
     failed: 0,
   };
 
+  const logs = { found: 0, copied: 0, present: 0, failed: 0 };
   await forEachWorkspace(ctx.db, async (workspaceId) => {
     counts.organizations++;
+    let afterSession: string | undefined;
+    for (;;) {
+      const sessions = await ctx.db
+        .select({ id: schema.codingSessions.id })
+        .from(schema.codingSessions)
+        .where(
+          and(
+            eq(schema.codingSessions.workspaceId, workspaceId),
+            afterSession ? gt(schema.codingSessions.id, afterSession) : undefined,
+          ),
+        )
+        .orderBy(asc(schema.codingSessions.id))
+        .limit(pageSize);
+      for (const { id } of sessions) {
+        const outcome = await copySessionLog({ config }, target, { id, workspaceId }, dryRun).catch(
+          (error: unknown) => {
+            if (!isStorageError(error)) throw error;
+            write(`failed: coding session log ${id} (${error.message})`);
+            return 'failed' as const;
+          },
+        );
+        if (outcome !== 'none') logs.found++;
+        if (outcome === 'copied') logs.copied++;
+        if (outcome === 'present') logs.present++;
+        if (outcome === 'failed') logs.failed++;
+      }
+      if (sessions.length < pageSize) break;
+      afterSession = sessions[sessions.length - 1]!.id;
+    }
     let after: string | undefined;
     for (;;) {
       const rows = await ctx.db
@@ -121,7 +157,13 @@ export async function runStorage(
     }
   });
 
-  const problems = counts.missing + counts.mismatched + counts.failed;
+  const problems = counts.missing + counts.mismatched + counts.failed + logs.failed;
+  if (logs.found) {
+    write(
+      `${dryRun ? 'Would copy' : 'Copied'} ${logs.copied} of ${plural(logs.found, 'coding session log')}; ` +
+        `${logs.present} already in the object store, ${logs.failed} failed.`,
+    );
+  }
   write(
     `${dryRun ? 'Would copy' : 'Copied'} ${counts.copied} of ${plural(counts.files, 'file')} in ${plural(counts.organizations, 'organization')}; ` +
       `${counts.present} already in the object store, ${counts.missing} missing from ${config.filesDir}, ` +

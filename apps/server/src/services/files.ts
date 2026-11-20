@@ -211,7 +211,7 @@ export async function storeFile(
  * the store would not take as too large, anything else as unavailable for
  * now. The store's own message (a status or an errno) goes to the log only.
  */
-function storageProblem(error: unknown, limit?: number): unknown {
+export function storageProblem(error: unknown, limit?: number): unknown {
   if (!isStorageError(error)) return error;
   if (error.kind === 'not_found') return notFound('File not found');
   if (error.kind === 'too_large' && limit !== undefined) return fileTooLarge(limit);

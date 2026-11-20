@@ -866,10 +866,14 @@ describe('coder runner', () => {
     await ended(sessionId, 'settled');
     const { size } = await stat(file);
     expect(size).toBeLessThanOrEqual(SESSION_LOG_MAX + SESSION_LOG_FULL.length + 1);
-    const tail = await readSessionLog(w.t.deps, { id: sessionId }, 2_000);
+    const tail = await readSessionLog(
+      w.t.deps,
+      { id: sessionId, workspaceId: w.workspaceId },
+      2_000,
+    );
     expect(tail.endsWith(`${SESSION_LOG_FULL}\n`)).toBe(true);
     expect(tail.split(SESSION_LOG_FULL)).toHaveLength(2);
-    await removeSessionLog(w.t.deps, { id: sessionId });
+    await removeSessionLog(w.t.deps, { id: sessionId, workspaceId: w.workspaceId });
   });
 
   it('removes logs whose session is gone at recovery', async () => {
