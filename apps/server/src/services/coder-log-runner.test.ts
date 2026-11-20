@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,7 @@ import { startTestS3, type TestS3 } from '../storage/test-s3.js';
 import { coderWorld, type CoderWorld } from './__fixtures__/coders/setup.js';
 import { enqueueCoderJob, type CoderJob } from './coder-jobs.js';
 import {
+  newLogSweep,
   readSessionLog,
   removeOrphanLogs,
   sessionLogPath,
@@ -180,6 +181,62 @@ describe('coding session logs on several machines (s3 driver)', () => {
     expect(await readOn(second, sessionId)).toBe('');
   });
 
+  it('drops a spool another machine kept of a discarded session, and stores one written after', async () => {
+    w.coder.agent = (io) => {
+      io.stdout(readFileSync(path.join(FIXTURES, 'claude-success.jsonl'), 'utf8'));
+      io.exit(0);
+    };
+    const { sessionId } = await w.newSession();
+    await w.runToEnd(sessionId);
+    // The second machine kept a spool from a run that stopped before the discard.
+    const dir = path.join(otherDisk, 'coders');
+    await mkdir(dir, { recursive: true });
+    const before = path.join(dir, `${sessionId}.0.spool`);
+    await writeFile(before, 'kept from before the discard\n');
+    const earlier = new Date(Date.now() - 60_000);
+    await utimes(before, earlier, earlier);
+    const row = await w.session(sessionId);
+    await w.t.inOrganization(() => discardWorktree(w.t.deps, row));
+    expect((await w.session(sessionId)).logDiscardedAt).not.toBeNull();
+    const onSecond = { ...w.t.deps, config: { ...w.t.deps.config, filesDir: otherDisk } };
+    expect(await w.t.inOrganization(() => storeLeftoverSpools(onSecond))).toBe(0);
+    await expect(stat(before)).rejects.toThrow();
+    expect(parts(sessionId)).toEqual([]);
+    expect(await readOn(second, sessionId)).toBe('');
+    // A spool from a run after the discard is the session's new log.
+    const after = path.join(dir, `${sessionId}.0.0123456789ab.spool`);
+    await writeFile(after, 'a run after the discard\n');
+    const later = new Date(Date.now() + 60_000);
+    await utimes(after, later, later);
+    expect(await w.t.inOrganization(() => storeLeftoverSpools(onSecond))).toBe(1);
+    expect(await readOn(w.t.app, sessionId)).toBe('a run after the discard\n');
+  });
+
+  it('sweeps a bounded number of pages at each start, and the rest at later ones', async () => {
+    // An organization of its own, holding only these parts.
+    const org = await w.t.createOrganization('Sweep');
+    const gone = Array.from({ length: 12 }, () => randomUUID());
+    for (const id of gone) {
+      s3.objects.set(`orgs/${org}/coderlog_${id}_000000000000`, Buffer.from('gone\n'));
+    }
+    const listings = () => s3.requests.filter((r) => r.method === 'GET' && r.key === '').length;
+    const left = () => gone.filter((id) => parts(id).length > 0).length;
+    let starts = 0;
+    while (left() > 0 && starts < 100) {
+      const asked = listings();
+      const removed = await w.t.inOrganization(
+        () => removeOrphanLogs(w.t.deps, { pages: 2, pageSize: 3 }),
+        org,
+      );
+      starts++;
+      // Two pages, and one more request when the pass starts past the last key.
+      expect(listings() - asked).toBeLessThanOrEqual(3);
+      expect(removed).toBeLessThanOrEqual(6);
+    }
+    expect(left()).toBe(0);
+    expect(starts).toBeGreaterThan(1);
+  });
+
   it("removes the parts of sessions that are gone, and keeps the others'", async () => {
     w.coder.agent = (io) => {
       io.stdout(readFileSync(path.join(FIXTURES, 'claude-success.jsonl'), 'utf8'));
@@ -259,6 +316,23 @@ describe('the local sweep of coding session logs', () => {
     await rm(ours);
   });
 
+  it('judges the logs on this disk once in a sweep of every organization', async () => {
+    const other = await w.t.createOrganization('Another');
+    const first = sessionLogPath(w.t.deps, randomUUID());
+    const second = sessionLogPath(w.t.deps, randomUUID());
+    await mkdir(path.dirname(first), { recursive: true });
+    await writeFile(first, 'left behind\n');
+    const sweep = newLogSweep();
+    await w.t.inOrganization(() => removeOrphanLogs(w.t.deps, { sweep }), other);
+    await expect(stat(first)).rejects.toThrow();
+    // Written after this sweep judged the disk: left for the next sweep.
+    await writeFile(second, 'left behind later\n');
+    await w.t.inOrganization(() => removeOrphanLogs(w.t.deps, { sweep }));
+    expect((await stat(second)).size).toBeGreaterThan(0);
+    await w.t.inOrganization(() => removeOrphanLogs(w.t.deps, { sweep: newLogSweep() }));
+    await expect(stat(second)).rejects.toThrow();
+  });
+
   it('is copied to the object store by `openbots storage copy`, and reads from there', async () => {
     const s3 = await startTestS3();
     try {
@@ -288,9 +362,11 @@ describe('the local sweep of coding session logs', () => {
       expect(lines).toContain(
         'Copied 1 of 1 coding session log; 0 already in the object store, 0 failed.',
       );
-      expect(
-        s3.objects.get(`prod/orgs/${w.workspaceId}/coderlog_${sessionId}_000000000000`),
-      ).toEqual(Buffer.from('an old session\n'));
+      const copied = [...s3.objects.keys()].filter((key) =>
+        key.startsWith(`prod/orgs/${w.workspaceId}/coderlog_${sessionId}_000000000000`),
+      );
+      expect(copied).toHaveLength(1);
+      expect(s3.objects.get(copied[0]!)).toEqual(Buffer.from('an old session\n'));
       // Nothing deleted, and a second run copies nothing.
       expect((await stat(file)).size).toBe(15);
       lines.length = 0;

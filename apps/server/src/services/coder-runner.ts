@@ -500,7 +500,7 @@ class SessionRunner {
     }
     this.logWriter = await SessionLogWriter.open(
       deps,
-      { id: this.id, workspaceId: session.workspaceId },
+      { id: this.id, workspaceId: session.workspaceId, logDiscardedAt: session.logDiscardedAt },
       {
         ...(this.options.logPartBytes ? { partBytes: this.options.logPartBytes } : {}),
         ...(this.options.logPartMs ? { partMs: this.options.logPartMs } : {}),
@@ -765,7 +765,11 @@ class SessionRunner {
     this.logWriter?.write(line);
   }
 
-  /** Every log line written and, with the s3 driver, stored: before the session settles. */
+  /**
+   * Every log line written and, with the s3 driver, one brief try to store
+   * the rest (coder-log.ts): before the session settles, which waits on the
+   * store for at most LOG_CLOSE_MS.
+   */
   private closeLog(): Promise<void> {
     this.logClosed ??= this.logWriter ? this.logWriter.close() : Promise.resolve();
     return this.logClosed;

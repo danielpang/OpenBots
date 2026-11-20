@@ -351,6 +351,13 @@
       "when": 1795126856912,
       "tag": "0049_artifact_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1795198286961,
+      "tag": "0050_coding_session_log_discarded",
+      "breakpoints": true
     }
   ]
 }

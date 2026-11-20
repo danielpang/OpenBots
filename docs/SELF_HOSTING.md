@@ -243,14 +243,24 @@ file looks like a permission error (and `openbots storage copy` fails every file
 yet, saying so). R2 and MinIO answer 404 either way; an R2 token needs Object Read and Write.
 
 Coding session logs go to the bucket too, under the same `orgs/<organization id>/` prefix. The
-machine running a session appends its output to a spool file,
-`OPENBOTS_FILES_DIR/coders/<session id>.<offset>.spool`, and stores it in numbered parts: once 1 MB
-is waiting, 30 seconds after output starts waiting, and when the session ends, when the spool is
-removed. Any machine reads a session's log from the bucket, the running ones included; the
-session's live feed in the apps does not depend on it. A machine that stops in the middle of a
-session loses at most the output of its last 30 seconds (and never more than 1 MB); if its disk
-survives, the spool is stored the next time the worker starts there. Because the logs are found by
-listing the bucket, the key needs list permission (`s3:ListBucket` on AWS, below).
+machine running a session appends its output to a spool file in `OPENBOTS_FILES_DIR/coders/` and
+stores it in parts: once 1 MB is waiting, 30 seconds after output starts waiting (for the first 64
+parts of a session; after that only by size), and when the session ends, when the spool is removed.
+Any machine reads a session's log from the bucket, the running ones included; the session's live
+feed in the apps does not depend on it. The log never holds a session up: when the bucket does not
+answer, a session starts within 5 seconds and keeps its output in the spool, the machine asks the
+bucket again after 30 seconds and then less often (up to every 5 minutes), and the end of a session
+waits at most 5 seconds for the last part. A spool that could not be stored stays on that machine's
+disk and is stored the next time the session runs there or the worker starts there.
+
+What a machine can lose: if it stops in the middle of a session and its disk survives, nothing (the
+spool is stored at the next start). If its disk is lost too, it loses what its spool held that was
+not stored yet: while the bucket answers, less than 1 MB, and for a session's first 64 parts also
+no more than its last 30 seconds of output; while the bucket was not answering, everything the
+session wrote since then, up to the 8 MB a session log keeps. Because the logs are found by
+listing the bucket, the key needs list permission (`s3:ListBucket` on AWS, below). At each start a
+worker also removes the parts of sessions that are gone, a few thousand parts for each organization
+at a time.
 
 `OPENBOTS_FILES_DIR` stays in use with the `s3` driver for those spools and for folder (Filesystem)
 connectors that run on the server. With `OPENBOTS_STDIO_RUNNER=host` a folder connector's folder is
@@ -281,8 +291,8 @@ move cannot be left behind:
    left on another machine's disk stays there.
 3. Stop the server: `docker compose stop openbots` (every api and worker process, if you run them
    apart).
-4. Run the copy a final time, as in step 2. It sends only what was uploaded since the last run.
-   Repeat it until it reports nothing failed.
+4. Run the copy a final time, as in step 2. It sends only what was uploaded since the last run,
+   and the end of any session log that grew since then. Repeat it until it reports nothing failed.
 5. Start the server with the new settings, `docker compose up -d`, and check that an old upload and
    an Artifact open.
 

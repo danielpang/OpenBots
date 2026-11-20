@@ -4,7 +4,7 @@ import { inArray } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { expireSessionApprovals } from './approvals.js';
-import { removeOrphanLogs, storeLeftoverSpools } from './coder-log.js';
+import { newLogSweep, removeOrphanLogs, storeLeftoverSpools, type LogSweep } from './coder-log.js';
 import { enqueueCoderJob } from './coder-jobs.js';
 import { resumeWaitingRun } from './coder-run-resume.js';
 import { settleSession, type CodingSessionRow } from './coder-state.js';
@@ -42,7 +42,10 @@ export async function interruptSession(
  * machine left behind are stored (coder-log.ts). Logs whose session is gone
  * are removed.
  */
-export async function recoverInterruptedCoderSessions(deps: AppDeps): Promise<number> {
+export async function recoverInterruptedCoderSessions(
+  deps: AppDeps,
+  sweep: LogSweep = newLogSweep(),
+): Promise<number> {
   const rows = await deps.db
     .select()
     .from(schema.codingSessions)
@@ -54,20 +57,25 @@ export async function recoverInterruptedCoderSessions(deps: AppDeps): Promise<nu
       await interruptSession(deps, row);
     }
   }
-  await sweepSessionLogs(deps);
+  await sweepSessionLogs(deps, sweep);
   return rows.length;
 }
 
 /**
  * The upkeep of session logs at a worker's start, in an organization's
  * scope: spools left on this machine stored (s3 driver), then logs whose
- * session is gone removed. Never fails the start.
+ * session is gone removed, the files on this disk once per `sweep` (one
+ * for every organization's pass) and a bounded share of the organization's
+ * stored parts. Never fails the start.
  */
-export async function sweepSessionLogs(deps: AppDeps): Promise<void> {
+export async function sweepSessionLogs(
+  deps: AppDeps,
+  sweep: LogSweep = newLogSweep(),
+): Promise<void> {
   await storeLeftoverSpools(deps).catch((error: unknown) =>
     deps.logger.warn({ err: error }, 'coding session log spools not stored'),
   );
-  await removeOrphanLogs(deps).catch((error: unknown) =>
+  await removeOrphanLogs(deps, { sweep }).catch((error: unknown) =>
     deps.logger.warn({ err: error }, 'coding session logs not swept'),
   );
 }

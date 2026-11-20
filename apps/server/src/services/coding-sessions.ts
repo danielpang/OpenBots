@@ -770,6 +770,12 @@ export async function discardWorktree(deps: AppDeps, row: CodingSessionRow): Pro
       deps.logger.warn({ err: error, sessionId: row.id }, 'discarding a worktree failed');
     }
   }
+  // Recorded first: a spool of the log another machine still holds is
+  // dropped there, not stored, from now on (coder-log.ts).
+  await deps.db
+    .update(schema.codingSessions)
+    .set({ logDiscardedAt: new Date() })
+    .where(eq(schema.codingSessions.id, row.id));
   await removeSessionLog(deps, row).catch((error: unknown) =>
     deps.logger.warn({ err: error, sessionId: row.id }, 'removing a session log failed'),
   );

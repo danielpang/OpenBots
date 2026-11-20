@@ -207,6 +207,12 @@ export const codingSessions = pgTable(
     error: text('error'),
     /** The full event log, a file under the session's directory on the computer. */
     logPath: text('log_path'),
+    /**
+     * When Discard removed the session's log; null when it never did. With
+     * the s3 storage driver a spool another machine kept from before this
+     * time is dropped rather than stored (services/coder-log.ts).
+     */
+    logDiscardedAt: timestamptz('log_discarded_at'),
     startedAt: timestamptz('started_at'),
     finishedAt: timestamptz('finished_at'),
     createdAt: createdAt(),

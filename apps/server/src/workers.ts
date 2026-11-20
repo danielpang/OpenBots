@@ -10,6 +10,7 @@ import {
 import { APPROVALS_QUEUE, expireDueApprovals, expiryHandler } from './services/approvals.js';
 import { AUDIT_TRIM_MS, trimAuditLog } from './services/audit.js';
 import { BOT_STATE_QUEUE, settleHandler } from './services/bot-state.js';
+import { newLogSweep } from './services/coder-log.js';
 import { recoverInterruptedCoderSessions, sweepSessionLogs } from './services/coder-recovery.js';
 import { createCoderWorker } from './services/coder-runner.js';
 import { PAIRING_SWEEP_MS, expireDuePairings } from './services/devices.js';
@@ -88,11 +89,15 @@ export async function inEveryOrganization(
 /** Background work for the `worker` and `all` roles (queues, scheduler). */
 export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<void> }> {
   const { infra, logger } = deps;
+  // One sweep of session logs across organizations: this disk is judged once in it.
+  const logSweep = newLogSweep();
   // In-process queues cannot outlive the process, so its running runs are queued again.
   if (infra.kind === 'memory') {
     const recovered = await inEveryOrganization(deps, () => recoverInterruptedRuns(deps));
     if (recovered) logger.warn({ runs: recovered }, 'took over runs interrupted by a restart');
-    const sessions = await inEveryOrganization(deps, () => recoverInterruptedCoderSessions(deps));
+    const sessions = await inEveryOrganization(deps, () =>
+      recoverInterruptedCoderSessions(deps, logSweep),
+    );
     if (sessions) logger.warn({ sessions }, 'recovered coding sessions interrupted by a restart');
     const requeued = await inEveryOrganization(deps, () => requeuePendingEventDeliveries(deps));
     if (requeued) logger.info({ deliveries: requeued }, 'requeued pending event deliveries');
@@ -100,7 +105,7 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     // Shared queues keep their sessions; the logs in the shared store still
     // want their upkeep (recoverInterruptedCoderSessions does it above).
     await inEveryOrganization(deps, async () => {
-      await sweepSessionLogs(deps);
+      await sweepSessionLogs(deps, logSweep);
       return 0;
     });
   }
