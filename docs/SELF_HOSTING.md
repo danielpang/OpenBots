@@ -199,6 +199,37 @@ do not block WebRTC or DNS lookups from that frame, so a script in an Artifact c
 Artifact contains to a server its author names. Treat an Artifact with scripts as able to leak
 what is in it, whoever it is shared with.
 
+### Object storage
+
+Uploads, attachments, avatars, webhook bodies and every Artifact version are stored on the
+server's disk under `OPENBOTS_FILES_DIR` unless you choose otherwise. That needs nothing set and
+suits a server on one machine. A server that runs on several machines (separate `api` and `worker`
+processes, say) needs one store they all reach: set `OPENBOTS_STORAGE_DRIVER=s3` and point it at an
+S3-compatible bucket, such as Cloudflare R2, AWS S3 or the MinIO in the compose `s3` profile.
+
+| Setting                                                      | What it is                                                                                                                                         |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENBOTS_STORAGE_DRIVER`                                    | `local` (the default) or `s3`                                                                                                                      |
+| `OPENBOTS_S3_BUCKET`                                         | The bucket, which must exist. Keep it private: the server checks who may see each file and serves it itself                                        |
+| `OPENBOTS_S3_ENDPOINT`                                       | The service's address: `https://<account id>.r2.cloudflarestorage.com` for R2, `http://minio:9000` for the compose profile. Empty for AWS          |
+| `OPENBOTS_S3_REGION`                                         | `auto` for R2 (the default when an endpoint is set); the bucket's region for AWS                                                                   |
+| `OPENBOTS_S3_ACCESS_KEY_ID`, `OPENBOTS_S3_SECRET_ACCESS_KEY` | A key that may read, write and delete objects in that bucket only. Secrets: they may be given as `NAME_FILE`                                       |
+| `OPENBOTS_S3_PREFIX`                                         | Optional: put before every key, for a bucket shared with other data, such as `openbots/prod`                                                       |
+| `OPENBOTS_S3_PATH_STYLE`                                     | `true` to address the bucket as `<endpoint>/<bucket>` (the default with an endpoint), `false` for `<bucket>.<endpoint host>` (the default for AWS) |
+
+The server checks these when it starts and stops with a message naming what is missing. An S3
+setting without `OPENBOTS_STORAGE_DRIVER=s3` is refused too, rather than ignored. Files are stored
+under `orgs/<organization id>/` in the bucket (after the prefix), named by ids the server makes.
+Each upload is checked against its sha256 on the way in; a file's type and size are kept in the
+database, not taken from the bucket. A request the store fails with a network error, a 5xx or a 429
+is tried again up to four times; while the store is down, reading or storing a file answers 503
+`STORAGE_UNAVAILABLE`. Error messages and logs never name the bucket, the endpoint, a key or a
+credential.
+
+`OPENBOTS_FILES_DIR` stays in use with the `s3` driver for the filesystem connectors' folders and
+the coding agents' session logs, which belong to the machine that runs them. The Artifact host
+keeps serving through the server with either driver (the Cloudflare Worker forwards to it).
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
@@ -335,7 +366,8 @@ bash scripts/restore.sh backups/<timestamp> --yes   # the same without asking, f
 A backup, readable by your user only, holds:
 
 - `database.dump`: a `pg_dump` of the database.
-- `files.tar.gz`: the `files` volume (every upload and Artifact file).
+- `files.tar.gz`: the `files` volume (every upload and Artifact file with the default `local`
+  storage driver).
 - `computers/<volume>.tar.gz`: each Bot computer's home volume.
 - `MANIFEST`: checksums and the file count.
 
@@ -372,6 +404,12 @@ secrets.
 links to the relay with. If both copies run, they dial the relay as one server and the phone
 reaches whichever linked last. Stop the old install (`docker compose down`,
 `docker stop -t 60 <container>`, `fly machine stop`) before you start the restored one.
+
+**With the `s3` storage driver** ([Object storage](#object-storage)), uploads and Artifact files
+are in the bucket, not in the `files` volume, so `files.tar.gz` holds only the connectors' folders
+and session logs. Back the bucket up with your provider's own tools (versioning, replication or a
+scheduled copy) at the same time as the database: a restore needs both from the same moment, since
+a file whose record is in the dump but whose object is gone reads as not found.
 
 Without Docker (a development install), both scripts use `DATABASE_URL` and `OPENBOTS_FILES_DIR`
 and need `pg_dump` / `pg_restore` on `PATH`; computer volumes are skipped.
@@ -416,7 +454,8 @@ the last one finished. A backup made before a rotation needs the key it was made
 
 Each secret setting (`OPENBOTS_MASTER_KEY`, `OPENBOTS_MASTER_KEY_PREVIOUS`, `DATABASE_URL`,
 `REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
-`OPENBOTS_METRICS_TOKEN` and `OPENBOTS_ARTIFACT_EDGE_SECRET`) can be given as `NAME_FILE` instead: the path of a file holding the value,
+`OPENBOTS_METRICS_TOKEN`, `OPENBOTS_ARTIFACT_EDGE_SECRET` and the object storage keys
+`OPENBOTS_S3_ACCESS_KEY_ID` and `OPENBOTS_S3_SECRET_ACCESS_KEY`) can be given as `NAME_FILE` instead: the path of a file holding the value,
 such as a Docker or Kubernetes secret. Set one or the other, not both.
 
 The compose stack does this itself: its entrypoint moves the secrets from `.env` into private

@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { mkdir, open, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
+import { buffer } from 'node:stream/consumers';
 import {
   attachmentKind,
   decodeText,
@@ -16,16 +15,23 @@ import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
+import { blobStore, isStorageError, type BlobRef } from '../storage/index.js';
 import { organizationSettings } from '../workspace.js';
 
 // Stored files (plan 4.8): chat attachments, Artifact version blobs, webhook
 // delivery bodies and avatar uploads, told apart by `purpose`. Only
 // attachments are listed to the owner or attachable to a message (plan 12.1).
-// Blobs live on local disk under OPENBOTS_FILES_DIR, named by a random storage
-// key under the organization's directory (`orgs/<organization>/`, plan 21.3;
-// files from before have keys without one); the row records the name the
-// user gave, the sniffed mime type and a sha256. Every read is by a row the
-// caller owns in the active organization.
+// Blobs live in the configured store (storage/index.ts: local disk under
+// OPENBOTS_FILES_DIR by default, or an S3-compatible bucket), named by a
+// random storage key under the organization (`<organization>/<uuid>`, plan
+// 21.3; files from before have keys without one); the row records the name
+// the user gave, the sniffed mime type, the size and a sha256. Every read is
+// by a row the caller owns in the active organization.
+//
+// The blob is stored before its row is written, so a crash between the two
+// leaves a blob no row names (found later by listing an organization's
+// prefix against `files.storage_key`), never a row without its blob. A row
+// that fails to insert has its blob removed at once.
 
 type Owner = Pick<CurrentUser, 'id' | 'workspaceId'>;
 type FilesDeps = Pick<AppDeps, 'db' | 'config'>;
@@ -102,26 +108,69 @@ export async function storeFile(
   if (input.bytes.byteLength > limit) throw fileTooLarge(limit);
   const mime = sniffMime(input.bytes, input.declaredMime);
   if (input.purpose === 'avatar' && !isAvatarMime(mime)) throw invalidAvatar();
-  const storageKey = `${owner.workspaceId}/${randomUUID()}`;
-  const target = blobPath(deps, storageKey);
-  await mkdir(path.dirname(target), { recursive: true });
-  // Write then rename, so a crash never leaves a half file under a real key.
-  await writeFile(`${target}.part`, input.bytes);
-  await rename(`${target}.part`, target);
-  const [row] = await deps.db
-    .insert(schema.files)
-    .values({
-      workspaceId: owner.workspaceId,
-      ownerId: owner.id,
-      name: cleanName(input.name),
-      mime,
-      size: input.bytes.byteLength,
-      storageKey,
-      sha256: createHash('sha256').update(input.bytes).digest('hex'),
-      purpose: input.purpose,
-    })
-    .returning();
-  return row!;
+  // Made here, never from the name the user gave.
+  const ref: BlobRef = {
+    workspaceId: owner.workspaceId,
+    storageKey: `${owner.workspaceId}/${randomUUID()}`,
+  };
+  const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+  const store = blobStore(deps.config);
+  await store
+    .put(ref, input.bytes, { size: input.bytes.byteLength, sha256 })
+    .catch((error: unknown) => {
+      throw storageProblem(error, limit);
+    });
+  try {
+    const [row] = await deps.db
+      .insert(schema.files)
+      .values({
+        workspaceId: owner.workspaceId,
+        ownerId: owner.id,
+        name: cleanName(input.name),
+        mime,
+        size: input.bytes.byteLength,
+        storageKey: ref.storageKey,
+        sha256,
+        purpose: input.purpose,
+      })
+      .returning();
+    return row!;
+  } catch (error) {
+    await store.delete(ref).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * A storage failure as the API shows it: a missing blob as not found, one
+ * the store would not take as too large, anything else as unavailable for
+ * now. The store's own message (a status or an errno) goes to the log only.
+ */
+function storageProblem(error: unknown, limit?: number): unknown {
+  if (!isStorageError(error)) return error;
+  if (error.kind === 'not_found') return notFound('File not found');
+  if (error.kind === 'too_large' && limit !== undefined) return fileTooLarge(limit);
+  // The cause reaches the log of a 5xx (app.ts); the store's message names no secret.
+  return Object.assign(
+    new DomainError(
+      503,
+      'STORAGE_UNAVAILABLE',
+      'File storage is unavailable right now. Try again in a moment.',
+    ),
+    { cause: error },
+  );
+}
+
+/** The blob of a row the caller already holds, as a stream. */
+export async function openBlob(
+  deps: FilesDeps,
+  file: Pick<FileRow, 'workspaceId' | 'storageKey'>,
+): Promise<Readable> {
+  return blobStore(deps.config)
+    .get({ workspaceId: file.workspaceId, storageKey: file.storageKey })
+    .catch((error: unknown) => {
+      throw storageProblem(error);
+    });
 }
 
 /** The owner's file and a stream of its bytes; another user's file is not found. */
@@ -130,6 +179,12 @@ export async function openFile(
   owner: Owner,
   fileId: string,
 ): Promise<{ file: FileRow; stream: Readable }> {
+  const file = await findFile(deps, owner, fileId);
+  return { file, stream: await openBlob(deps, file) };
+}
+
+/** The owner's file row, without opening its blob; another user's file is not found. */
+export async function findFile(deps: FilesDeps, owner: Owner, fileId: string): Promise<FileRow> {
   const [file] = await deps.db
     .select()
     .from(schema.files)
@@ -141,7 +196,7 @@ export async function openFile(
       ),
     );
   if (!file) throw notFound('File not found');
-  return { file, stream: createReadStream(blobPath(deps, file.storageKey)) };
+  return file;
 }
 
 export function isAvatarMime(mime: string): boolean {
@@ -272,19 +327,6 @@ export async function listAttachments(
   };
 }
 
-/** `<organization>/<key>`, or a bare `<key>` from before organizations. */
-const STORAGE_KEY = /^(?:([0-9a-f-]{36})\/)?([A-Za-z0-9_-]+)$/;
-
-function blobPath(deps: FilesDeps, storageKey: string) {
-  const match = STORAGE_KEY.exec(storageKey);
-  if (!match) throw new Error('Malformed storage key');
-  const [, workspaceId, key] = match as unknown as [string, string | undefined, string];
-  // Two-character fan-out keeps any one directory small.
-  return workspaceId
-    ? path.join(deps.config.filesDir, 'orgs', workspaceId, key.slice(0, 2), key)
-    : path.join(deps.config.filesDir, key.slice(0, 2), key);
-}
-
 function cleanName(name: string) {
   // eslint-disable-next-line no-control-regex
   const base = path.basename(name.replace(/\\/g, '/')).replace(/[\u0000-\u001f\u007f]/g, '');
@@ -330,24 +372,17 @@ export async function chatAttachment(
 /** Up to `length` bytes of a stored file from `offset`, or all of it. */
 async function readBlob(
   deps: FilesDeps,
-  file: Pick<FileRow, 'storageKey' | 'size'>,
+  file: Pick<FileRow, 'workspaceId' | 'storageKey' | 'size'>,
   range?: { offset: number; length: number },
 ): Promise<Uint8Array> {
   const offset = Math.min(range?.offset ?? 0, file.size);
   const length = Math.max(0, Math.min(range?.length ?? file.size, file.size - offset));
-  const handle = await open(blobPath(deps, file.storageKey), 'r');
-  try {
-    const bytes = new Uint8Array(length);
-    let read = 0;
-    while (read < length) {
-      const { bytesRead } = await handle.read(bytes, read, length - read, offset + read);
-      if (!bytesRead) break;
-      read += bytesRead;
-    }
-    return bytes.subarray(0, read);
-  } finally {
-    await handle.close();
-  }
+  const stream = await blobStore(deps.config).get(
+    { workspaceId: file.workspaceId, storageKey: file.storageKey },
+    { offset, length },
+  );
+  // At most `length` bytes, whatever the store sends.
+  return new Uint8Array(await buffer(stream)).subarray(0, length);
 }
 
 const toAttachmentFile = (file: FileRow): AttachmentFile => ({

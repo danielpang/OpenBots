@@ -54,6 +54,7 @@
     "@openbots/tunnel": "workspace:*",
     "@openbots/widgets": "workspace:*",
     "ai": "catalog:",
+    "aws4fetch": "^1.0.20",
     "better-auth": "catalog:",
     "bullmq": "catalog:",
     "drizzle-orm": "catalog:",
