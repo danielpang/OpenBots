@@ -51,6 +51,8 @@ export interface ComputerSpec {
    * `computerId`. A full reset that keeps the old machine for a while
    * (`retire`) gives the computer a new key, so its next machine is a new one
    * and the old one is left alone. Absent on computers never reset that way.
+   * It may also be the provider's own name of an existing machine (the one an
+   * operator restored), which then names exactly that machine.
    */
   machineKey?: string;
 }
@@ -161,21 +163,29 @@ export interface ComputerProvider {
   /** Replaces what the machine may reach. Sprites only. */
   applyEgressPolicy?(ref: ComputerRef, policy: EgressPolicy): Promise<void>;
   /**
-   * Takes a machine a full reset replaces out of service but keeps it, disk
-   * and checkpoints included, so an operator can bring it back (`unretire`)
-   * until the server deletes it with `destroy` (home and state). Afterwards
-   * nothing can talk to it: its agent is stopped and removed and its agent
-   * token deleted, its URL is private, its holds are gone so it pauses, it
-   * may reach nothing, and every call on it but `status`, `listCheckpoints`,
-   * `restore`, `unretire` and `destroy` is refused without waking it. Safe
-   * to call again. A provider that has it keeps a machine through a full
+   * Takes a machine a full reset replaces out of reach, at once and without
+   * waking it: from then on no request from outside reaches it (its URL is
+   * private), it reaches nothing (its egress policy denies everything), and
+   * every call on it but `status`, `listCheckpoints`, `restore`,
+   * `retireInside`, `unretire` and `destroy` is refused. Only metadata calls,
+   * no command inside it, so it works on a machine that will not wake. Its
+   * disk and checkpoints are kept, so an operator can bring it back
+   * (`unretire`) until the server deletes it with `destroy` (home and state).
+   * Safe to call again. A provider that has it keeps a machine through a full
    * reset; one without it (Docker) removes it as before. Sprites only.
    */
   retire?(ref: ComputerRef): Promise<void>;
   /**
+   * The rest of a retire, inside the machine (it wakes it): its holds are
+   * dropped so it pauses, a hold racing with this one is refused, and its
+   * agent is stopped and removed and its agent token deleted. Refused on a
+   * machine `retire` did not take out of reach first. Safe to call again.
+   */
+  retireInside?(ref: ComputerRef): Promise<void>;
+  /**
    * Puts a retired machine back in service as far as the provider goes: its
    * URL and egress policy as configured. Its agent comes back with the next
-   * `create` for the same `machineKey`, which provisions it with a new token.
+   * `create` for the same machine, which provisions it with a new token.
    */
   unretire?(ref: ComputerRef): Promise<void>;
 }

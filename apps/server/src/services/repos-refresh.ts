@@ -9,6 +9,7 @@ import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { mainBotOf } from './bots.js';
 import { enqueueCoderJob } from './coder-jobs.js';
+import { shownFailure } from './computer.js';
 import { postMessage } from './messages.js';
 import {
   assertRunnable,
@@ -45,8 +46,6 @@ export const REFRESH_MIN_GAP_MS = 10 * 60_000;
 const SETTLED = ['ready', 'behind', 'dirty', 'error'];
 /** A checkout `cloning` or `updating` this long was left by a job that died: reconcile retries it. */
 export const STUCK_MS = 30 * 60_000;
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -158,7 +157,7 @@ async function refreshOne(
     });
     return true;
   } catch (error) {
-    await set({ state: 'error', error: errorText(error).slice(0, 2_000) });
+    await set({ state: 'error', error: shownFailure(deps, error).slice(0, 2_000) });
     return false;
   }
 }
@@ -372,7 +371,7 @@ export async function reconcileComputer(
       result.cloned.push(repo.fullName);
       if (state === 'missing') again = true;
     } catch (error) {
-      result.failed.push({ fullName: repo.fullName, error: errorText(error) });
+      result.failed.push({ fullName: repo.fullName, error: shownFailure(deps, error) });
     }
   }
   if (result.cloned.length) {

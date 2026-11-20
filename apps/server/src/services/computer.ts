@@ -16,6 +16,7 @@ import {
   ScreenLocks,
   screenNumber,
   spritesEgressPolicy,
+  SpritesApiError,
   volumeName,
   type ComputerAgentClient,
   type ComputerProvider,
@@ -39,6 +40,7 @@ import {
   lt,
   ne,
   not,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -64,7 +66,11 @@ import {
 } from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 import { admitComputerWork, computerWorkRefusal } from './computer-admission.js';
-import { retainsOnReset, retireMachine } from './computer-retire.js';
+import { computerBusy, computerChanged, retainsOnReset, retireMachine } from './computer-retire.js';
+import { fenceComputer, isFenced } from './computer-fence.js';
+import { beginStartWork, endStartWork } from './computer-start-work.js';
+
+export { startWorkSettled } from './computer-start-work.js';
 
 // The account's computer (plan 4.5, 9; K1 to K7). One `computers` row per
 // owner, created on first use through the configured provider (`remote` when
@@ -156,8 +162,6 @@ interface SandboxEnv {
 
 /** What `computers.spec` holds: how the machine was made, and a pending idle stop retry. */
 interface MachineSpec {
-  /** Names the machine instead of the row's id (`ComputerSpec.machineKey`). */
-  machineKey?: string;
   image?: string;
   /**
    * A fingerprint of the `SandboxEnv` it was made with, not the values: the
@@ -336,6 +340,15 @@ export function idleSettingsApply(row: Pick<ComputerRow, 'provider'>) {
   return row.provider !== 'sprites';
 }
 
+/**
+ * The provider as members and their organization are told it: `docker`, or
+ * `remote` for a machine somewhere else. The hosted service's sandbox vendor
+ * is not named to them.
+ */
+export function shownProvider(name: string): 'docker' | 'remote' {
+  return name === 'docker' ? 'docker' : 'remote';
+}
+
 function provider(deps: AppDeps) {
   const found = computerProvider(deps);
   if (!found) throw computerUnavailable(NO_PROVIDER);
@@ -371,15 +384,43 @@ async function setStatus(
   status: ComputerStatus,
   more: Partial<ComputerRow> = {},
   error: string | null = null,
+  guard?: SQL,
 ): Promise<ComputerRow> {
+  const updated = await setStatusIf(deps, row, status, more, error, guard);
+  if (!updated && guard) throw computerChangedUnderJob();
+  return updated ?? row;
+}
+
+/**
+ * Sets the row's status (and `more`) if it still matches `guard`; the row as
+ * it then is, or null when it no longer matched (nothing was written).
+ */
+async function setStatusIf(
+  deps: AppDeps,
+  row: ComputerRow,
+  status: ComputerStatus,
+  more: Partial<ComputerRow> = {},
+  error: string | null = null,
+  guard?: SQL,
+): Promise<ComputerRow | null> {
   const [updated] = await deps.db
     .update(schema.computers)
     .set({ status, ...more })
-    .where(eq(schema.computers.id, row.id))
+    .where(and(eq(schema.computers.id, row.id), guard))
     .returning();
+  if (!updated && guard) return null;
   await publishStatus(deps, row, status, error);
   return updated ?? row;
 }
+
+/** A provisioning job whose row moved on meanwhile (another attempt, a reset, a restore). */
+class StaleJobError extends Error {
+  constructor() {
+    super('The computer changed while its provisioning ran');
+    this.name = 'StaleJobError';
+  }
+}
+const computerChangedUnderJob = () => new StaleJobError();
 
 function publishStatus(
   deps: AppDeps,
@@ -399,6 +440,8 @@ function publishStatus(
 
 function refOf(deps: AppDeps, row: ComputerRow): ComputerRef {
   if (!row.agentUrl || !row.agentToken) throw computerUnavailable('The computer was never created');
+  // A row read before a reset names the machine the reset took away (computer-fence.ts).
+  if (isFenced(row)) throw computerUnavailable('The computer was reset. Try again.');
   return {
     provider: row.provider,
     containerId: row.containerId,
@@ -409,7 +452,9 @@ function refOf(deps: AppDeps, row: ComputerRow): ComputerRef {
 }
 
 export function agentFor(deps: AppDeps, row: ComputerRow): ComputerAgentClient {
-  return provider(deps).agent(refOf(deps, row));
+  const machines = provider(deps);
+  const agent = machines.agent(refOf(deps, row));
+  return provisionsInBackground(machines) ? quietAgent(deps, agent, row.id) : agent;
 }
 
 /** The owner's computer row, creating the machine behind it on first use. */
@@ -519,9 +564,11 @@ async function createMachine(
   row: ComputerRow,
   by: AuditActor,
   status: 'creating' | 'updating' = 'creating',
+  /** A provisioning job's: its writes land only while the row is still its (`jobGuard`). */
+  guard?: SQL,
 ): Promise<ComputerRow> {
   const machines = provider(deps);
-  row = await setStatus(deps, row, status);
+  row = await setStatus(deps, row, status, {}, null, guard);
   const agentToken = randomBytes(32).toString('base64url');
   const env = sandboxEnv(deps);
   try {
@@ -532,31 +579,41 @@ async function createMachine(
       agentToken,
       volumeName: row.volumeName ?? volumeName(row.id),
       ...env,
-      // Set by a full reset that kept the old machine (computer-retire.ts).
-      ...(specOf(row).machineKey ? { machineKey: specOf(row).machineKey } : {}),
+      // Set by a full reset that kept the old machine, or by a restore, which
+      // records the restored machine's own name (computer-retire.ts).
+      ...(row.machineKey ? { machineKey: row.machineKey } : {}),
     });
-    const created = await setStatus(deps, row, 'stopped', {
-      provider: ref.provider,
-      containerId: ref.containerId,
-      agentUrl: ref.agentUrl,
-      agentToken: encryptSecret(ref.agentToken, keyring(deps)),
-      volumeName: ref.volumeName,
-      spec: {
-        ...settledSpec(row),
-        image: deps.config.sandboxImage,
-        envKey: envKey(env),
-        network: deps.config.sandboxNetwork.name,
+    const created = await setStatus(
+      deps,
+      row,
+      'stopped',
+      {
+        provider: ref.provider,
+        containerId: ref.containerId,
+        agentUrl: ref.agentUrl,
+        agentToken: encryptSecret(ref.agentToken, keyring(deps)),
+        volumeName: ref.volumeName,
+        spec: {
+          ...settledSpec(row),
+          image: deps.config.sandboxImage,
+          envKey: envKey(env),
+          network: deps.config.sandboxNetwork.name,
+        },
       },
-    });
+      null,
+      guard,
+    );
     await auditComputer(deps, created, by, 'computer.create', {
-      provider: ref.provider,
+      // As the organization's audit log shows it: the hosted service's vendor is not named.
+      provider: shownProvider(ref.provider),
       ...(status === 'updating' ? { updated: true, image: deps.config.sandboxImage } : {}),
     });
     return created;
   } catch (error) {
+    if (error instanceof StaleJobError) throw error;
     const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer create failed');
-    await setStatus(deps, row, 'error', {}, message);
+    await setStatusIf(deps, row, 'error', {}, message, guard);
     throw computerUnavailable(`The computer could not be created: ${message}`);
   }
 }
@@ -589,7 +646,15 @@ export function startComputer(
 async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Started> {
   const machines = provider(deps);
   let row = await ensureComputer(deps, owner, by);
-  const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
+  let machine: Awaited<ReturnType<ComputerProvider['status']>>;
+  try {
+    machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    // The row is left as it was: nothing was asked of the machine yet.
+    deps.logger.error({ err: error, computerId: row.id }, 'reading the computer status failed');
+    throw computerUnavailable(`The computer did not start: ${failureText(deps, error)}`);
+  }
   if (machine === 'running' && row.status === 'running') {
     return { computer: await touch(deps, row), durationMs: null, updated: false };
   }
@@ -629,19 +694,6 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
   return { computer: row, durationMs: Date.now() - began, updated };
 }
 
-/** The git identity writes a start left running, by computer id (`afterStart`). */
-const startWork = new Map<string, { controller: AbortController; done: Promise<void> }>();
-
-/** Ends the writes a start left running on the computer: none begins after this. */
-function endStartWork(computerId: string) {
-  startWork.get(computerId)?.controller.abort();
-}
-
-/** Settles once the git identity writes a start left running on the computer have ended. */
-export async function startWorkSettled(computerId: string): Promise<void> {
-  await startWork.get(computerId)?.done;
-}
-
 /** What follows every start: the audit row, the repositories' jobs, git identity, wallpaper. */
 async function afterStart(
   deps: AppDeps,
@@ -657,20 +709,16 @@ async function afterStart(
   // the two modules do not import each other. A stop ends it between its
   // writes (`endStartWork`), so it never calls a stopped computer's agent,
   // which would wake a paused Sprite.
-  endStartWork(row.id);
-  const controller = new AbortController();
-  const done = import('./git-identity.js')
-    .then(({ applyGitIdentityOnComputer }) =>
-      applyGitIdentityOnComputer(deps, owner, undefined, controller.signal),
-    )
-    .then(
-      () => undefined,
-      (error: unknown) => deps.logger.warn({ err: error }, 'git identity failed'),
-    )
-    .finally(() => {
-      if (startWork.get(row.id)?.controller === controller) startWork.delete(row.id);
-    });
-  startWork.set(row.id, { controller, done });
+  beginStartWork(row.id, (signal) =>
+    import('./git-identity.js')
+      .then(({ applyGitIdentityOnComputer }) =>
+        applyGitIdentityOnComputer(deps, owner, undefined, signal),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => deps.logger.warn({ err: error }, 'git identity failed'),
+      ),
+  );
   // The hour's wallpaper (K5) on the computer's own clock (its TZ); the agent
   // keeps it current from here.
   agentFor(deps, row)
@@ -840,29 +888,64 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   if (job.attempt && specOf(row).provision?.attempt !== job.attempt) return;
   const began = Date.now();
   const owner = { id: row.ownerId, workspaceId: row.workspaceId };
+  // Every write of this job lands only while the row is still its own: the
+  // same attempt and the same machine key. A reset or restore that moved the
+  // row on meanwhile is never overwritten by what this job read before.
+  const guard = jobGuard(row, job);
   try {
     const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
-    if (machine === 'missing') row = await createMachine(deps, row, job.by);
-    row = await setStatus(deps, row, 'starting');
+    if (machine === 'missing') row = await createMachine(deps, row, job.by, 'creating', guard);
+    row = await setStatus(deps, row, 'starting', {}, null, guard);
     await machines.start(refOf(deps, row));
   } catch (error) {
+    if (error instanceof StaleJobError) {
+      deps.logger.info({ computerId: row.id }, 'the computer moved on while its provisioning ran');
+      return;
+    }
     const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer provisioning failed');
     const { provision: _, ...spec } = specOf(row);
-    await setStatus(deps, row, 'error', { spec: { ...spec, error: message } }, message);
+    await setStatusIf(deps, row, 'error', { spec: { ...spec, error: message } }, message, guard);
     return;
   }
+  const { error: _, provision: __, ...spec } = settledSpec(row);
+  // And on the machine it started, which nothing took away meanwhile.
+  const started = await setStatusIf(
+    deps,
+    row,
+    'running',
+    {
+      lastUsedAt: new Date(),
+      spec: { ...spec, ...(machines.version ? { provisionVersion: machines.version } : {}) },
+    },
+    null,
+    and(guard, eq(schema.computers.containerId, row.containerId!)),
+  );
+  if (!started) {
+    deps.logger.info({ computerId: row.id }, 'the computer moved on while its provisioning ran');
+    return;
+  }
+  row = started;
   // The agent may have been installed again, so no display runs.
   await deps.db
     .update(schema.botScreens)
     .set({ status: 'stopped' })
     .where(eq(schema.botScreens.computerId, row.id));
-  const { error: _, provision: __, ...spec } = settledSpec(row);
-  row = await setStatus(deps, row, 'running', {
-    lastUsedAt: new Date(),
-    spec: { ...spec, ...(machines.version ? { provisionVersion: machines.version } : {}) },
-  });
   await afterStart(deps, owner, row, job.by, began);
+}
+
+/** What a provisioning job's writes require of the row: its attempt (or none) and its machine key. */
+function jobGuard(row: ComputerRow, job: ProvisionJob): SQL {
+  const attemptOf = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
+  return and(
+    // Its own attempt, or none: a queue whose answer was lost gives the
+    // attempt back (`queueProvision`), and the job's work still stands for
+    // the same machine unless another start claimed the row meanwhile.
+    job.attempt ? sql`(${attemptOf} = ${job.attempt} or ${attemptOf} is null)` : undefined,
+    row.machineKey === null
+      ? isNull(schema.computers.machineKey)
+      : eq(schema.computers.machineKey, row.machineKey),
+  )!;
 }
 
 /** The `computers` queue's handler. */
@@ -1180,6 +1263,13 @@ export interface DestroyComputerOptions {
   /** Removes the state volume too: the cookie store and the coding agents' sign-ins. */
   signIns: boolean;
   /**
+   * With `signIns`, on a provider that would keep the old machine for
+   * `RETIRED_COMPUTER_DAYS` (computer-retire.ts): deletes it now instead, for
+   * a member who wants it gone (someone else got into it). Support cannot
+   * restore it then.
+   */
+  deleteOld?: boolean;
+  /**
    * The checkpoint taken just before (`checkpointBeforeReset`), recorded
    * with a machine that is retired rather than removed.
    */
@@ -1193,8 +1283,11 @@ export interface DestroyComputerOptions {
  * provider, and the state volume only with `signIns`. The row stays,
  * `stopped`, with no machine, so the next start makes a fresh one with the
  * same volume name. Docker and Sprites only: the remote machine is not the
- * server's to remove (409 `RESET_UNSUPPORTED`). A stop that fails does not stop the reset,
- * since removing the container stops it anyway.
+ * server's to remove (409 `RESET_UNSUPPORTED`). Refused while a job is
+ * making, starting or stopping the computer (409 `COMPUTER_BUSY`). A stop
+ * that fails does not stop the reset, since removing the container stops it
+ * anyway. Once the old machine is gone or out of reach, every process fences
+ * its agent token (computer-fence.ts).
  */
 export async function destroyComputer(
   deps: AppDeps,
@@ -1204,10 +1297,35 @@ export async function destroyComputer(
 ): Promise<ComputerRow> {
   const machines = provider(deps);
   assertResettable(deps);
+  if (BUSY.has(row.status)) throw computerBusy(row.status);
   // `stopMachine` ends the coding sessions; with nothing to stop, they end here.
   const stops = !!row.agentUrl && row.status !== 'stopped';
   if (stops) {
-    row = await stopComputer(deps, row, by).catch(async (error: unknown) => {
+    // Claimed for the stop, so a second reset at once is refused here
+    // rather than stopping the machine under the first one.
+    const [claimed] = await deps.db
+      .update(schema.computers)
+      .set({ status: 'stopping' })
+      .where(
+        and(
+          eq(schema.computers.id, row.id),
+          notInArray(schema.computers.status, [...BUSY]),
+          row.containerId === null
+            ? isNull(schema.computers.containerId)
+            : eq(schema.computers.containerId, row.containerId),
+        ),
+      )
+      .returning();
+    if (!claimed) {
+      const [now] = await deps.db
+        .select({ status: schema.computers.status })
+        .from(schema.computers)
+        .where(eq(schema.computers.id, row.id));
+      throw now && BUSY.has(now.status) ? computerBusy(now.status) : computerChanged();
+    }
+    endStartWork(row.id);
+    await publishStatus(deps, claimed, 'stopping');
+    row = await stopMachine(deps, claimed, by).catch(async (error: unknown) => {
       deps.logger.warn({ err: error, computerId: row.id }, 'stop before reset failed');
       const [now] = await deps.db
         .select()
@@ -1216,6 +1334,7 @@ export async function destroyComputer(
       return now ?? row;
     });
   } else {
+    endStartWork(row.id);
     await deps.infra.bus
       .publish<CoderControl>(CODER_CONTROL_CHANNEL, { type: 'stop_all', computerId: row.id })
       .catch((error: unknown) =>
@@ -1223,25 +1342,23 @@ export async function destroyComputer(
       );
   }
   // A full reset on a provider that can retire the machine keeps it for
-  // RETIRED_COMPUTER_DAYS instead (computer-retire.ts); the row gets a new
-  // machine key, so its next start makes a new machine.
-  if (options.signIns && retainsOnReset(machines) && row.containerId) {
-    if (row.provider === machines.name) {
-      try {
-        const { computer } = await retireMachine(deps, machines, row, {
-          checkpointId: options.checkpointId ?? null,
-          by,
-          reason: 'reset',
-        });
-        return computer;
-      } catch (error) {
-        if (error instanceof DomainError) throw error;
-        const message = failureText(deps, error);
-        deps.logger.error({ err: error, computerId: row.id }, 'computer reset failed');
-        await setStatus(deps, row, 'error', {}, message);
-        throw computerUnavailable(`The computer could not be reset: ${message}`);
-      }
-    }
+  // RETIRED_COMPUTER_DAYS instead (computer-retire.ts), unless the member asked
+  // to delete it now; the row gets a new machine key, so its next start makes
+  // a new machine. It answers only once the old machine is out of reach, or
+  // says it failed and changed nothing.
+  if (
+    options.signIns &&
+    !options.deleteOld &&
+    retainsOnReset(machines) &&
+    row.containerId &&
+    row.provider === machines.name
+  ) {
+    const { computer } = await retireMachine(deps, machines, row, {
+      checkpointId: options.checkpointId ?? null,
+      by,
+      reason: 'reset',
+    });
+    return computer;
   }
   if (row.agentUrl && row.agentToken && row.containerId) {
     try {
@@ -1257,12 +1374,14 @@ export async function destroyComputer(
       throw computerUnavailable(`The computer could not be reset: ${message}`);
     }
   }
-  return setStatus(deps, row, 'stopped', {
+  const reset = await setStatus(deps, row, 'stopped', {
     containerId: null,
     agentUrl: null,
     agentToken: null,
     volumeName: row.volumeName ?? volumeName(row.id),
   });
+  await fenceComputer(deps, row);
+  return reset;
 }
 
 /**
@@ -1281,7 +1400,7 @@ export async function checkpointBeforeReset(
 ): Promise<string | null> {
   const machines = provider(deps);
   if (!machines.checkpoint || !row.agentUrl || !row.agentToken) return null;
-  if (options.signIns && !retainsOnReset(machines)) return null;
+  if (options.signIns && (options.deleteOld || !retainsOnReset(machines))) return null;
   if (machines.name !== row.provider || !row.containerId) return null;
   try {
     return await machines.checkpoint(
@@ -1955,6 +2074,109 @@ export const HOSTED_FAILURE = 'something went wrong on our side. Try again short
  * self-hosted owner runs the machine themselves and reads the real reason.
  */
 function failureText(deps: AppDeps, error: unknown) {
+  return hostedMachines(deps) ? HOSTED_FAILURE : errorText(error);
+}
+
+/** `HOSTED_FAILURE` as a sentence of its own. */
+export const HOSTED_FAILURE_SENTENCE = HOSTED_FAILURE[0]!.toUpperCase() + HOSTED_FAILURE.slice(1);
+
+function hostedMachines(deps: Pick<AppDeps, 'config' | 'logger'>) {
   const machines = computerProvider(deps);
-  return machines && provisionsInBackground(machines) ? HOSTED_FAILURE : errorText(error);
+  return !!machines && provisionsInBackground(machines);
+}
+
+/**
+ * Text that names the hosted service's sandbox provider or its hosts: the
+ * provider's API errors, its machines' names and URLs (a socket that could
+ * not reach one says its host name).
+ */
+const PROVIDER_WORDS = /sprite|fly\.io|fly\.dev|flyctl/i;
+
+function namesProvider(error: unknown): boolean {
+  return error instanceof SpritesApiError || PROVIDER_WORDS.test(errorText(error));
+}
+
+/**
+ * A failure's text where its reader is the member or their Bot (a reset's
+ * rescue, a checkout's error, a coding session's end, a sign-in, a tool's
+ * result), for a failure that is not only the provider's: git's own words, an
+ * agent's refusal and the server's own reasons stay as they are. On the
+ * hosted service, one that comes from the sandbox provider or names it reads
+ * `HOSTED_FAILURE` instead (`inline`: after a colon), as `failureText` does,
+ * and the real failure goes to the log. Self-hosted, the text as it is.
+ */
+export function shownFailure(
+  deps: Pick<AppDeps, 'config' | 'logger'>,
+  error: unknown,
+  { inline = false }: { inline?: boolean } = {},
+): string {
+  if (!hostedMachines(deps) || !namesProvider(error)) return errorText(error);
+  deps.logger.warn({ err: error }, 'a failure on the hosted computer, shown in plain words');
+  return inline ? HOSTED_FAILURE : HOSTED_FAILURE_SENTENCE;
+}
+
+/**
+ * The agent client of a hosted computer, whose failures read as
+ * `shownFailure` says: its requests and sockets go to the provider's URL
+ * for the machine, so a connection that fails names that host. An agent
+ * error keeps its status and code. The real failure goes to the log.
+ */
+function quietAgent(
+  deps: AppDeps,
+  agent: ComputerAgentClient,
+  computerId: string,
+): ComputerAgentClient {
+  const quiet = (error: unknown): unknown => {
+    if (!namesProvider(error)) return error;
+    deps.logger.warn({ err: error, computerId }, 'the computer agent could not be reached');
+    return error instanceof AgentError
+      ? new AgentError(error.status, HOSTED_FAILURE_SENTENCE, error.code)
+      : new Error(HOSTED_FAILURE_SENTENCE);
+  };
+  const said = (text: string) => {
+    if (!PROVIDER_WORDS.test(text)) return text;
+    deps.logger.warn({ computerId, error: text }, 'the computer agent could not be reached');
+    return HOSTED_FAILURE_SENTENCE;
+  };
+  const rethrow = (error: unknown): never => {
+    throw quiet(error);
+  };
+  const wrapped: Record<string, unknown> = { ...agent };
+  for (const [key, value] of Object.entries(agent)) {
+    if (typeof value !== 'function' || key === 'socket') continue;
+    wrapped[key] = (...args: unknown[]) => {
+      try {
+        const out: unknown = (value as (...a: unknown[]) => unknown)(...args);
+        return out instanceof Promise ? out.catch(rethrow) : out;
+      } catch (error) {
+        return rethrow(error);
+      }
+    };
+  }
+  const quieter = <T extends { error?: string }>(info: T): T =>
+    info.error ? { ...info, error: said(info.error) } : info;
+  const client = wrapped as unknown as ComputerAgentClient;
+  client.mcpStdio = (launch, handlers, options) =>
+    agent
+      .mcpStdio(launch, { ...handlers, exit: (info) => handlers.exit(quieter(info)) }, options)
+      .catch(rethrow);
+  client.coder = (start, handlers, options) =>
+    agent
+      .coder(
+        start,
+        {
+          ...handlers,
+          exit: (info) => handlers.exit(quieter(info)),
+          ...(handlers.error ? { error: (message) => handlers.error!(said(message)) } : {}),
+        },
+        options,
+      )
+      .then((proc) => {
+        const started = proc.started.catch(rethrow);
+        // Unread unless the caller waits for it, as the agent's own.
+        started.catch(() => {});
+        return { ...proc, started };
+      })
+      .catch(rethrow);
+  return client;
 }

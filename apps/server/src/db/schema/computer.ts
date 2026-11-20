@@ -31,6 +31,13 @@ export const computers = pgTable(
       .references(() => users.id),
     provider: computerProvider('provider').notNull().default('docker'),
     spec: jsonb('spec').notNull().default({}),
+    /**
+     * What names the machine where the provider names it (Sprites), instead of
+     * the row's id (`ComputerSpec.machineKey`): a full reset that keeps the
+     * old machine gives the row a new one, so its next machine is a new one.
+     * A column of its own, not part of `spec`, which many paths write whole.
+     */
+    machineKey: text('machine_key'),
     status: text('status').notNull(),
     containerId: text('container_id'),
     agentUrl: text('agent_url'),
@@ -111,12 +118,14 @@ export const computerUsageIntervals = pgTable(
  * good by the retired-computers job (services/computer-retire.ts). Only on a
  * provider that can retire a machine (Sprites); Docker removes it at once.
  *
- * `status`: `retiring` (recorded, the provider not yet done), `retired`,
- * `deleting` (claimed by the job), `deleted`, `restoring` (an operator's
- * restore under way) or `restored` (the member's computer again). The row
+ * `status`: `retiring` (recorded; out of reach once `sealed_at` is set, the
+ * steps inside it not yet done), `retired`, `deleting` (claimed by the job),
+ * `deleted`, `restoring` (an operator's restore under way, leased by
+ * `next_attempt_at`) or `restored` (the member's computer again). The row
  * outlives the machine as the record of it. The organization cannot be
- * deleted while it has rows (`restrict`): its deletion purges them first, so
- * no machine is left behind unrecorded.
+ * deleted while it has rows (`restrict`): there is no organization deletion
+ * yet, and whatever adds one must call `purgeRetiredComputers` first, so no
+ * machine is left behind unrecorded.
  */
 export const retiredComputers = pgTable(
   'retired_computers',
@@ -144,6 +153,13 @@ export const retiredComputers = pgTable(
     attempts: integer('attempts').notNull().default(0),
     /** When the job may next take it (a retry's backoff, or a claim's lease). */
     nextAttemptAt: timestamptz('next_attempt_at'),
+    /** When the machine was taken out of reach (`ComputerProvider.retire`). */
+    sealedAt: timestamptz('sealed_at'),
+    /**
+     * When the job stopped retrying it after `RETIRED_MAX_ATTEMPTS`; the sweep
+     * leaves it alone until an operator retries it (`openbots computers retry`).
+     */
+    gaveUpAt: timestamptz('gave_up_at'),
     lastAttemptAt: timestamptz('last_attempt_at'),
     lastError: text('last_error'),
     deletedAt: timestamptz('deleted_at'),

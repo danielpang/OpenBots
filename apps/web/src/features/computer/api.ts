@@ -77,9 +77,22 @@ export const prepareReset = () =>
 export const resetCheck = (requestId: string) =>
   send<ResetCheck>('GET', `/api/v1/computer/reset/${encodeURIComponent(requestId)}`);
 
-/** Resets the computer to an empty home, after a finished check. */
-export const resetComputer = (requestId: string, resetSignIns: boolean) =>
-  send<unknown>('POST', '/api/v1/computer/reset', { requestId, confirm: true, resetSignIns });
+/**
+ * Resets the computer to an empty home, after a finished check. With
+ * `deleteOldComputer` (only with `resetSignIns`), the old computer is deleted
+ * now rather than kept for support; the field is sent only when it is set.
+ */
+export const resetComputer = (
+  requestId: string,
+  resetSignIns: boolean,
+  deleteOldComputer = false,
+) =>
+  send<unknown>('POST', '/api/v1/computer/reset', {
+    requestId,
+    confirm: true,
+    resetSignIns,
+    ...(resetSignIns && deleteOldComputer ? { deleteOldComputer: true } : {}),
+  });
 
 export type ComputerSettings = components['schemas']['ComputerSettings'];
 

@@ -115,6 +115,13 @@ export const SPRITES_AGENT_SERVICE = 'openbots-agent';
  * the Sprite while it is there.
  */
 export const SPRITES_RETIRED_LABEL = 'openbots-retired';
+/**
+ * A file `retireInside` writes before it drops the holds: a hold whose command
+ * finds it after placing its task takes the task back, so of a hold and a
+ * retire racing, either the retire sees the hold or the hold sees the file.
+ * Root's to write; anyone may test for it. `unretire` removes it.
+ */
+export const SPRITES_RETIRED_MARKER = '/opt/openbots/retired';
 /** A retired Sprite's egress policy: nothing at all. */
 export const SPRITES_DENY_ALL: SpriteEgressPolicy = { rules: [{ domain: '*', action: 'deny' }] };
 /**
@@ -345,6 +352,15 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     }
   }
 
+  /**
+   * Whether `key` is a Sprite name this provider gives: the prefix, a dash,
+   * then letters and digits only. No computer id or machine key (a UUID, with
+   * four dashes) can read as one, since the prefix is at most 16 characters.
+   */
+  const isOwnName = (key: string) =>
+    key.startsWith(`${prefix}-`) && /^[a-z0-9]+$/.test(key.slice(prefix.length + 1));
+  /** Sprites this process retired; `agent` refuses them without a call. */
+  const retiredHere = new Set<string>();
   const nameOf = (ref: ComputerRef) =>
     ref.provider === 'sprites' && ref.containerId ? ref.containerId : null;
   const required = (ref: ComputerRef) => {
@@ -363,7 +379,9 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     name: 'sprites',
     ...(options.provision ? { version: options.provision.version } : {}),
     async create(spec) {
-      const name = spriteName(spec.machineKey ?? spec.computerId, prefix);
+      const key = spec.machineKey ?? spec.computerId;
+      // A key that is already one of our names (a restored Sprite's) names it as it is.
+      const name = isOwnName(key) ? key : spriteName(key, prefix);
       // A Sprite left from an earlier row (same id), or kept by a reset that
       // kept the sign-ins: made ready again, files kept. A retired one is
       // put back with `unretire` first, never here by accident.
@@ -445,31 +463,28 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       const info = await api.get(name);
       return info && !isRetired(info) ? 'running' : 'missing';
     },
-    agent: (ref) =>
-      createAgentClient({
+    agent: (ref) => {
+      // A Sprite this process retired is refused without a call; the server
+      // also refuses the reference itself (its fence), in every process.
+      const name = nameOf(ref);
+      if (name && retiredHere.has(name)) throw new SpriteRetiredError(name);
+      return createAgentClient({
         url: ref.agentUrl,
         token: ref.agentToken,
         ...(urlAuth === 'sprite' ? { proxyToken: options.token } : {}),
-      }),
+      });
+    },
     async hold(ref, holdName, seconds) {
       const name = await serving(ref);
       const task = holdTask(holdName);
       const expire = Math.max(1, Math.min(SPRITES_MAX_HOLD_SECONDS, Math.round(seconds)));
-      const out = await run(
-        name,
-        [
-          ...tasksCurl('PUT', `/v1/tasks/${task}`),
-          '-H',
-          'content-type: application/json',
-          '-d',
-          JSON.stringify({ expire }),
-          '-o',
-          '/dev/null',
-          '-w',
-          '%{http_code}',
-        ],
-        'Holding the Sprite',
-      );
+      // The metadata said it is not retired, but a retire may begin before
+      // the task is placed: the command takes it back if it finds the
+      // marker `retireInside` writes before it drops the holds.
+      const out = (
+        await run(name, holdCommand(task, JSON.stringify({ expire })), 'Holding the Sprite')
+      ).trim();
+      if (out === 'retired') throw new SpriteRetiredError(name);
       if (out !== '200' && out !== '201') throw new Error(`Holding the Sprite failed: HTTP ${out}`);
     },
     async release(ref, holdName) {
@@ -484,38 +499,51 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     restore: (ref, id) => api.restoreCheckpoint(required(ref), id),
     listCheckpoints: (ref) => api.listCheckpoints(required(ref)),
     applyEgressPolicy: async (ref, policy) => api.setNetworkPolicy(await serving(ref), policy),
-    // The label goes first, so a hold or a start racing with this is refused
-    // from then on; then our holds, so it pauses; then the agent and its
-    // token, so nothing that knew the token reaches anything; then the URL
-    // goes private and the egress policy denies everything. Each step is
-    // safe to repeat, so a retry after a failure part way finishes the job.
-    // A Sprite already gone has nothing to retire.
+    // Reach is cut first, with metadata calls that neither wake the Sprite
+    // nor run anything inside it: the label (from then on a hold, a start or
+    // a create is refused), the URL private (no request from outside reaches
+    // the agent), and the egress policy that denies everything. Each step is
+    // safe to repeat. A Sprite already gone has nothing to retire.
     async retire(ref) {
       const name = required(ref);
       const info = await api.get(name);
       if (!info) return;
+      retiredHere.add(name);
       const labels = info.labels ?? [];
       if (!labels.includes(SPRITES_RETIRED_LABEL)) {
         await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL]);
       }
-      if (info.status === 'running') {
-        // `holds` skips a retired Sprite, so these are listed directly.
-        const out = await run(name, tasksCurl('GET', '/v1/tasks'), 'Listing holds');
-        const listed = (JSON.parse(out || '{}') as { tasks?: { name?: string }[] }).tasks ?? [];
-        for (const task of listed) {
-          if (task.name?.startsWith(SPRITES_HOLD_PREFIX)) await deleteTask(name, task.name);
-        }
-      }
-      await run(name, asRoot(disableAgent()), 'Stopping the retired agent');
       if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite');
       await api.setNetworkPolicy(name, SPRITES_DENY_ALL);
     },
+    // Then, inside it (exec goes through the Sprites API, not the Sprite's
+    // own network, so the deny-all policy does not stop it): the marker that
+    // turns away a racing hold, our holds, so it pauses, and the agent and
+    // its token, so nothing that knew the token reaches anything even if the
+    // URL were opened again. Only on a Sprite `retire` labelled.
+    async retireInside(ref) {
+      const name = required(ref);
+      const info = await api.get(name);
+      if (!info) return;
+      if (!isRetired(info)) throw new Error(`The Sprite ${name} is not retired`);
+      await run(name, asRoot(markRetired()), 'Marking the Sprite retired');
+      // `holds` skips a retired Sprite, so these are listed directly.
+      const out = await run(name, tasksCurl('GET', '/v1/tasks'), 'Listing holds');
+      const listed = (JSON.parse(out || '{}') as { tasks?: { name?: string }[] }).tasks ?? [];
+      for (const task of listed) {
+        if (task.name?.startsWith(SPRITES_HOLD_PREFIX)) await deleteTask(name, task.name);
+      }
+      await run(name, asRoot(disableAgent()), 'Stopping the retired agent');
+    },
+    // The label goes last: until then the Sprite is still refused.
     async unretire(ref) {
       const name = required(ref);
       const info = await api.get(name);
       if (!info) throw new Error(`The Sprite ${name} is gone`);
       await api.setUrlAuth(name, urlAuth);
       await api.setNetworkPolicy(name, egress);
+      await run(name, asRoot(`rm -f -- ${SPRITES_RETIRED_MARKER}`), 'Clearing the retired mark');
+      retiredHere.delete(name);
       const labels = info.labels ?? [];
       if (labels.includes(SPRITES_RETIRED_LABEL)) {
         await api.setLabels(
@@ -539,6 +567,36 @@ function tasksCurl(method: string, path: string): string[] {
     method,
     `http://sprite${path}`,
   ];
+}
+
+/**
+ * Places the hold `task`, then takes it back and prints `retired` if the
+ * Sprite is marked retired (`retireInside`), else prints the HTTP status.
+ */
+function holdCommand(task: string, body: string): string[] {
+  return [
+    'bash',
+    '-c',
+    [
+      'code=$(curl -sS --unix-socket /.sprite/api.sock -X PUT "http://sprite/v1/tasks/$1" ' +
+        '-H "content-type: application/json" -d "$2" -o /dev/null -w "%{http_code}") || exit 1',
+      'if [ -e "$3" ]; then',
+      '  curl -sS --unix-socket /.sprite/api.sock -X DELETE "http://sprite/v1/tasks/$1" -o /dev/null',
+      '  echo retired; exit 0',
+      'fi',
+      'echo "$code"',
+    ].join('\n'),
+    'openbots-hold',
+    task,
+    body,
+    SPRITES_RETIRED_MARKER,
+  ];
+}
+
+/** Writes the retired marker. Run as root. */
+function markRetired(): string {
+  const dir = SPRITES_RETIRED_MARKER.slice(0, SPRITES_RETIRED_MARKER.lastIndexOf('/'));
+  return [`mkdir -p -- ${dir}`, `touch -- ${SPRITES_RETIRED_MARKER}`].join('\n');
 }
 
 function holdTask(holdName: string) {

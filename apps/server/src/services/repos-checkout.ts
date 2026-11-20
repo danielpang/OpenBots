@@ -7,8 +7,9 @@ import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { SYSTEM_ACTOR } from './audit.js';
-import { agentFor, startComputer } from './computer.js';
+import { agentFor, computerOff, shownFailure, startComputer } from './computer.js';
 import { computerRefused, computerWorkRefusal } from './computer-admission.js';
+import { fenceOf, isFenced } from './computer-fence.js';
 import { parseRepoUrl, type ParsedRepoUrl } from './repos.js';
 import {
   FETCH_USERNAME,
@@ -787,7 +788,7 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
       .returning();
     return { ...ready!, defaultBranch: branch };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = shownFailure(deps, error);
     await deps.db
       .update(schema.repoCheckouts)
       .set({ state: 'error', error: message.slice(0, 2_000), updatedAt: new Date() })
@@ -842,7 +843,13 @@ export interface RunningComputer {
   agent: ComputerAgentClient;
 }
 
-/** The computer when it is running, never starting it. */
+/**
+ * The computer when it is running, never starting it; for the background
+ * jobs a start queues (the reconcile and the scan) and the refresh. Its agent
+ * asks the row again before each call: once the computer stopped, or a reset
+ * took its machine away, the job's next call fails (`COMPUTER_OFF`) instead
+ * of waking a paused Sprite or reaching a retired one.
+ */
 export async function runningOn(
   deps: AppDeps,
   computerId: string,
@@ -855,8 +862,37 @@ export async function runningOn(
   return {
     computer,
     owner: { id: computer.ownerId, workspaceId: computer.workspaceId },
-    agent: agentFor(deps, computer),
+    agent: whileRunning(deps, computer, agentFor(deps, computer)),
   };
+}
+
+/** `agent`, whose calls each check first that `computer` still runs on the same machine. */
+function whileRunning(
+  deps: AppDeps,
+  computer: ComputerRow,
+  agent: ComputerAgentClient,
+): ComputerAgentClient {
+  const machine = fenceOf(computer.agentToken);
+  const check = async () => {
+    const [now] = await deps.db
+      .select({ status: schema.computers.status, agentToken: schema.computers.agentToken })
+      .from(schema.computers)
+      .where(eq(schema.computers.id, computer.id));
+    if (now?.status !== 'running' || fenceOf(now.agentToken) !== machine || isFenced(computer)) {
+      throw computerOff();
+    }
+  };
+  return new Proxy(agent, {
+    get(target, prop, receiver) {
+      const value: unknown = Reflect.get(target, prop, receiver);
+      // `socket` only names the URL; the proxies that dial it check for themselves.
+      if (typeof value !== 'function' || prop === 'socket') return value;
+      return async (...args: unknown[]) => {
+        await check();
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
 }
 
 /** The runner's git context on `on`, for `repo` (no credential is served without one). */

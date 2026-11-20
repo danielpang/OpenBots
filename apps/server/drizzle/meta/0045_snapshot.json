@@ -3288,6 +3288,12 @@
           "notNull": true,
           "default": "'{}'::jsonb"
         },
+        "machine_key": {
+          "name": "machine_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -3476,6 +3482,18 @@
         },
         "next_attempt_at": {
           "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sealed_at": {
+          "name": "sealed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gave_up_at": {
+          "name": "gave_up_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

@@ -12,7 +12,7 @@ import { schema } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { SYSTEM_ACTOR } from './audit.js';
 import { enqueueCoderJob } from './coder-jobs.js';
-import { agentFor, startComputer } from './computer.js';
+import { agentFor, shownFailure, startComputer } from './computer.js';
 import {
   COMPUTER_REFUSED_STATUS,
   computerRefused,
@@ -48,8 +48,6 @@ type Owner = { id: string; workspaceId: string };
 export const RESCUE_TTL_MS = 10 * 60_000;
 /** Session statuses whose worktree rescue leaves alone: the agent is working there. */
 const LIVE_SESSION = ['starting', 'running', 'waiting'];
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -146,15 +144,16 @@ async function rescueOne(
     note,
   });
   const main = checkout.path;
+  const said = (error: unknown, inline = false) => shownFailure(ctx.deps, error, { inline });
   try {
     if (!(await onDisk(ctx, main))) return [result(null, false, NOT_ON_COMPUTER)];
   } catch (error) {
-    return [result(null, false, `Could not reach the computer: ${errorText(error)}`)];
+    return [result(null, false, `Could not reach the computer: ${said(error, true)}`)];
   }
   try {
     await assertRunnable(ctx, main, repo);
   } catch (error) {
-    return [result(null, false, errorText(error))];
+    return [result(null, false, said(error))];
   }
   // What the remote has now, so commits already pushed are not saved twice.
   await runGit(ctx, ['-C', main, 'fetch', '--prune', 'origin']);
@@ -212,7 +211,7 @@ async function rescueOne(
       });
       out.push(result(name, true, `Saved ${what}${where} to ${name}`));
     } catch (error) {
-      out.push(result(name, false, `Could not save ${what}${where}: ${errorText(error)}`));
+      out.push(result(name, false, `Could not save ${what}${where}: ${said(error, true)}`));
     }
   }
   return out.length ? out : [result(null, false, NOTHING_TO_SAVE)];
@@ -358,7 +357,7 @@ export async function runRescueJob(
   try {
     results = await rescueRepos(deps, job.ownerId, job.computerId);
   } catch (err) {
-    error = errorText(err);
+    error = shownFailure(deps, err);
     if (err instanceof DomainError && err.status === COMPUTER_REFUSED_STATUS) {
       // Not a fault: the organization's plan or limits. Logged by code only.
       refused = err.code;
