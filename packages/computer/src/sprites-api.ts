@@ -36,6 +36,13 @@ import type { ComputerCheckpoint, EgressPolicy, EgressRule } from './types.js';
 //   reads as exit 0) are read from the SDK's own socket (`socketOf`). Without
 //   that socket (a later SDK) a timed out command is still signalled and its
 //   connection closed, and `max_run_after_disconnect` still ends it.
+//
+// The SDK sends "client signals" with its requests to the Sprites API: a
+// User-Agent naming the SDK version and, unless SPRITES_CLIENT_SIGNALS is 0,
+// whether the process has a terminal, its parent's kind, CI, and the coding
+// agent it detects from the environment (Fly-Client-* headers). A server has
+// no business reporting those, so they are off unless the operator set
+// SPRITES_CLIENT_SIGNALS (docs/SELF_HOSTING.md). The User-Agent stays.
 
 /** `cold` and `warm` are paused; a request to the Sprite or the API wakes it. */
 export type SpriteStatus = 'cold' | 'warm' | 'running' | (string & {});
@@ -162,6 +169,8 @@ export function createSpritesApi({
   writeTimeoutMs = WRITE_TIMEOUT_MS,
   checkpointTimeoutMs = CHECKPOINT_TIMEOUT_MS,
 }: SpritesApiOptions): SpritesApi {
+  // Before the SDK's first request, when it reads this once for the process.
+  if (!process.env.SPRITES_CLIENT_SIGNALS?.trim()) process.env.SPRITES_CLIENT_SIGNALS = '0';
   const base = baseUrl.replace(/\/+$/, '');
   // The SDK's own limit covers get, delete and the URL settings; its create
   // has a fixed two minutes. Everything else is limited here.
