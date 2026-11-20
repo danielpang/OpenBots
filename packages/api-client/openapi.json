@@ -313,7 +313,11 @@
           },
           "publicArtifacts": {
             "type": "integer",
-            "description": "How many Artifacts are public now: the links that turning `publicArtifactsEnabled` off would stop"
+            "description": "How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop"
+          },
+          "publicLinksStopped": {
+            "type": "integer",
+            "description": "Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off"
           },
           "ceilings": {
             "type": ["object", "null"],

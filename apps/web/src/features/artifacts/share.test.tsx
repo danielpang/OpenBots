@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PublicLinksSetting, stopLinksText } from '../settings/admin-settings.js';
+import { PublicLinksSetting, stopLinksText, stoppedLinksText } from '../settings/admin-settings.js';
 import { ShareControl, type ArtifactSharing } from './share.js';
 import { SharedArtifactsPage, type SharedArtifact } from './shared-page.js';
 
@@ -23,7 +23,11 @@ const server = vi.hoisted(() => {
     sharingOn: true,
     sharing: null as unknown as ArtifactSharing,
     role: 'member' as 'owner' | 'admin' | 'member',
-    settings: { publicArtifactsEnabled: true, publicArtifacts: 0 },
+    settings: { publicArtifactsEnabled: true, publicArtifacts: 0 } as {
+      publicArtifactsEnabled: boolean;
+      publicArtifacts: number;
+      publicLinksStopped?: number;
+    },
     shared: [] as SharedArtifact[],
     /** Items after the first page of the shared list, served when it is asked for by cursor. */
     sharedNext: [] as SharedArtifact[],
@@ -77,10 +81,12 @@ beforeEach(() => {
     if (pathname === '/api/v1/settings') {
       if (request.method === 'PATCH') {
         const patch = body as { publicArtifactsEnabled: boolean };
+        const stopped = patch.publicArtifactsEnabled ? 0 : server.settings.publicArtifacts;
         server.settings = {
           publicArtifactsEnabled: patch.publicArtifactsEnabled,
           publicArtifacts: patch.publicArtifactsEnabled ? server.settings.publicArtifacts : 0,
         };
+        return Response.json({ ...server.settings, publicLinksStopped: stopped });
       }
       return Response.json(server.settings);
     }
@@ -391,9 +397,29 @@ describe('<PublicLinksSetting>', () => {
     ]);
   });
 
+  it('counts the public links again when the switch is turned off, and says afterwards how many stopped', async () => {
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 0 };
+    render(<PublicLinksSetting />);
+    await until(() => text().includes('Allow public links'), 'the switch');
+    // Someone makes two Artifacts public after the page loaded with none.
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 2 };
+    act(() => (host.querySelector('input[name="publicArtifactsEnabled"]') as HTMLElement).click());
+    await until(() => text().includes('Turn off public links?'), 'the confirmation');
+    expect(text()).toContain('2 public links stop working.');
+    expect(server.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+    // A third is made public while the admin reads it: the answer says three stopped.
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 3 };
+    click('Turn off public links');
+    await until(() => text().includes('3 public links stopped working.'), 'what stopped');
+    expect(server.settings.publicArtifactsEnabled).toBe(false);
+  });
+
   it('says the count plainly', () => {
     expect(stopLinksText(0)).toBe('No Artifact is public now.');
     expect(stopLinksText(1)).toContain('1 public link stops working.');
     expect(stopLinksText(2)).toContain('owner has to make it public again one by one');
+    expect(stoppedLinksText(0)).toBe('Public links are off. No link was public.');
+    expect(stoppedLinksText(1)).toBe('Public links are off. 1 public link stopped working.');
+    expect(stoppedLinksText(3)).toBe('Public links are off. 3 public links stopped working.');
   });
 });

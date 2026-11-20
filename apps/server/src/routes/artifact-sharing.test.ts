@@ -481,24 +481,80 @@ describe('sharing Artifacts (plan 21.11)', () => {
     await publicLinks(false);
   });
 
+  /** Requests waiting on a lock in this test's database. */
+  const untilWaiting = (n: number) =>
+    vi.waitFor(
+      async () => {
+        const rows = (await t.db.execute(
+          sql`select count(*)::int as n from pg_stat_activity
+              where datname = current_database() and wait_event_type = 'Lock'`,
+        )) as unknown as { n: number }[];
+        expect(rows[0]!.n).toBeGreaterThanOrEqual(n);
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+
+  /** Holds `id`'s row locked in a transaction until the returned function commits it. */
+  async function holdArtifact(id: string) {
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => (release = resolve));
+    let ready!: () => void;
+    const locked = new Promise<void>((resolve) => (ready = resolve));
+    const done = t.db.transaction(async (tx) => {
+      await tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, id)).for('update');
+      ready();
+      await open;
+    });
+    await locked;
+    return async () => {
+      release();
+      await done;
+    };
+  }
+
   it.skipIf(!process.env.DATABASE_URL)(
-    'leaves no public link behind when one is made public while links are turned off (real Postgres)',
+    'stops a link made public just before public links go off (real Postgres)',
     async () => {
       await publicLinks(true);
-      const id = await newArtifact('Racing public');
-      // Many attempts to make it public while an admin turns public links off.
-      const results = await Promise.all([
-        ...Array.from({ length: 5 }, () =>
-          share(alice, id, { visibility: 'public', confirmed: true }),
-        ),
-        call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false }),
-      ]);
-      for (const r of results) expect([200, 403]).toContain(r.status);
-      const settings = await json<{ publicArtifactsEnabled: boolean }>(
-        call(alice, 'GET', '/settings'),
+      const id = await newArtifact('Shared first');
+      // The share has taken its lock on the switch and waits for the Artifact's row...
+      const commit = await holdArtifact(id);
+      const shared = share(alice, id, { visibility: 'public', confirmed: true });
+      await untilWaiting(1);
+      // ...when an admin turns public links off: they wait for the share.
+      const off = call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false });
+      await untilWaiting(2);
+      await commit();
+      expect((await json<Sharing>(shared)).visibility).toBe('public');
+      const answer = await json<{ publicArtifactsEnabled: boolean; publicLinksStopped: number }>(
+        off,
       );
-      expect(settings.publicArtifactsEnabled).toBe(false);
-      expect(await visibilityOf(id)).not.toBe('public');
+      expect(answer).toMatchObject({ publicArtifactsEnabled: false, publicLinksStopped: 1 });
+      expect(await visibilityOf(id)).toBe('org');
+    },
+  );
+
+  it.skipIf(!process.env.DATABASE_URL)(
+    'refuses a link made public just after public links go off (real Postgres)',
+    async () => {
+      await publicLinks(true);
+      const already = await newArtifact('Already public');
+      await json<Sharing>(share(alice, already, { visibility: 'public', confirmed: true }));
+      const id = await newArtifact('Shared second');
+      // Turning them off has taken the lock on the switch and waits for a public Artifact's row...
+      const commit = await holdArtifact(already);
+      const off = call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false });
+      await untilWaiting(1);
+      // ...when its owner makes another one public: it waits for the switch.
+      const shared = share(alice, id, { visibility: 'public', confirmed: true });
+      await untilWaiting(2);
+      await commit();
+      expect(await json<{ publicLinksStopped: number }>(off)).toMatchObject({
+        publicLinksStopped: 1,
+      });
+      expect((await json<{ code: string }>(shared, 403)).code).toBe('PUBLIC_SHARING_OFF');
+      expect(await visibilityOf(already)).toBe('org');
+      expect(await visibilityOf(id)).toBe('private');
     },
   );
 
@@ -656,6 +712,34 @@ describe('sharing Artifacts (plan 21.11)', () => {
       true,
     );
     await publicLinks(false);
+  });
+
+  it('counts only working public links, before turning them off and after', async () => {
+    await publicLinks(true);
+    const down = await newArtifact('Taken down');
+    const live = await newArtifact('Still live');
+    for (const id of [down, live]) {
+      await json<Sharing>(share(alice, id, { visibility: 'public', confirmed: true }));
+    }
+    await t.db
+      .update(schema.artifacts)
+      .set({ takenDownAt: new Date() })
+      .where(eq(schema.artifacts.id, down));
+    // The taken down link already does not work: turning links off stops one.
+    const before = await json<{ publicArtifacts: number }>(call(alice, 'GET', '/settings'));
+    expect(before.publicArtifacts).toBe(1);
+    const off = await json<{ publicArtifacts: number; publicLinksStopped: number }>(
+      call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false }),
+    );
+    expect(off).toMatchObject({ publicArtifacts: 0, publicLinksStopped: 1 });
+    expect(await visibilityOf(live)).toBe('org');
+    // A change that stops nothing says so.
+    const again = await json<{ publicLinksStopped: number }>(
+      call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false }),
+    );
+    expect(again.publicLinksStopped).toBe(0);
+    // Only a change answers with it.
+    expect(await json(call(alice, 'GET', '/settings'))).not.toHaveProperty('publicLinksStopped');
   });
 
   it("opens an owner's private Artifact on the host with a token for that Artifact only", async () => {

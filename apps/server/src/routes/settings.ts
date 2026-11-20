@@ -42,7 +42,11 @@ const SettingsSchema = z
     }),
     publicArtifacts: z.number().int().openapi({
       description:
-        'How many Artifacts are public now: the links that turning `publicArtifactsEnabled` off would stop',
+        'How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop',
+    }),
+    publicLinksStopped: z.number().int().optional().openapi({
+      description:
+        'Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off',
     }),
     ceilings: z.object(LimitsSchema.shape).nullable().openapi({
       description:
@@ -163,14 +167,20 @@ export const settingsRoutes = createRouter()
         }
       }
       const actor = userActor(c.var.user);
-      const workspace = await db.transaction(async (tx) => {
-        const updated = await updateSettings(tx, current, patch);
-        // Off makes every public link an organization one, in this
-        // transaction: on again brings none of them back (plan 21.11).
-        const stopped =
-          patch.publicArtifactsEnabled === false
-            ? await stopPublicLinks(tx, updated.id, actor)
-            : undefined;
+      const { workspace, stopped } = await db.transaction(async (tx) => {
+        // Merged from the organization's row as locked here, so a change
+        // another admin made meanwhile stays (`updateSettings`).
+        const { after: updated } = await updateSettings(tx, current.id, patch);
+        // Whenever the setting this leaves is off, every public link becomes
+        // an organization one, in this transaction: on again brings none of
+        // them back (plan 21.11). Asked of the written row, not the patch, so
+        // a link made public while another admin had them on is stopped even
+        // by a change that did not name the setting. It takes the lock that
+        // shares wait on after the row's, as it always has; when nothing is
+        // public it changes nothing.
+        const stopped = effectiveSettings(config, updated).publicArtifactsEnabled
+          ? 0
+          : await stopPublicLinks(tx, updated.id, actor);
         await recordAudit(tx, {
           workspaceId: updated.id,
           actor,
@@ -179,10 +189,13 @@ export const settingsRoutes = createRouter()
           targetId: updated.id,
           metadata: stopped ? { ...patch, publicLinksStopped: stopped } : patch,
         });
-        return updated;
+        return { workspace: updated, stopped };
       });
       // Their calls are refused from now on; their running children stop too (S-1).
       if (patch.customStdioEnabled === false) await stopCustomStdio(c.var.deps, workspace.id);
-      return c.json(await settingsOf(c.var.deps, workspace), 200);
+      return c.json(
+        { ...(await settingsOf(c.var.deps, workspace)), publicLinksStopped: stopped },
+        200,
+      );
     },
   );

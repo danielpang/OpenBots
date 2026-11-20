@@ -387,7 +387,7 @@ const publicLinksLock = (db: Db, workspaceId: string, mode: 'share' | 'alone') =
  * organization becomes an organization one, in the caller's transaction, so
  * turning them on again brings no old link back; each owner makes theirs
  * public again. Audited per Artifact as `artifact.visibility`. Returns how
- * many it changed.
+ * many working links it stopped (one the service took down was not working).
  */
 export async function stopPublicLinks(
   tx: Db,
@@ -401,7 +401,7 @@ export async function stopPublicLinks(
     .where(
       and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.visibility, 'public')),
     )
-    .returning({ id: schema.artifacts.id });
+    .returning({ id: schema.artifacts.id, takenDownAt: schema.artifacts.takenDownAt });
   if (changed.length) {
     await tx.insert(schema.auditLog).values(
       changed.map((row) => ({
@@ -415,16 +415,24 @@ export async function stopPublicLinks(
       })),
     );
   }
-  return changed.length;
+  // A link the service took down already did not work: it is not one this stopped.
+  return changed.filter((row) => !row.takenDownAt).length;
 }
 
-/** How many of the organization's Artifacts are public now: the links turning them off stops. */
+/**
+ * How many of the organization's public links work now: the links turning
+ * public links off stops. One the service took down does not count.
+ */
 export async function countPublic(db: Db, workspaceId: string): Promise<number> {
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(schema.artifacts)
     .where(
-      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.visibility, 'public')),
+      and(
+        eq(schema.artifacts.workspaceId, workspaceId),
+        eq(schema.artifacts.visibility, 'public'),
+        isNull(schema.artifacts.takenDownAt),
+      ),
     );
   return Number(row?.n ?? 0);
 }
@@ -452,8 +460,9 @@ export const widens = (current: ArtifactVisibility, next: ArtifactVisibility) =>
  * widens it needs a person behind the request (`assertPerson`), judged
  * against the row as locked, so a script's narrowing never lands as a
  * widening of what the owner changed meanwhile. With `approvalId`, the
- * approval is used up here, once, and only for this Artifact. `public`
- * needs the organization's public links on, read under `publicLinksLock`.
+ * approval is used up here, once, and only for this Artifact, also when the
+ * share is then refused. `public` needs the organization's public links on,
+ * read under `publicLinksLock`.
  * Locked against concurrent writers; audited.
  */
 export async function setVisibility(
@@ -468,6 +477,7 @@ export async function setVisibility(
   } = {},
 ): Promise<SharingState> {
   requireArtifactHost(deps.config);
+  const refused: { error?: DomainError } = {};
   const artifact = await deps.db.transaction(async (tx) => {
     // Before the Artifact's lock, so it is always taken in the same order.
     if (change.visibility === 'public') await publicLinksLock(tx, owner.workspaceId, 'share');
@@ -496,15 +506,26 @@ export async function setVisibility(
     }
     if (change.visibility === 'public') {
       const workspace = await getOrganization(tx, row.workspaceId);
-      if (!effectiveSettings(deps.config, workspace).publicArtifactsEnabled) {
-        throw publicSharingOff();
+      const refusal = !effectiveSettings(deps.config, workspace).publicArtifactsEnabled
+        ? publicSharingOff()
+        : row.takenDownAt
+          ? takenDown()
+          : null;
+      if (refusal) {
+        // The owner approved making it public while that was allowed. Refused
+        // now, the approval stays used with nothing shared (this transaction
+        // commits its use), so public links on again do not revive it: the
+        // Bot asks again, and its owner answers again.
+        if (!options.approvalId) throw refusal;
+        refused.error = refusal;
+        return null;
       }
-      if (row.takenDownAt) throw takenDown();
     }
     return writeVisibility(tx, row, change.visibility, actor, {
       ...(options.approvalId ? { approvalId: options.approvalId } : {}),
     });
   });
+  if (!artifact) throw refused.error!;
   return sharingState(deps, owner, artifact);
 }
 

@@ -11753,8 +11753,10 @@ export interface components {
       customStdioEnabled: boolean;
       /** @description Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back. */
       publicArtifactsEnabled: boolean;
-      /** @description How many Artifacts are public now: the links that turning `publicArtifactsEnabled` off would stop */
+      /** @description How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop */
       publicArtifacts: number;
+      /** @description Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off */
+      publicLinksStopped?: number;
       /** @description The most each limit may be on the managed service; null on a self-hosted install, which has none */
       ceilings: {
         botsPerAccount: number;

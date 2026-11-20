@@ -155,7 +155,7 @@ describe('Skills API', () => {
   it('caps the library at the Skills-per-account limit', async () => {
     const carol = (await t.signUp('carol@example.com')).cookie!;
     const limit = async (skillsPerAccount: number) =>
-      updateSettings(t.db, await ensureWorkspace(t.db), { limits: { skillsPerAccount } });
+      updateSettings(t.db, (await ensureWorkspace(t.db)).id, { limits: { skillsPerAccount } });
     await limit(3);
     try {
       for (const name of ['One', 'Two', 'Three']) {

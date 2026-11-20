@@ -209,6 +209,47 @@ describe('a Bot asking to share an Artifact', () => {
     expect((await visibilityOf(artifactId)).visibility).toBe('private');
   });
 
+  it('refuses an approved public request once public links went off meanwhile, and uses the approval up', async () => {
+    await publicLinks(true);
+    const { bot, artifactId, approval } = await botAsking('Switched', { visibility: 'public' });
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+    // An admin turns public links off before the owner answers.
+    await publicLinks(false);
+    const decided = await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
+    expect(decided.status).toBe(200);
+    // The run goes on: the tool gets an error, and nothing is shared.
+    await until(async () => {
+      const [after] = await t.db.select().from(schema.runs).where(eq(schema.runs.id, run!.id));
+      expect(after!.status).toBe('completed');
+    });
+    const parts = (
+      await t.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
+    ).flatMap((m) => m.parts as MessagePart[]);
+    const result = parts.find((p) => p.type === 'tool_result') as {
+      result: unknown;
+      isError?: boolean;
+    };
+    expect(JSON.stringify(result.result)).toContain('has not turned on public links');
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    // The approval was for then: on again, it shares nothing.
+    const [used] = await t.db
+      .select()
+      .from(schema.approvals)
+      .where(eq(schema.approvals.id, approval.id));
+    expect(used!.consumedAt).toBeInstanceOf(Date);
+    await publicLinks(true);
+    const share = artifactServices(
+      t.ownerDeps,
+      { id: run!.id, chatId: bot.chatId },
+      { id: bot.id, ownerId, workspaceId },
+    ).share!;
+    await expect(share.apply({ id: artifactId, visibility: 'public' })).rejects.toThrow(
+      'has not approved',
+    );
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    await publicLinks(false);
+  });
+
   it('says plainly that sharing with the organization covers future versions too', async () => {
     const { approval } = await botAsking('Teammate', { visibility: 'org' });
     const [message] = await t.db

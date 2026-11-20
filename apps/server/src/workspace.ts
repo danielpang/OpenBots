@@ -220,21 +220,41 @@ export function raiseLimitHint(config: Pick<Config, 'deployment'>, what = 'it'):
     : `raise ${what} in Settings > Limits`;
 }
 
+/**
+ * Changes an organization's stored settings, merged over the row as locked
+ * here (`FOR NO KEY UPDATE`, inside a transaction of its own or the
+ * caller's), never over a copy read earlier: two admins changing different
+ * settings at once both keep their change, and the caller sees the settings
+ * it replaced as they were when it wrote. `change` is the fields to set, or
+ * a function of the stored settings that returns them. The lock is the one
+ * the update itself would take, so it leaves a key share lock (an insert
+ * whose foreign key names the organization, such as an audit row) free; a
+ * caller that needs more locks takes them after this one.
+ */
 export async function updateSettings(
   db: Db,
-  workspace: Workspace,
-  patch: StoredSettings,
-): Promise<Workspace> {
-  const current = storedSettings(workspace);
-  const next: StoredSettings = {
-    ...current,
-    ...patch,
-    limits: { ...current.limits, ...patch.limits },
-  };
-  const [row] = await db
-    .update(schema.workspaces)
-    .set({ settings: next })
-    .where(eq(schema.workspaces.id, workspace.id))
-    .returning();
-  return row!;
+  workspaceId: string,
+  change: StoredSettings | ((current: StoredSettings) => StoredSettings),
+): Promise<{ before: Workspace; after: Workspace }> {
+  return db.transaction(async (tx) => {
+    const [before] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .for('no key update');
+    if (!before) throw notFound('Organization not found');
+    const current = storedSettings(before);
+    const patch = typeof change === 'function' ? change(current) : change;
+    const next: StoredSettings = {
+      ...current,
+      ...patch,
+      limits: { ...current.limits, ...patch.limits },
+    };
+    const [after] = await tx
+      .update(schema.workspaces)
+      .set({ settings: next })
+      .where(eq(schema.workspaces.id, workspaceId))
+      .returning();
+    return { before, after: after! };
+  });
 }

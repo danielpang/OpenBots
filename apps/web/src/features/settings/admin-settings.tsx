@@ -144,24 +144,52 @@ export function stopLinksText(count: number): string {
   return `${links} working. Each of those Artifacts stays visible to your organization, and its owner has to make it public again one by one.`;
 }
 
+/** What turning public links off stopped, said once it is done. */
+export function stoppedLinksText(count: number): string {
+  if (count === 0) return 'Public links are off. No link was public.';
+  const links = count === 1 ? '1 public link' : `${count} public links`;
+  return `Public links are off. ${links} stopped working.`;
+}
+
 /**
  * Public links to Artifacts, for the whole organization (plan 21.11): off
  * until an owner or admin turns them on. Turning them off makes every public
- * Artifact visible to the organization only, so it asks first and says how
- * many links stop. Only when the server hosts Artifacts.
+ * Artifact visible to the organization only, so it counts them again first
+ * (one may have been shared since the page loaded), asks when there are any
+ * and says how many links stop, then says how many did. Only when the
+ * server hosts Artifacts.
  */
 export function PublicLinksSetting() {
+  const queryClient = useQueryClient();
   const capabilities = useQuery(capabilitiesQuery);
   const { data } = useQuery(settingsQuery);
   const save = useSaveSettings();
   const [confirming, setConfirming] = useState(false);
+  const [counting, setCounting] = useState(false);
+  const [stopped, setStopped] = useState<number | null>(null);
   if (!capabilities.data?.artifactSharing || !data) return null;
   // While a change is saving, show the value asked for, not the one before it.
   const asked = save.isPending ? save.variables?.publicArtifactsEnabled : undefined;
   const checked = asked ?? data.publicArtifactsEnabled;
   const turnOff = () => {
     setConfirming(false);
-    save.mutate({ publicArtifactsEnabled: false });
+    save.mutate(
+      { publicArtifactsEnabled: false },
+      { onSuccess: (settings) => setStopped(settings.publicLinksStopped ?? null) },
+    );
+  };
+  const askToTurnOff = async () => {
+    setCounting(true);
+    try {
+      const fresh = await queryClient.fetchQuery({ ...settingsQuery, staleTime: 0 });
+      if (fresh.publicArtifacts > 0) setConfirming(true);
+      else turnOff();
+    } catch {
+      // Unsure how many links would stop: ask, with the count the page has.
+      setConfirming(true);
+    } finally {
+      setCounting(false);
+    }
   };
   return (
     <section className="flex flex-col gap-3">
@@ -170,11 +198,11 @@ export function PublicLinksSetting() {
         <Switch
           name="publicArtifactsEnabled"
           checked={checked}
-          disabled={save.isPending || confirming}
+          disabled={save.isPending || confirming || counting}
           onChange={(event) => {
+            setStopped(null);
             if (event.target.checked) save.mutate({ publicArtifactsEnabled: true });
-            else if (data.publicArtifacts > 0) setConfirming(true);
-            else turnOff();
+            else void askToTurnOff();
           }}
         />
         <span className="flex flex-col gap-1">
@@ -198,6 +226,11 @@ export function PublicLinksSetting() {
             </Button>
           </div>
         </div>
+      )}
+      {stopped !== null && (
+        <p className="text-sm text-muted-foreground" role="status">
+          {stoppedLinksText(stopped)}
+        </p>
       )}
       {save.error && <p className="text-sm text-destructive">{save.error.message}</p>}
     </section>
