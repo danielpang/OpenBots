@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { Infra } from '../infra/index.js';
+import type { Logger } from '../logger.js';
 
 /** What a CLI command works with; main.ts makes it, tests make their own. */
 export interface CliContext {
@@ -11,6 +12,8 @@ export interface CliContext {
   infra: Pick<Infra, 'bus'>;
   /** One line of output. */
   write(line: string): void;
+  /** For the computer provider's warnings (`openbots computers`); a quiet one by default. */
+  logger?: Logger;
   /** For `openbots relay`'s presence check; the global fetch by default. */
   fetch?: typeof fetch;
 }

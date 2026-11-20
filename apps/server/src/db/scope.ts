@@ -49,10 +49,10 @@ import type { Db } from './client.js';
 //   openbots_system to the columns it reads); the App's webhook delivery
 //   then works in each.
 // - `artifactHostWorkspace`: the organization of a Bot by its public slug,
-//   through openbots_artifact_host_workspace() (drizzle/0048), for the
+//   through openbots_artifact_host_workspace() (drizzle/0049), for the
 //   artifact host, which then serves the request in it.
 // - `billingCustomerWorkspace`: the organization of a Stripe customer,
-//   through openbots_billing_customer_workspace() (drizzle/0045), for the
+//   through openbots_billing_customer_workspace() (drizzle/0046), for the
 //   managed build's Stripe webhook, which then works in it.
 // - Jobs carry the organization that queued them and run in it
 //   (infra/index.ts); realtime events carry it too, and the gateway and the
@@ -289,7 +289,7 @@ export async function githubInstallationWorkspaces(
 
 /**
  * The organization of a Stripe customer (openbots_billing_customer_workspace(),
- * drizzle/0045): Stripe's webhook names only the customer, so the managed
+ * drizzle/0046): Stripe's webhook names only the customer, so the managed
  * build's billing asks this first and then works in that organization.
  */
 export async function billingCustomerWorkspace(db: Db, customerId: string): Promise<string | null> {
@@ -301,7 +301,7 @@ export async function billingCustomerWorkspace(db: Db, customerId: string): Prom
 
 /**
  * The organization of a Bot by its public slug
- * (openbots_artifact_host_workspace(), drizzle/0048): the artifact host's
+ * (openbots_artifact_host_workspace(), drizzle/0049): the artifact host's
  * request names only the Bot, so it asks this first and then works in
  * that organization.
  */

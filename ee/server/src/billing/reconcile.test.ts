@@ -121,3 +121,67 @@ describe('reconciliation', () => {
     ).resolves.toEqual([{ name: 'ob-1', awakeSeconds: 60 }]);
   });
 });
+
+// A full reset on Sprites (computer-retire.ts) gives the member's computer a
+// new machine key, so its next Sprite has a new name, and keeps the old
+// Sprite, retired, under its old name. Both are the organization's: the
+// window's usage is split between them.
+describe('reconciliation after a full reset', () => {
+  let b: BillingApp;
+  let d: { org: string; id: string };
+  let computerD: string;
+  const machineKey = randomUUID();
+
+  beforeAll(async () => {
+    b = await billingApp();
+    d = await b.founder('dee@example.com', 'Dee Co');
+    computerD = (
+      await b.t.db
+        .insert(schema.computers)
+        .values({
+          workspaceId: d.org,
+          ownerId: d.id,
+          provider: 'sprites',
+          status: 'stopped',
+          spec: { machineKey },
+        })
+        .returning({ id: schema.computers.id })
+    )[0]!.id;
+    const retiredAt = new Date('2026-11-10T00:00:00Z');
+    await b.t.db.insert(schema.retiredComputers).values({
+      workspaceId: d.org,
+      ownerId: d.id,
+      computerId: computerD,
+      provider: 'sprites',
+      providerRef: spriteName(computerD),
+      status: 'retired',
+      retiredAt,
+      deleteAfter: new Date(retiredAt.getTime() + 7 * 24 * H * 1000),
+    });
+    await b.t.db.insert(schema.billingUsage).values({
+      workspaceId: d.org,
+      intervalId: randomUUID(),
+      periodStart: since,
+      userId: d.id,
+      seconds: 6 * H,
+      startedAt: new Date('2026-11-09T00:00:00Z'),
+      endedAt: new Date('2026-11-12T00:00:00Z'),
+    });
+  });
+  afterAll(() => b.t.close());
+
+  it("counts the member's new Sprite and the retired one as the organization's", async () => {
+    const found = await reconcile(
+      b.t.deps.db,
+      {
+        usageBetween: async () => [
+          { name: spriteName(computerD), awakeSeconds: 4 * H },
+          { name: spriteName(machineKey), awakeSeconds: 2 * H },
+        ],
+      },
+      since,
+      until,
+    );
+    expect(found).toEqual([]);
+  });
+});

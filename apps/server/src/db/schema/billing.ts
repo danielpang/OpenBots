@@ -17,7 +17,7 @@ import { workspaceId, workspaces } from './workspace.js';
 // Billing on the managed service (plan 21.10). The core owns the schema; the
 // managed build (ee/server billing) is the only reader and writer. Every
 // table carries `workspace_id` and is held to its organization by row-level
-// security (drizzle/0045). Every column added after the first is nullable or
+// security (drizzle/0046). Every column added after the first is nullable or
 // defaulted, so a row written now still loads later, and a value the code
 // does not recognise reads as the safe one (no plan, stop at the allowance).
 
@@ -101,7 +101,7 @@ export const billingPeriods = pgTable(
     paidSeats: integer('paid_seats').notNull(),
     /**
      * The plan with the dearest seat price paid for this period (`pro` or
-     * `team`; null before migration 0047, or with no paid plan, when the
+     * `team`; null before migration 0048, or with no paid plan, when the
      * period's plan stands in). A change of plan back within what this and
      * `paid_seats` cover costs nothing more.
      */

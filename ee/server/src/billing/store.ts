@@ -16,7 +16,7 @@ import {
 } from './plans.js';
 import { periodAt, type Period } from './periods.js';
 
-// The billing tables (core schema, drizzle/0045), read and written in the
+// The billing tables (core schema, drizzle/0046), read and written in the
 // organization's scope: every query names the organization, and row-level
 // security holds it there underneath. Checks followed by writes are single
 // statements or conditional updates, so two processes closing intervals at

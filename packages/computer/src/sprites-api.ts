@@ -56,6 +56,8 @@ export interface SpriteInfo {
   url: string;
   status: SpriteStatus;
   urlAuth?: SpriteUrlAuth;
+  /** The Sprite's labels; absent when it has none. */
+  labels?: string[];
 }
 
 /** The Sprites network policy has the shape of the provider's egress policy. */
@@ -91,6 +93,8 @@ export interface SpritesApi {
   /** A Sprite already gone is not an error. */
   delete(name: string): Promise<void>;
   setUrlAuth(name: string, auth: SpriteUrlAuth): Promise<void>;
+  /** Replaces the Sprite's labels (metadata only: it does not wake the Sprite). */
+  setLabels(name: string, labels: string[]): Promise<void>;
   setNetworkPolicy(name: string, policy: SpriteEgressPolicy): Promise<void>;
   /** Runs `argv` (no shell) and waits for it; a non-zero exit is a result, not an error. */
   exec(name: string, argv: string[], options?: SpriteExecOptions): Promise<SpriteExecResult>;
@@ -258,6 +262,9 @@ export function createSpritesApi({
     async setUrlAuth(name, auth) {
       await call('URL settings', name, timeoutMs, () => client.updateURLSettings(name, { auth }));
     },
+    async setLabels(name, labels) {
+      await call('labels', name, timeoutMs, () => client.updateSprite(name, { labels }));
+    },
     // Raw: see the header. The same endpoint and body the SDK sends.
     async setNetworkPolicy(name, policy) {
       await call('network policy', name, timeoutMs, async () => {
@@ -378,6 +385,7 @@ function info(sprite: Sprite): SpriteInfo {
     url: sprite.url ?? '',
     status: sprite.status ?? '',
     ...(auth === 'sprite' || auth === 'public' ? { urlAuth: auth } : {}),
+    ...(sprite.labels?.length ? { labels: [...sprite.labels] } : {}),
   };
 }
 
