@@ -106,7 +106,7 @@ export async function rescueRepos(
   const results: RepoRescueResult[] = [];
   for (const { checkout, repo } of rows) {
     results.push(
-      ...(await withCheckoutLock(repo.id, computerId, () =>
+      ...(await withCheckoutLock(deps, repo.id, computerId, () =>
         rescueOne(gitContextOn(deps, on, repo), repo, checkout, prefix, busy),
       )),
     );

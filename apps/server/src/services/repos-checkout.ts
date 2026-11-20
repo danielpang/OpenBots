@@ -3,9 +3,9 @@ import { posix } from 'node:path';
 import type { ComputerAgentClient } from '@openbots/computer';
 import { REPOS_DIR } from '@openbots/computer';
 import { REPO_FULL_NAME } from '@openbots/shared';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
-import { schema } from '../db/client.js';
+import { schema, sessionLockOf, type Db } from '../db/client.js';
 import { SYSTEM_ACTOR } from './audit.js';
 import { agentFor, computerOff, startComputer } from './computer.js';
 import { fenceOf, isFenced } from './computer-fence.js';
@@ -29,9 +29,11 @@ import {
 // Every git command runs through `runGit`: a `/coder` process of its own as
 // the `runner` user (uid 1801, group `coders`), whose environment a coding
 // session cannot read, and whose credential requests the runner answers
-// itself (git-credentials.ts, `runnerSessionIds`). One fetch per checkout runs at a time in this
-// process; two worker processes fetching the same repository at once is
-// left to git's own locks.
+// itself (git-credentials.ts, `runnerSessionIds`). One operation per
+// checkout runs at a time across every process (`withCheckoutLock`: a
+// Postgres advisory lock), so a start's reconcile and a coding session's
+// clone never run git on the same path at once, and every write of a
+// checkout's state says what state it expects to replace.
 
 type CheckoutDeps = AppDeps;
 export type RepoRow = typeof schema.repos.$inferSelect;
@@ -587,7 +589,8 @@ export function worktreePathFor(repoPath: string, branch: string): string {
   return posix.join(repoPath, '.worktrees', branchSlug(branch));
 }
 
-// One checkout operation at a time per (repository, computer) in this process.
+// One checkout operation at a time per (repository, computer), where the
+// database cannot lock across processes (PGlite: one process).
 const locks = new Map<string, Promise<unknown>>();
 
 /** For tests: forgets every checkout lock, as a fresh process would have none. */
@@ -595,12 +598,20 @@ export function resetCheckoutLocks(): void {
   locks.clear();
 }
 
-/** Runs `fn` alone among this process's operations on the checkout. */
+/**
+ * Runs `fn` alone among every process's operations on the checkout: under a
+ * Postgres advisory lock on the (repository, computer), held on a connection
+ * of its own, outside any transaction (db/client.ts `createDb`). Never call
+ * it inside itself for the same checkout.
+ */
 export function withCheckoutLock<T>(
+  deps: { db: Db },
   repoId: string,
   computerId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
+  const across = sessionLockOf(deps.db);
+  if (across) return across(`openbots:checkout:${repoId}:${computerId}`, fn);
   return locked(`${repoId}:${computerId}`, fn);
 }
 
@@ -665,7 +676,7 @@ export async function ensureCheckout(
     owner: { id: repo.ownerId, workspaceId: repo.workspaceId },
     repoFullName: remoteOf(repo).fullName,
   };
-  return locked(`${repoId}:${computerId}`, () => checkout(ctx, repo, computerId));
+  return withCheckoutLock(deps, repoId, computerId, () => checkout(ctx, repo, computerId));
 }
 
 /** A branch name git could have printed; anything else is not used. */
@@ -762,15 +773,17 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         error: null,
         updatedAt: new Date(),
       })
-      .where(eq(schema.repoCheckouts.id, row!.id))
+      // Only over its own `cloning`: a reset that marked it `missing` meanwhile stands.
+      .where(and(eq(schema.repoCheckouts.id, row!.id), eq(schema.repoCheckouts.state, 'cloning')))
       .returning();
-    return { ...ready!, defaultBranch: branch };
+    if (!ready) throw new Error('The checkout changed while it was being made; try again');
+    return { ...ready, defaultBranch: branch };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await deps.db
       .update(schema.repoCheckouts)
       .set({ state: 'error', error: message.slice(0, 2_000), updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.id, row!.id));
+      .where(and(eq(schema.repoCheckouts.id, row!.id), eq(schema.repoCheckouts.state, 'cloning')));
     throw error;
   }
 }

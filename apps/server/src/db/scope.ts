@@ -180,7 +180,12 @@ export function scopedDb<D extends Db>(base: D, fixed?: DbScope): D {
       tableNamesMap: internals._.tableNamesMap,
     } as never,
   );
-  const scoped = Object.assign(db, internals.close ? { close: internals.close } : {});
+  const lock = (internals as { withSessionLock?: unknown }).withSessionLock;
+  const scoped = Object.assign(
+    db,
+    internals.close ? { close: internals.close } : {},
+    lock ? { withSessionLock: lock } : {},
+  );
   bases.set(scoped, base);
   return scoped as unknown as D;
 }

@@ -87,7 +87,7 @@ export async function refreshStates(deps: AppDeps, computerId: string): Promise<
     );
   let fetched = 0;
   for (const { checkout, repo } of rows) {
-    const ok = await withCheckoutLock(repo.id, computerId, () =>
+    const ok = await withCheckoutLock(deps, repo.id, computerId, () =>
       refreshOne(deps, gitContextOn(deps, on, repo), repo, checkout),
     );
     if (ok) fetched++;
@@ -102,11 +102,14 @@ async function refreshOne(
   checkout: CheckoutRow,
 ): Promise<boolean> {
   const { path } = checkout;
+  // Only over a settled state: a clone under way, or a reset's `missing`, stands.
   const set = (values: Partial<CheckoutRow>) =>
     deps.db
       .update(schema.repoCheckouts)
       .set({ ...values, updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.id, checkout.id));
+      .where(
+        and(eq(schema.repoCheckouts.id, checkout.id), inArray(schema.repoCheckouts.state, SETTLED)),
+      );
   try {
     if (!(await onDisk(ctx, path))) {
       await set({ state: 'missing', error: null });
@@ -329,12 +332,19 @@ export async function reconcileComputer(
       ),
     );
   for (const { checkout, repo } of checkouts) {
-    await withCheckoutLock(repo.id, computerId, async () => {
-      if (await onDisk(gitContextOn(deps, on, repo), checkout.path)) return;
+    await withCheckoutLock(deps, repo.id, computerId, async () => {
+      // Read again under the lock: a clone another process finished
+      // meanwhile is on disk, and one under way is that job's.
+      const [now] = await deps.db
+        .select()
+        .from(schema.repoCheckouts)
+        .where(eq(schema.repoCheckouts.id, checkout.id));
+      if (!now || ['cloning', 'updating', 'missing'].includes(now.state)) return;
+      if (await onDisk(gitContextOn(deps, on, repo), now.path)) return;
       await deps.db
         .update(schema.repoCheckouts)
         .set({ state: 'missing', error: null, updatedAt: new Date() })
-        .where(eq(schema.repoCheckouts.id, checkout.id));
+        .where(and(eq(schema.repoCheckouts.id, now.id), eq(schema.repoCheckouts.state, now.state)));
     });
   }
   const targets = await deps.db
