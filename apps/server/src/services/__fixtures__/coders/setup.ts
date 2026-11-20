@@ -13,8 +13,9 @@ import { expect, vi } from 'vitest';
 import { schema } from '../../../db/client.js';
 import { useTestComputer, type TestComputer } from '../../../test-computer.js';
 import { createTestApp, type TestApp } from '../../../test-app.js';
-import { enqueueCoderJob } from '../../coder-jobs.js';
-import { setComputerProvider } from '../../computer.js';
+import { CODERS_QUEUE } from '@openbots/shared';
+import { enqueueCoderJob, type CoderJob } from '../../coder-jobs.js';
+import { setComputerProvider, startWorkSettled } from '../../computer.js';
 import { RUNNER_GIT_CONFIG } from '../../repos-checkout.js';
 import { storeMessage } from '../../messages.js';
 
@@ -326,6 +327,41 @@ export async function coderWorld(
   expect(res.status).toBe(201);
   const bot = (await res.json()) as CoderWorld['bot'];
   expect((await call('POST', '/computer/start')).status).toBe(200);
+  // The git identity writes the start left running end before the test
+  // counts or indexes agent calls (computer.ts `afterStart`).
+  const [started] = await t.db
+    .select({ id: schema.computers.id })
+    .from(schema.computers)
+    .where(eq(schema.computers.ownerId, ownerId));
+  await startWorkSettled(started!.id);
+  // The start also queued its repository jobs (computer.ts `queueRepoJobs`: a
+  // reconcile, then a scan). They run once the suite registers its coders
+  // processor, on the scripted agent; a test that has meanwhile put its own
+  // script in place would answer their commands (a scan's `find` taken for
+  // the coding agent's CLI waits for ever). So the suite's `process()` returns
+  // only once both have ended.
+  const coders = t.deps.infra.queue<CoderJob>(CODERS_QUEUE);
+  const register = coders.process.bind(coders);
+  let repoJobs = 2;
+  let repoJobsDone!: () => void;
+  const repoJobsEnded = new Promise<void>((resolve) => (repoJobsDone = resolve));
+  coders.process = async (handler, options) => {
+    await register(async (job) => {
+      try {
+        return await handler(job);
+      } finally {
+        const { kind } = job.data;
+        if (
+          (kind === 'reconcile' || kind === 'scan') &&
+          job.data.computerId === started!.id &&
+          --repoJobs === 0
+        ) {
+          repoJobsDone();
+        }
+      }
+    }, options);
+    await repoJobsEnded;
+  };
   const [repo] = await t.db
     .insert(schema.repos)
     .values({

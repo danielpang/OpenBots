@@ -281,6 +281,7 @@ describe('row-level security between organizations', () => {
       'openbots_device_workspaces',
       'openbots_devices_exist',
       'openbots_github_installation_workspaces',
+      'openbots_machine_in_use',
       'openbots_pairing_workspace',
     ];
     const functions = rowsOf<{ name: string; definer: boolean; owner: string }>(

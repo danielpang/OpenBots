@@ -3,28 +3,36 @@ import { schema } from '../db/client.js';
 import { asDirectory, inWorkspace } from '../db/scope.js';
 import { DomainError } from '../errors.js';
 import { createLogger } from '../logger.js';
-import { SYSTEM_ACTOR } from '../services/audit.js';
 import { computerProvider } from '../services/computer.js';
 import {
   listRetiredComputers,
   restoreRetiredComputer,
+  retryRetiredComputer,
   type RetiredRow,
 } from '../services/computer-retire.js';
 import { ensureWorkspace } from '../workspace.js';
 import type { CliContext, CliResult } from './context.js';
 
-// `openbots computers retired | restore` (plan 9.5): support's view of a
-// member's retired computers, the old machines a reset that forgot the
-// sign-ins keeps for seven days, and the restore that makes one the member's
-// computer again (services/computer-retire.ts). There is no route or screen
-// for this: only an operator with the server's database and provider token
-// can do it. Every restore is audited as `computer.restore`, by the system.
+// `openbots computers retired | restore | retry` (plan 9.5): support's view
+// of a member's retired computers, the old machines a reset that forgot the
+// sign-ins keeps for seven days, the restore that makes one the member's
+// computer again, and the retry of one the retired-computers job gave up on
+// (services/computer-retire.ts). There is no route or screen for this: only
+// an operator with the server's database and provider token can do it. The
+// CLI has no sign-in, so a restore or retry names its operator with `--by`
+// (a name or email, recorded as given); it is audited by the system with
+// that name as `operator`.
 
 export const COMPUTERS_USAGE = [
   'usage: openbots computers retired --member <email or user id> [--org <organization id>]',
-  '       openbots computers restore <retired id> [--org <organization id>]',
+  '       openbots computers restore <retired id> --by <your name> [--org <organization id>]',
+  '       openbots computers retry <retired id> --by <your name> [--org <organization id>]',
   '--org is required on the managed service; a self-hosted install has one organization.',
+  '--by names the operator in the audit log.',
 ].join('\n');
+
+/** An operator's name for the audit log: printable, short. */
+const OPERATOR = /^[^\p{C}]{1,200}$/u;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -54,6 +62,9 @@ function line(row: RetiredRow): string {
         ? `restored ${row.restoredAt?.toISOString() ?? ''}`
         : `deleted after ${row.deleteAfter.toISOString()}`,
     `checkpoint ${row.checkpointId ?? 'none'}`,
+    ...(row.gaveUpAt
+      ? [`gave up ${row.gaveUpAt.toISOString()}, waiting for an operator (computers retry)`]
+      : []),
     ...(row.lastError ? [`last error: ${row.lastError}`] : []),
   ].join('  ');
 }
@@ -62,10 +73,10 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
   const { db, config, write } = ctx;
   const [command, ...more] = args;
   const parsed = parse(more);
-  const known = ['--org', '--member'];
+  const known = ['--org', '--member', '--by'];
   if (
     !parsed ||
-    !['retired', 'restore'].includes(command ?? '') ||
+    !['retired', 'restore', 'retry'].includes(command ?? '') ||
     [...parsed.flags.keys()].some((flag) => !known.includes(flag))
   ) {
     write(COMPUTERS_USAGE);
@@ -134,8 +145,13 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
   }
 
   const [id, ...extra] = rest;
-  if (!id || extra.length || flags.has('--member')) {
+  const operator = flags.get('--by')?.trim();
+  if (!id || extra.length || flags.has('--member') || !operator) {
     write(COMPUTERS_USAGE);
+    return 2;
+  }
+  if (!OPERATOR.test(operator)) {
+    write('computers: --by takes a name of up to 200 printable characters');
     return 2;
   }
   if (!UUID.test(id)) {
@@ -143,6 +159,25 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
     return 1;
   }
   const logger = ctx.logger ?? createLogger('error');
+  if (command === 'retry') {
+    try {
+      const row = await inWorkspace(org, () =>
+        retryRetiredComputer(
+          { db, logger, infra: ctx.infra },
+          { workspaceId: org, retiredId: id },
+          operator,
+        ),
+      );
+      write(`Retrying ${row.id}: the retired-computers job takes it at its next sweep.`);
+      return 0;
+    } catch (error) {
+      if (error instanceof DomainError && error.status === 409) {
+        write(`computers: ${error.message}`);
+        return 1;
+      }
+      throw error;
+    }
+  }
   const machines = computerProvider({ config, logger });
   if (!machines?.retire) {
     write('computers: this install keeps no retired computers to restore');
@@ -154,7 +189,7 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
         { db, logger, infra: ctx.infra },
         machines,
         { workspaceId: org, retiredId: id },
-        SYSTEM_ACTOR,
+        operator,
       ),
     );
     write(
