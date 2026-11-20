@@ -165,12 +165,17 @@ SDK and its version (`sprites-js/0.2.4`). These go only to the Sprites API host.
 A reset that also forgets the sign-ins does not delete the member's Sprite at once. The old Sprite
 is kept for 7 days, out of service, in case support needs to restore it, then deleted for good by
 the worker. For those 7 days it still holds the old sign-ins (the coding agents' and the browser
-logins) and the old home, and only an operator can reach it: its agent and agent token are removed,
-its URL is private, it may reach no host, and it costs only its storage. An operator lists a
+logins) and the old home, and only an operator can reach it: before the reset answers, its URL is
+made private and it may reach no host; then, in the background, its agent and agent token are
+removed. If the first part fails, the reset fails and nothing changes. The member can ask the reset
+to delete the old Sprite at once instead. A retire or a deletion that keeps failing is given up
+after 12 attempts and logged as an error; the operator lists it and retries it. An operator lists a
 member's retired computers with `openbots computers retired --member <email> --org <organization
-id>` and restores one with `openbots computers restore <id> --org <organization id>`, which keeps
-the member's current computer for 7 days in turn. A self-hosted install with one organization can
-leave out `--org`. Docker computers are deleted at once, as before.
+id>`, restores one with `openbots computers restore <id> --by <your name> --org <organization id>`,
+which keeps the member's current computer for 7 days in turn, and retries one the worker gave up on
+with `openbots computers retry <id> --by <your name> --org <organization id>`. `--by` names the
+operator in the audit log. A self-hosted install with one organization can leave out `--org`.
+Docker computers are deleted at once, as before.
 
 ### Billing (managed service)
 

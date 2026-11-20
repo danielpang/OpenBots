@@ -7,6 +7,7 @@ import { parseFindOutput, queueRepoScans, readRemote, scanComputer } from './rep
 import { queueRepoReconciles } from './repos-refresh.js';
 import { parseWorktreeList } from './repos-checkout.js';
 import { listFound } from './repos.js';
+import { startWorkSettled } from './computer.js';
 
 // The scan for clones nobody remembered (GH6), and the jobs queued per
 // running computer, against a scripted `/coder` (repo-jobs.ts).
@@ -113,6 +114,37 @@ describe('repository scan', () => {
       matched: 1,
     });
     expect(await j.inOrg(() => listFound(j.w.t.deps, owner))).toEqual([]);
+  });
+
+  it('makes no further call once the computer stops while a scan runs', async () => {
+    j.findOutput = ['/home/bot/code/tool/.git', '/home/bot/notes/.git'].join('\n');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let found!: () => void;
+    const finding = new Promise<void>((resolve) => (found = resolve));
+    j.w.coder.agent = async (io: CoderIo) => {
+      if (io.call.launch.command === 'find') {
+        found();
+        await gate;
+        io.stdout(j.findOutput);
+      }
+      io.exit(0);
+    };
+    const scan = j
+      .inOrg(() => scanComputer(j.w.t.deps, j.computerId))
+      .then(
+        () => 'done',
+        (error: { code?: string }) => error.code,
+      );
+    await finding;
+    const before = j.w.coder.calls.length;
+    expect((await j.w.call('POST', '/computer/stop')).status).toBe(200);
+    release();
+    // The job learns the computer stopped before its next call, and calls nothing.
+    expect(await scan).toBe('COMPUTER_OFF');
+    expect(j.w.coder.calls.slice(before)).toEqual([]);
+    expect((await j.w.call('POST', '/computer/start')).status).toBe(200);
+    await startWorkSettled(j.computerId);
   });
 
   it('keeps found clones when find failed and printed nothing', async () => {

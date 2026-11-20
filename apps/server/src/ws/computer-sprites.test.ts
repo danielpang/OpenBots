@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { schema } from '../db/client.js';
+import { destroyComputer } from '../services/computer.js';
 import { settleComputerUses } from '../services/computer-use.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
 import { useTestSprites, type TestSprites } from '../test-computer.js';
@@ -84,5 +85,16 @@ describe('computer sockets on Sprites', () => {
     // The use took no hold of its own: the connection kept the Sprite awake.
     const [computer] = await t.db.select().from(schema.computers);
     expect([...sprites.api.sprites.get(computer!.containerId!)!.tasks.keys()]).toEqual([]);
+  });
+
+  it('closes an open terminal the moment a full reset takes its Sprite away', async () => {
+    const socket = await opened(`${base}/api/v1/computer/pty?cols=80&rows=24`);
+    const code = closed(socket);
+    const [computer] = await t.db.select().from(schema.computers);
+    await t.inOrganization(() => destroyComputer(t.deps, computer!, { signIns: true }));
+    // Closed by the reset, not left to idle out.
+    expect(await code).toBe(1012);
+    // And a socket asked for with the old row is refused: the computer is off now.
+    expect((await t.db.select().from(schema.computers))[0]!.status).toBe('stopped');
   });
 });
