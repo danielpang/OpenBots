@@ -12,9 +12,9 @@
 # downloaded by hand, so `docker buildx build --platform linux/amd64,linux/arm64`
 # works as is.
 
-ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE=node:24-bookworm-slim
 
-# --- base: Node 22 with pnpm from corepack (pinned by packageManager) ---------
+# --- base: Node 24 with pnpm from corepack (pinned by packageManager) ---------
 FROM ${NODE_IMAGE} AS base
 ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \

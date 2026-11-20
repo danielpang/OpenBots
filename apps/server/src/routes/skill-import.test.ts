@@ -207,7 +207,7 @@ describe('Skill import from GitHub', () => {
     call(cookie, 'POST', '/skills/import/preview', { url });
   const json = async <T>(res: Response) => (await res.json()) as T;
   const limit = async (skillsPerAccount: number) =>
-    updateSettings(t.db, await ensureWorkspace(t.db), { limits: { skillsPerAccount } });
+    updateSettings(t.db, (await ensureWorkspace(t.db)).id, { limits: { skillsPerAccount } });
 
   it('lists the Skills in a public repository without a token', async () => {
     const res = await preview(alice, 'https://github.com/anthropics/skills');

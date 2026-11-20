@@ -147,7 +147,7 @@ export interface SpritesProvisioning {
 export interface SpritesProviderOptions {
   /** The Sprites org token; used for the API, and for a private URL. */
   token: string;
-  /** Injected for tests; otherwise the REST client over `token`. */
+  /** Injected for tests; otherwise the SDK adapter over `token` (sprites-api.ts). */
   api?: SpritesApi;
   baseUrl?: string;
   namePrefix?: string;

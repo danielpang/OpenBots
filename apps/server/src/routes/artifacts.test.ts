@@ -352,7 +352,7 @@ describe('Artifacts API', () => {
 
   it('caps every version at the upload limit', async () => {
     const workspace = await ensureWorkspace(t.db);
-    await updateSettings(t.db, workspace, { limits: { uploadBytes: 32 } });
+    await updateSettings(t.db, workspace.id, { limits: { uploadBytes: 32 } });
     try {
       await expect(binaryWrite('big.png', 'design', new Uint8Array(33))).rejects.toMatchObject({
         status: 413,
@@ -364,7 +364,7 @@ describe('Artifacts API', () => {
       });
       expect(res.status).toBe(413);
     } finally {
-      await updateSettings(t.db, await ensureWorkspace(t.db), {
+      await updateSettings(t.db, (await ensureWorkspace(t.db)).id, {
         limits: { uploadBytes: DEFAULT_LIMITS.uploadBytes },
       });
     }

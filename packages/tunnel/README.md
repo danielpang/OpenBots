@@ -4,7 +4,7 @@ The tunnel of [RELAY_PROTOCOL.md](../../docs/RELAY_PROTOCOL.md): a Noise IK hand
 (`Noise_IK_25519_ChaChaPoly_SHA256`, prologue `openbots-tunnel-v1`), then encrypted frames that
 carry HTTP requests and WebSockets between a device and an OpenBots server, through the relay or any
 other ordered byte pipe. Pure TypeScript on `@noble/curves`, `@noble/ciphers` and `@noble/hashes`:
-the same code runs in Node 22, a browser and React Native. The library code uses only `Uint8Array`,
+the same code runs in Node 24, a browser and React Native. The library code uses only `Uint8Array`,
 `TextEncoder`, web streams and `fetch` types; nothing from `node:*` and no `Buffer`.
 
 ## Exports

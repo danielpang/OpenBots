@@ -1,14 +1,12 @@
 -- Artifact sharing and the artifact host (plan 21.11). Every Artifact stays
 -- private: the new column's default is `private`, so rows written before this
--- load as they were. A public Artifact names the version a person confirmed.
+-- load as they were. A shared Artifact always shows its latest version.
 CREATE TYPE "public"."artifact_visibility" AS ENUM('private', 'org', 'public');--> statement-breakpoint
 ALTER TABLE "artifacts" ADD COLUMN "visibility" "artifact_visibility" DEFAULT 'private' NOT NULL;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD COLUMN "shared_by" uuid;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD COLUMN "shared_at" timestamp with time zone;--> statement-breakpoint
-ALTER TABLE "artifacts" ADD COLUMN "public_version_id" uuid;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD COLUMN "taken_down_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_shared_by_users_id_fk" FOREIGN KEY ("shared_by") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_public_version_id_artifact_versions_id_fk" FOREIGN KEY ("public_version_id") REFERENCES "public"."artifact_versions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "artifacts_workspace_visibility" ON "artifacts" USING btree ("workspace_id","visibility");--> statement-breakpoint
 -- Each Bot's name on the artifact domain, unique across organizations (bot
 -- handles are only unique per member). Existing Bots get their handle's

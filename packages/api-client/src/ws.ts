@@ -37,7 +37,7 @@ export interface WsClientOptions {
   onStatus?: (status: WsStatus) => void;
   /** `subscribed`, `pong` and `error` frames from the server. */
   onControl?: (frame: ControlFrame) => void;
-  /** Defaults to the global WebSocket (browsers, Node 22). */
+  /** Defaults to the global WebSocket (browsers, Node 24). */
   createSocket?: WebSocketFactory;
   /** First reconnect delay; doubles up to `maxBackoffMs`. */
   backoffMs?: number;

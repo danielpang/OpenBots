@@ -3,14 +3,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PublicLinksSetting, stopLinksText, stoppedLinksText } from '../settings/admin-settings.js';
 import { ShareControl, type ArtifactSharing } from './share.js';
 import { SharedArtifactsPage, type SharedArtifact } from './shared-page.js';
 
-// The share control in the Artifact viewer and the list of what is shared
-// with the organization (plan 21.11), against a fake REST server: nothing
-// becomes public before the confirmation, which names the version and who
-// will see it; a newer version waits for "Update the public version"; a
-// Bot's request is answered here.
+// The share control in the Artifact viewer, the list of what is shared with
+// the organization and the organization's public links switch (plan 21.11),
+// against a fake REST server: nothing becomes public before the
+// confirmation, which says who will see it and that later edits are public
+// at once; public is offered only when the organization turned it on; a
+// Bot's request is answered here; an admin can stop sharing others' rows.
 
 const ID = '00000000-0000-4000-8000-0000000000a1';
 const APPROVAL = '00000000-0000-4000-8000-0000000000c1';
@@ -20,6 +22,12 @@ const server = vi.hoisted(() => {
     realFetch: globalThis.fetch,
     sharingOn: true,
     sharing: null as unknown as ArtifactSharing,
+    role: 'member' as 'owner' | 'admin' | 'member',
+    settings: { publicArtifactsEnabled: true, publicArtifacts: 0 } as {
+      publicArtifactsEnabled: boolean;
+      publicArtifacts: number;
+      publicLinksStopped?: number;
+    },
     shared: [] as SharedArtifact[],
     /** Items after the first page of the shared list, served when it is asked for by cursor. */
     sharedNext: [] as SharedArtifact[],
@@ -34,7 +42,6 @@ const server = vi.hoisted(() => {
 const sharing = (over: Partial<ArtifactSharing> = {}): ArtifactSharing => ({
   visibility: 'private',
   currentVersion: 2,
-  publicVersion: null,
   publicAllowed: true,
   takenDown: false,
   url: `https://writer-1a2b3c4d--acme-0f0f0f0f.openbots-artifacts.example/${ID}/`,
@@ -47,6 +54,8 @@ const sharing = (over: Partial<ArtifactSharing> = {}): ArtifactSharing => ({
 beforeEach(() => {
   server.sharingOn = true;
   server.sharing = sharing();
+  server.role = 'member';
+  server.settings = { publicArtifactsEnabled: true, publicArtifacts: 0 };
   server.shared = [];
   server.sharedNext = [];
   server.requests = [];
@@ -66,13 +75,28 @@ beforeEach(() => {
         artifactSharing: server.sharingOn,
       });
     }
-    if (pathname === `/api/v1/artifacts/${ID}/sharing` && request.method === 'PUT') {
-      const change = body as { visibility: ArtifactSharing['visibility']; version?: number };
-      server.sharing = {
-        ...server.sharing,
-        visibility: change.visibility,
-        publicVersion: change.visibility === 'public' ? (change.version ?? null) : null,
-      };
+    if (pathname === '/api/v1/me') {
+      return Response.json({ user: { id: 'u1', name: 'Me' }, role: server.role, workspace: null });
+    }
+    if (pathname === '/api/v1/settings') {
+      if (request.method === 'PATCH') {
+        const patch = body as { publicArtifactsEnabled: boolean };
+        const stopped = patch.publicArtifactsEnabled ? 0 : server.settings.publicArtifacts;
+        server.settings = {
+          publicArtifactsEnabled: patch.publicArtifactsEnabled,
+          publicArtifacts: patch.publicArtifactsEnabled ? server.settings.publicArtifacts : 0,
+        };
+        return Response.json({ ...server.settings, publicLinksStopped: stopped });
+      }
+      return Response.json(server.settings);
+    }
+    if (pathname.endsWith('/sharing') && request.method === 'PUT') {
+      const change = body as { visibility: ArtifactSharing['visibility'] };
+      if (pathname !== `/api/v1/artifacts/${ID}/sharing`) {
+        server.shared = server.shared.filter((i) => !pathname.includes(i.id));
+        return Response.json(sharing({ visibility: change.visibility }));
+      }
+      server.sharing = { ...server.sharing, visibility: change.visibility };
       return Response.json(server.sharing);
     }
     if (pathname === `/api/v1/artifacts/${ID}/sharing`) return Response.json(server.sharing);
@@ -157,43 +181,42 @@ describe('<ShareControl>', () => {
     expect(button('Copy link')).toBeDefined();
   });
 
-  it('makes nothing public before the person confirms who will see it and which version', async () => {
+  it('makes nothing public before the person confirms who will see it, now and after every edit', async () => {
     render(<ShareControl artifactId={ID} title="Plan" />);
     await until(() => !!button('Anyone with the link'), 'the options');
     click('Anyone with the link');
     await until(() => text().includes('Make this public?'), 'the dialog');
     expect(text()).toContain(
-      'Anyone with the link will be able to view version 2 of “Plan”, without signing in.',
+      'Anyone with the link will be able to view “Plan” without signing in.',
     );
     expect(text()).toContain('It is not limited to your organization.');
+    // The one plain sentence about later edits, a Bot's included.
+    expect(text()).toContain(
+      'Every later edit, including one your Bot makes, is public as soon as it is saved, without asking you again.',
+    );
+    expect(text()).not.toMatch(/version \d/);
     expect(puts()).toEqual([]);
     click('Cancel');
     await until(() => !text().includes('Make this public?'), 'the dialog to close');
     expect(puts()).toEqual([]);
 
     click('Anyone with the link');
-    await until(() => !!button('Make version 2 public'), 'the dialog again');
-    click('Make version 2 public');
-    await until(() => text().includes('The link shows version 2.'), 'public');
-    expect(puts()).toEqual([{ visibility: 'public', version: 2, confirmed: true }]);
+    await until(() => !!button('Make it public'), 'the dialog again');
+    click('Make it public');
+    await until(() => text().includes('can view the latest version, without signing in'), 'public');
+    expect(puts()).toEqual([{ visibility: 'public', confirmed: true }]);
+    // Nothing to update after an edit: the link always shows the latest version.
+    expect(button('Update the public version')).toBeUndefined();
   });
 
-  it('keeps a newer version private until "Update the public version" is confirmed', async () => {
-    server.sharing = sharing({ visibility: 'public', publicVersion: 2, currentVersion: 4 });
-    render(<ShareControl artifactId={ID} title="Plan" />);
-    await until(() => text().includes('Version 4 is newer than the public one'), 'the notice');
-    click('Update the public version');
-    await until(() => !!button('Make version 4 public'), 'the dialog');
-    click('Make version 4 public');
-    await until(() => text().includes('The link shows version 4.'), 'updated');
-    expect(puts()).toEqual([{ visibility: 'public', version: 4, confirmed: true }]);
-  });
-
-  it('says when the organization turned public links off, and offers no public option', async () => {
+  it('offers no public option, and says why, while the organization has public links off', async () => {
     server.sharing = sharing({ publicAllowed: false });
     render(<ShareControl artifactId={ID} title="Plan" />);
-    await until(() => text().includes('turned off public links'), 'the note');
+    await until(() => text().includes('Public links are off for your organization.'), 'the note');
+    expect(text()).toContain('An owner or admin can turn them on in Settings.');
     expect(button('Anyone with the link')!.disabled).toBe(true);
+    // Sharing with the organization still works.
+    expect(button('Your organization')!.disabled).toBe(false);
   });
 
   it("answers a Bot's request to make it public through the same confirmation", async () => {
@@ -201,40 +224,36 @@ describe('<ShareControl>', () => {
       pendingRequest: {
         approvalId: APPROVAL,
         visibility: 'public',
-        version: 1,
         createdAt: '2026-11-19T10:00:00.000Z',
       },
     });
     render(<ShareControl artifactId={ID} title="Plan" />);
-    await until(() => text().includes('Your Bot asks to make version 1 public'), 'the request');
+    await until(() => text().includes('Your Bot asks to make this public'), 'the request');
+    expect(text()).toContain('anyone with the link could view it and every later version');
     click('Approve');
-    await until(() => !!button('Make version 1 public'), 'the dialog');
+    await until(() => !!button('Make it public'), 'the dialog');
+    expect(text()).toContain('including one your Bot makes');
     expect(server.requests.some((r) => r.path.endsWith('/decide'))).toBe(false);
-    click('Make version 1 public');
+    click('Make it public');
     await until(() => server.requests.some((r) => r.path.endsWith('/decide')), 'the decision');
     expect(server.requests.find((r) => r.path.endsWith('/decide'))!.body).toEqual({
       decision: 'approve',
     });
   });
 
-  it('says when the version a Bot asks to publish is not the current one', async () => {
+  it("cannot approve a Bot's public request while public links are off", async () => {
     server.sharing = sharing({
-      currentVersion: 3,
+      publicAllowed: false,
       pendingRequest: {
         approvalId: APPROVAL,
         visibility: 'public',
-        version: 1,
         createdAt: '2026-11-19T10:00:00.000Z',
       },
     });
     render(<ShareControl artifactId={ID} title="Plan" />);
-    await until(() => text().includes('Your Bot asks to make version 1 public'), 'the request');
-    expect(text()).toContain(
-      'Version 1 is not the current version. Version 3 stays private unless you confirm it.',
-    );
-    click('Approve');
-    await until(() => !!button('Make version 1 public'), 'the dialog');
-    expect(text()).toContain('This is not the current version: that is version 3.');
+    await until(() => text().includes('Your Bot asks to make this public'), 'the request');
+    expect(button('Approve')!.disabled).toBe(true);
+    expect(button('Deny')!.disabled).toBe(false);
   });
 
   it('says why an Artifact has no link', async () => {
@@ -289,6 +308,40 @@ describe('<SharedArtifactsPage>', () => {
     expect(button('Edit')).toBeUndefined();
   });
 
+  it("gives an owner or admin a control to stop sharing someone else's row, and no one else", async () => {
+    const row = (id: string, title: string, mine: boolean): SharedArtifact => ({
+      id,
+      kind: 'document',
+      title,
+      visibility: 'public',
+      version: { version: 1, mime: 'text/markdown', size: 1, createdAt: '2026-11-19T10:00:00Z' },
+      ownerName: mine ? 'Me' : 'Carol',
+      botName: null,
+      mine,
+      url: null,
+      updatedAt: '2026-11-19T10:00:00.000Z',
+    });
+    const theirs = '00000000-0000-4000-8000-0000000000d1';
+    server.shared = [row(theirs, 'Carol plan', false), row(ID, 'My plan', true)];
+    render(<SharedArtifactsPage />);
+    await until(() => text().includes('Carol plan'), 'the list');
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(button('Stop sharing Carol plan')).toBeUndefined();
+    act(() => root!.unmount());
+
+    server.role = 'admin';
+    render(<SharedArtifactsPage />);
+    await until(() => !!button('Stop sharing Carol plan'), 'the admin control');
+    expect(button('Stop sharing My plan')).toBeUndefined();
+    click('Stop sharing Carol plan');
+    expect(puts()).toEqual([]);
+    click('Make Carol plan private');
+    await until(() => !text().includes('Carol plan'), 'the row to go');
+    expect(server.requests.filter((r) => r.method === 'PUT').map((r) => [r.path, r.body])).toEqual([
+      [`/api/v1/artifacts/${theirs}/sharing`, { visibility: 'private' }],
+    ]);
+  });
+
   it('loads more a page at a time', async () => {
     const item = (n: number): SharedArtifact => ({
       id: `00000000-0000-4000-8000-0000000000b${n}`,
@@ -312,5 +365,61 @@ describe('<SharedArtifactsPage>', () => {
     expect(button('Load more')).toBeUndefined();
     const asked = server.requests.filter((r) => r.path === '/api/v1/shared-artifacts');
     expect(asked.map((r) => new URLSearchParams(r.query).get('cursor'))).toEqual([null, 'page-2']);
+  });
+});
+
+describe('<PublicLinksSetting>', () => {
+  it('turns public links on in one step, and says how many links stop before turning them off', async () => {
+    server.settings = { publicArtifactsEnabled: false, publicArtifacts: 0 };
+    render(<PublicLinksSetting />);
+    await until(() => text().includes('Allow public links'), 'the switch');
+    expect(text()).toContain('Off by default.');
+    const toggle = () =>
+      act(() =>
+        (host.querySelector('input[name="publicArtifactsEnabled"]') as HTMLElement).click(),
+      );
+    toggle();
+    await until(() => server.settings.publicArtifactsEnabled, 'on');
+    // Three Artifacts are public now; turning off asks first.
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 3 };
+    act(() => root!.unmount());
+    render(<PublicLinksSetting />);
+    await until(() => text().includes('Allow public links'), 'the switch again');
+    toggle();
+    await until(() => text().includes('Turn off public links?'), 'the confirmation');
+    expect(text()).toContain('3 public links stop working.');
+    expect(server.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+    click('Turn off public links');
+    await until(() => !server.settings.publicArtifactsEnabled, 'off');
+    expect(server.requests.filter((r) => r.method === 'PATCH').map((r) => r.body)).toEqual([
+      { publicArtifactsEnabled: true },
+      { publicArtifactsEnabled: false },
+    ]);
+  });
+
+  it('counts the public links again when the switch is turned off, and says afterwards how many stopped', async () => {
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 0 };
+    render(<PublicLinksSetting />);
+    await until(() => text().includes('Allow public links'), 'the switch');
+    // Someone makes two Artifacts public after the page loaded with none.
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 2 };
+    act(() => (host.querySelector('input[name="publicArtifactsEnabled"]') as HTMLElement).click());
+    await until(() => text().includes('Turn off public links?'), 'the confirmation');
+    expect(text()).toContain('2 public links stop working.');
+    expect(server.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+    // A third is made public while the admin reads it: the answer says three stopped.
+    server.settings = { publicArtifactsEnabled: true, publicArtifacts: 3 };
+    click('Turn off public links');
+    await until(() => text().includes('3 public links stopped working.'), 'what stopped');
+    expect(server.settings.publicArtifactsEnabled).toBe(false);
+  });
+
+  it('says the count plainly', () => {
+    expect(stopLinksText(0)).toBe('No Artifact is public now.');
+    expect(stopLinksText(1)).toContain('1 public link stops working.');
+    expect(stopLinksText(2)).toContain('owner has to make it public again one by one');
+    expect(stoppedLinksText(0)).toBe('Public links are off. No link was public.');
+    expect(stoppedLinksText(1)).toBe('Public links are off. 1 public link stopped working.');
+    expect(stoppedLinksText(3)).toBe('Public links are off. 3 public links stopped working.');
   });
 });

@@ -69,14 +69,6 @@ export const artifacts = pgTable(
     /** Who last changed `visibility`, and when. */
     sharedBy: uuid('shared_by').references(() => users.id),
     sharedAt: timestamptz('shared_at'),
-    /**
-     * The version anyone with the link sees while `visibility` is `public`:
-     * the one a person confirmed. Later versions stay private until a person
-     * confirms again.
-     */
-    publicVersionId: uuid('public_version_id').references((): AnyPgColumn => artifactVersions.id, {
-      onDelete: 'set null',
-    }),
     /** An operator took its public link down (abuse); it is not served publicly until restored. */
     takenDownAt: timestamptz('taken_down_at'),
     createdAt: createdAt(),

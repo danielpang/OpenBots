@@ -226,13 +226,13 @@ describe('request_artifact_share (plan 21.11)', () => {
     const { services } = fakeArtifacts();
     const applied: unknown[] = [];
     services.share = {
-      prepare: async ({ id, visibility, version }) => {
-        if (version !== undefined && version > 3)
-          throw new Error(`${id} has no version ${version}`);
+      prepare: async ({ id, visibility }) => {
+        if (visibility === 'public' && id === 'closed') {
+          throw new Error(`${id} cannot be made public: public links are off`);
+        }
         return visibility === 'public'
           ? {
-              summary: `Make version ${version} of ${id} public: anyone with the link can view it`,
-              versionId: `${id}-v${version}`,
+              summary: `Make ${id} public: anyone with the link can view it and every future version`,
             }
           : { summary: `Share ${id} with everyone in the organization` };
       },
@@ -293,35 +293,27 @@ describe('request_artifact_share (plan 21.11)', () => {
     expect(wait.reason).toBe('approval');
     expect(wait.widget.props).toMatchObject({
       tool_name: 'request_artifact_share',
-      summary: 'Make version 2 of art-9 public: anyone with the link can view it',
+      summary: 'Make art-9 public: anyone with the link can view it and every future version',
     });
-    // The approval keeps the version itself, not only its number.
-    expect(wait.args).toEqual({
-      id: 'art-9',
-      visibility: 'public',
-      version: 2,
-      version_id: 'art-9-v2',
-    });
+    // The approval keeps the Artifact and the audience only: a version the Bot names is dropped.
+    expect(wait.args).toEqual({ id: 'art-9', visibility: 'public' });
   });
 
-  it('asks nothing for a version the Artifact does not have', async () => {
+  it('asks nothing when the backend refuses the request', async () => {
     const { services, applied } = withSharing();
-    const { outcome, parts } = await asking(services, {
-      id: 'art-9',
-      visibility: 'public',
-      version: 7,
-    });
+    const { outcome, parts } = await asking(services, { id: 'closed', visibility: 'public' });
     expect(outcome.status).toBe('completed');
     expect(applied).toEqual([]);
     expect(parts.some((p) => (p as { type: string }).type === 'widget')).toBe(false);
     const result = parts.find((p) => (p as { type: string }).type === 'tool_result');
-    expect(JSON.stringify(result)).toContain('art-9 has no version 7');
+    expect(JSON.stringify(result)).toContain('public links are off');
   });
 
-  it('needs a version to make something public', () => {
+  it('takes no version: the organization or the public, nothing else', () => {
     const tool = toolsFor(ctx(withSharing().services)).request_artifact_share!;
-    expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'public' }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'public' }).success).toBe(true);
     expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'org' }).success).toBe(true);
     expect(tool.inputSchema.safeParse({ id: 'a', visibility: 'private' }).success).toBe(false);
+    expect(tool.description).toContain('every later edit is visible');
   });
 });

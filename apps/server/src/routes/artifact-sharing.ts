@@ -7,18 +7,17 @@ import { requireUser } from '../middleware/auth.js';
 import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
 import {
   assertPerson,
+  changeSharing,
   getShared,
   getSharing,
   listShared,
   openLink,
   openShared,
   requireArtifactHost,
-  setVisibility,
   SHARED_PAGE,
   type SharedArtifact,
   type SharingState,
 } from '../services/artifact-sharing.js';
-import { userActor } from '../services/audit.js';
 import { ArtifactVisibilitySchema, INLINE_MIME } from './artifacts.js';
 
 // Sharing Artifacts (plan 21.11; services/artifact-sharing.ts). Core routes,
@@ -28,12 +27,15 @@ import { ArtifactVisibilitySchema, INLINE_MIME } from './artifacts.js';
 //
 // - The owner reads and changes who may see an Artifact. Widening it needs a
 //   person (a session or a paired device, 403 PERSON_REQUIRED for an API
-//   key); `public` needs `confirmed` and the version the person saw, which
-//   must still be the current one.
+//   key); `public` needs `confirmed` and the organization's public links on.
+//   A shared Artifact always shows its latest version.
+// - An owner or admin of the organization may narrow anyone's shared
+//   Artifact (to stop what a suspended or removed member shared), never
+//   widen it (403 OWNER_ONLY).
 // - Members of the organization list and read what is shared with it, read
-//   only: the title, kind, who shared it, the version they may see and its
-//   bytes. Nothing else of the owner's (the chat, the Bot, other Artifacts,
-//   earlier versions) comes with it.
+//   only: the title, kind, who shared it, its latest version and its bytes.
+//   Nothing else of the owner's (the chat, the Bot, other Artifacts, earlier
+//   versions) comes with it.
 // - `POST /artifacts/{id}/open` gives the caller a link to the artifact host,
 //   with a one-minute view token when they see it as its owner or a member.
 
@@ -43,7 +45,6 @@ const ShareRequestSchema = z
   .object({
     approvalId: z.uuid().openapi({ description: 'Answer it with `POST /approvals/{id}/decide`' }),
     visibility: z.enum(['org', 'public']),
-    version: z.number().int().positive().nullable(),
     createdAt: z.iso.datetime(),
   })
   .openapi('ArtifactShareRequest');
@@ -51,14 +52,12 @@ const ShareRequestSchema = z
 const ArtifactSharingSchema = z
   .object({
     visibility: ArtifactVisibilitySchema,
-    currentVersion: z.number().int().positive().nullable(),
-    publicVersion: z.number().int().positive().nullable().openapi({
-      description:
-        'While public: the version anyone with the link sees. Later versions stay private until the owner confirms again.',
+    currentVersion: z.number().int().positive().nullable().openapi({
+      description: 'Its latest version: what everyone who may see it sees',
     }),
-    publicAllowed: z
-      .boolean()
-      .openapi({ description: 'The organization lets members make Artifacts public' }),
+    publicAllowed: z.boolean().openapi({
+      description: 'An owner or admin turned public links on for the organization (off by default)',
+    }),
     takenDown: z.boolean().openapi({
       description: 'The service took the public link down; it cannot be made public again',
     }),
@@ -79,12 +78,9 @@ const ArtifactSharingSchema = z
 const SharingChangeSchema = z
   .strictObject({
     visibility: ArtifactVisibilitySchema,
-    version: z.number().int().positive().optional().openapi({
-      description: 'For `public`: the version the person confirmed; it must be the current one',
-    }),
     confirmed: z.literal(true).optional().openapi({
       description:
-        'For `public`: the person confirmed that anyone with the link will be able to view it',
+        'For `public`: the person confirmed that anyone with the link will be able to view it and every later version',
     }),
   })
   .openapi('ArtifactSharingChange');
@@ -102,7 +98,7 @@ const SharedArtifactSchema = z
         size: z.number().int(),
         createdAt: z.iso.datetime(),
       })
-      .openapi({ description: 'The version the caller may see' }),
+      .openapi({ description: 'Its latest version, which the caller sees' }),
     ownerName: z.string(),
     botName: z.string().nullable(),
     mine: z.boolean(),
@@ -127,7 +123,6 @@ function toSharing(state: SharingState): z.infer<typeof ArtifactSharingSchema> {
   return {
     visibility: state.visibility,
     currentVersion: state.currentVersion,
-    publicVersion: state.publicVersion,
     publicAllowed: state.publicAllowed,
     takenDown: state.takenDown,
     url: state.url,
@@ -137,7 +132,6 @@ function toSharing(state: SharingState): z.infer<typeof ArtifactSharingSchema> {
       ? {
           approvalId: state.pendingRequest.approvalId,
           visibility: state.pendingRequest.visibility,
-          version: state.pendingRequest.version,
           createdAt: iso(state.pendingRequest.createdAt)!,
         }
       : null,
@@ -195,7 +189,8 @@ export const artifactSharingRoutes = createRouter()
       method: 'put',
       path: '/artifacts/{id}/sharing',
       tags: ['artifacts'],
-      summary: 'Change who may see an Artifact (owner; a person, for anything wider than before)',
+      summary:
+        "Change who may see an Artifact (owner; a person, for anything wider than before), or narrow another member's (owner or admin of the organization)",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -204,19 +199,15 @@ export const artifactSharingRoutes = createRouter()
       },
       responses: {
         200: sharingResponse('Its sharing now'),
-        400: problemResponse(
-          '`public` without `confirmed` and `version` (`CONFIRMATION_REQUIRED`)',
-        ),
+        400: problemResponse('`public` without `confirmed` (`CONFIRMATION_REQUIRED`)'),
         ...authProblems,
         403: problemResponse(
-          'An API key widening it (`PERSON_REQUIRED`), or public links are off in the organization (`PUBLIC_SHARING_OFF`)',
+          "An API key widening it (`PERSON_REQUIRED`), public links are not on in the organization (`PUBLIC_SHARING_OFF`), or an admin widening another member's Artifact (`OWNER_ONLY`)",
         ),
         404: problemResponse(
-          'No such Artifact or version, or this install does not host Artifacts',
+          'No such Artifact the caller owns or, as an owner or admin, sees shared; or this install does not host Artifacts',
         ),
-        409: problemResponse(
-          'A newer version was saved (`VERSION_CONFLICT`), or the public link was taken down (`TAKEN_DOWN`)',
-        ),
+        409: problemResponse('The public link was taken down (`TAKEN_DOWN`)'),
       },
     }),
     async (c) => {
@@ -229,21 +220,14 @@ export const artifactSharingRoutes = createRouter()
         requireArtifactHost(deps.config);
         await assertPerson(deps.db, user);
       }
-      if (body.visibility === 'public' && (body.confirmed !== true || body.version === undefined)) {
+      if (body.visibility === 'public' && body.confirmed !== true) {
         throw new DomainError(
           400,
           'CONFIRMATION_REQUIRED',
-          'Confirm that anyone with the link will be able to view this version',
+          'Confirm that anyone with the link will be able to view it and every later version',
         );
       }
-      const state = await setVisibility(
-        deps,
-        user,
-        id,
-        { visibility: body.visibility, version: body.version },
-        { ...userActor(user), type: 'user' },
-        { requireCurrent: true, caller: user },
-      );
+      const state = await changeSharing(deps, user, id, { visibility: body.visibility });
       return c.json(toSharing(state), 200);
     },
   )

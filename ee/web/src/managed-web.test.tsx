@@ -167,15 +167,23 @@ describe('the managed web app', () => {
     expect(html).not.toMatch(/[–—]/);
   });
 
-  it('lets owners and admins turn public Artifact links off, only where the server hosts Artifacts', () => {
-    const settings = { publicArtifactsEnabled: true };
+  it('lets owners and admins turn public Artifact links on, only where the server hosts Artifacts', () => {
+    const settings = { publicArtifactsEnabled: true, publicArtifacts: 2 };
     const on = render(<SharingSection />, [
       [capabilitiesQuery.queryKey, { artifactSharing: true }],
       [settingsQuery.queryKey, settings],
     ]);
     expect(text(on)).toContain('Allow public links');
-    expect(text(on)).toContain('Turning this off stops every public link in the organization');
-    expect(on).toContain('checked');
+    expect(text(on)).toContain('Off by default.');
+    expect(text(on)).toContain(
+      'Turning this off makes every public Artifact visible to your organization only.',
+    );
+    expect(on).toMatch(/ checked=""/);
+    const offByDefault = render(<SharingSection />, [
+      [capabilitiesQuery.queryKey, { artifactSharing: true }],
+      [settingsQuery.queryKey, { publicArtifactsEnabled: false, publicArtifacts: 0 }],
+    ]);
+    expect(offByDefault).not.toMatch(/ checked=""/);
     const off = render(<SharingSection />, [
       [capabilitiesQuery.queryKey, { artifactSharing: false }],
       [settingsQuery.queryKey, settings],

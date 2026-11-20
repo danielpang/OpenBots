@@ -111,7 +111,7 @@ describe('a self-hosted install', () => {
 
   it('keeps the limits and custom stdio for the owner, and the rest at defaults', async () => {
     const workspace = await ensureWorkspace(t.db);
-    await updateSettings(t.db, workspace, { auditRetentionDays: 7 });
+    await updateSettings(t.db, workspace.id, { auditRetentionDays: 7 });
     // The owner is the operator: no ceiling, and any limit up or down.
     const raised = await call(t, 'PATCH', '/api/v1/settings', owner, {
       limits: { botsPerAccount: 500 },

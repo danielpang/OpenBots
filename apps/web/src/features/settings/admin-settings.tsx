@@ -1,15 +1,16 @@
 import { unwrap, type components } from '@openbots/api-client';
-import { Input, SaveButton, useSaveState } from '@openbots/ui';
+import { Button, Input, SaveButton, Switch, useSaveState } from '@openbots/ui';
 import { SettingsPanel } from '../../app/settings-layout.js';
 import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { FormEvent } from 'react';
-import { api, meQuery } from '../../app/api.js';
+import { useState, type FormEvent } from 'react';
+import { api, capabilitiesQuery, meQuery } from '../../app/api.js';
 import { useLocalAuth } from '../../app/deployment.js';
 
-// The limits (U3): a self-hosted owner's in Settings > Limits. On the
-// managed service each organization's owners and admins change them, with
-// the audit log's retention, in the settings the managed build adds (plan
-// 21.5), which reuses the pieces below.
+// The limits (U3): a self-hosted owner's in Settings > Limits, with public
+// links to Artifacts (plan 21.11). On the managed service each
+// organization's owners and admins change them, with the audit log's
+// retention, in the settings the managed build adds (plan 21.5), which
+// reuses the pieces below.
 
 type Settings = components['schemas']['Settings'];
 type Limits = Settings['limits'];
@@ -126,9 +127,112 @@ export function LimitsSettings() {
   }
 
   return (
-    <form className="flex flex-col gap-6" onSubmit={submit}>
-      <LimitFields limits={current} />
-      <SaveRow save={save} />
-    </form>
+    <div className="flex flex-col gap-10">
+      <form className="flex flex-col gap-6" onSubmit={submit}>
+        <LimitFields limits={current} />
+        <SaveRow save={save} />
+      </form>
+      <PublicLinksSetting />
+    </div>
+  );
+}
+
+/** How many links turning public links off stops, said before it is done. */
+export function stopLinksText(count: number): string {
+  if (count === 0) return 'No Artifact is public now.';
+  const links = count === 1 ? '1 public link stops' : `${count} public links stop`;
+  return `${links} working. Each of those Artifacts stays visible to your organization, and its owner has to make it public again one by one.`;
+}
+
+/** What turning public links off stopped, said once it is done. */
+export function stoppedLinksText(count: number): string {
+  if (count === 0) return 'Public links are off. No link was public.';
+  const links = count === 1 ? '1 public link' : `${count} public links`;
+  return `Public links are off. ${links} stopped working.`;
+}
+
+/**
+ * Public links to Artifacts, for the whole organization (plan 21.11): off
+ * until an owner or admin turns them on. Turning them off makes every public
+ * Artifact visible to the organization only, so it counts them again first
+ * (one may have been shared since the page loaded), asks when there are any
+ * and says how many links stop, then says how many did. Only when the
+ * server hosts Artifacts.
+ */
+export function PublicLinksSetting() {
+  const queryClient = useQueryClient();
+  const capabilities = useQuery(capabilitiesQuery);
+  const { data } = useQuery(settingsQuery);
+  const save = useSaveSettings();
+  const [confirming, setConfirming] = useState(false);
+  const [counting, setCounting] = useState(false);
+  const [stopped, setStopped] = useState<number | null>(null);
+  if (!capabilities.data?.artifactSharing || !data) return null;
+  // While a change is saving, show the value asked for, not the one before it.
+  const asked = save.isPending ? save.variables?.publicArtifactsEnabled : undefined;
+  const checked = asked ?? data.publicArtifactsEnabled;
+  const turnOff = () => {
+    setConfirming(false);
+    save.mutate(
+      { publicArtifactsEnabled: false },
+      { onSuccess: (settings) => setStopped(settings.publicLinksStopped ?? null) },
+    );
+  };
+  const askToTurnOff = async () => {
+    setCounting(true);
+    try {
+      const fresh = await queryClient.fetchQuery({ ...settingsQuery, staleTime: 0 });
+      if (fresh.publicArtifacts > 0) setConfirming(true);
+      else turnOff();
+    } catch {
+      // Unsure how many links would stop: ask, with the count the page has.
+      setConfirming(true);
+    } finally {
+      setCounting(false);
+    }
+  };
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="font-medium">Sharing</h2>
+      <label className="flex items-start gap-3 text-sm">
+        <Switch
+          name="publicArtifactsEnabled"
+          checked={checked}
+          disabled={save.isPending || confirming || counting}
+          onChange={(event) => {
+            setStopped(null);
+            if (event.target.checked) save.mutate({ publicArtifactsEnabled: true });
+            else void askToTurnOff();
+          }}
+        />
+        <span className="flex flex-col gap-1">
+          <span className="font-medium">Allow public links</span>
+          <span className="text-muted-foreground">
+            Off by default. When on, members can make an Artifact public, so anyone with its link
+            can view it without signing in. Turning this off makes every public Artifact visible to
+            your organization only.
+          </span>
+        </span>
+      </label>
+      {confirming && (
+        <div className="flex flex-col gap-2 rounded border p-3 text-sm" role="alertdialog">
+          <p>Turn off public links? {stopLinksText(data.publicArtifacts)}</p>
+          <div className="flex gap-2">
+            <Button variant="destructive" onClick={turnOff}>
+              Turn off public links
+            </Button>
+            <Button variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      {stopped !== null && (
+        <p className="text-sm text-muted-foreground" role="status">
+          {stoppedLinksText(stopped)}
+        </p>
+      )}
+      {save.error && <p className="text-sm text-destructive">{save.error.message}</p>}
+    </section>
   );
 }

@@ -6,7 +6,7 @@ import {
   type ArtifactKind,
   type ArtifactVisibility,
 } from '@openbots/shared';
-import { and, desc, eq, exists, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { hostLabel, type HostView, type Viewer } from '../artifact-host/handler.js';
 import { newNonce, signClaims, VIEW_TOKEN_SECONDS } from '../artifact-host/tokens.js';
 import type { Config } from '../config.js';
@@ -15,7 +15,7 @@ import { schema, type Db } from '../db/client.js';
 import { artifactHostWorkspace, inWorkspace } from '../db/scope.js';
 import { DomainError, notFound } from '../errors.js';
 import { parseMasterKey } from '../secrets.js';
-import { effectiveSettings, getOrganization, type Workspace } from '../workspace.js';
+import { effectiveSettings, getOrganization, isOrgAdmin, type Workspace } from '../workspace.js';
 import { recordAudit, type AuditActor } from './audit.js';
 import { isDeviceKey } from './devices.js';
 import { openFile } from './files.js';
@@ -23,21 +23,23 @@ import { openFile } from './files.js';
 // Sharing Artifacts and the artifact host's rules (plan 21.11).
 //
 // An Artifact is private to its owner. Its owner may share it with the
-// organization (every active member views it read only, at its latest
-// version) or make it public (anyone with the link views the version the
-// owner confirmed; later versions stay private until they confirm again).
+// organization (every active member views it read only) or, once an owner
+// or admin turned public links on for the organization, make it public
+// (anyone with the link views it). Either way viewers always see the latest
+// version: what a Bot saves later is shown without anyone confirming it.
 // Only a person widens it: the owner in the app or on a paired device
 // (`assertPerson`), or the owner approving a Bot's `request_artifact_share`,
 // which the policy engine never runs unasked and which `shareFromApproval`
-// checks against the approval row itself. Every change is audited.
+// checks against the approval row itself. An owner or admin of the
+// organization may narrow anyone's shared Artifact, never widen it. Every
+// change is audited.
 //
-// Who sees what, asked on every request (`viewOf`): the owner sees the
-// latest version; an active member sees an organization Artifact's latest
-// version; anyone sees a public Artifact's confirmed version while the
-// organization allows public sharing and no operator took it down. When the
-// owner is suspended or removed, nothing of theirs is served to anyone until
-// they are back: a person who can no longer act in the organization cannot
-// stand behind what it shows.
+// Who sees what, asked on every request (`viewOf`): the owner sees it while
+// they are an active member; an active member sees an organization Artifact;
+// anyone sees a public Artifact while the organization allows public links
+// and no operator took it down. When the owner is suspended or removed, what
+// they shared stays shared (an owner or admin can stop it), and their
+// private Artifacts are served to nobody.
 //
 // All of it is off unless OPENBOTS_ARTIFACT_DOMAIN is set: the routes answer
 // 404 and the Bot is not offered the tool.
@@ -174,23 +176,6 @@ async function isActiveMember(db: Db, workspaceId: string, userId: string): Prom
   return row !== undefined;
 }
 
-async function versionByNumber(
-  db: Db,
-  artifactId: string,
-  version: number,
-): Promise<VersionRow | null> {
-  const [row] = await db
-    .select()
-    .from(schema.artifactVersions)
-    .where(
-      and(
-        eq(schema.artifactVersions.artifactId, artifactId),
-        eq(schema.artifactVersions.version, version),
-      ),
-    );
-  return row ?? null;
-}
-
 async function versionById(db: Db, id: string | null): Promise<VersionRow | null> {
   if (!id) return null;
   const [row] = await db
@@ -207,40 +192,50 @@ function publiclyServed(config: Config, workspace: Workspace, artifact: Artifact
   return (
     artifact.visibility === 'public' &&
     artifact.takenDownAt === null &&
-    artifact.publicVersionId !== null &&
     effectiveSettings(config, workspace).publicArtifactsEnabled
   );
 }
 
 /**
- * The version `viewerId` (or nobody) may see of `artifact`, and why; null
- * when they may see none. Must run in the Artifact's organization's scope.
+ * Who `viewerId` (or nobody) sees `artifact` as, with its latest version;
+ * null when they may not see it. Must run in the Artifact's organization's
+ * scope. The owner counts as the owner only while an active member: a
+ * suspended or removed owner's private Artifacts are served to nobody, and
+ * what they shared is served as it is to everyone else.
  */
 export async function viewOf(
   deps: Pick<AppDeps, 'db' | 'config'>,
   artifact: ArtifactRow,
   viewerId: string | null,
 ): Promise<{ audience: Audience; version: VersionRow } | null> {
+  const audience = await audienceOf(deps, artifact, viewerId);
+  if (!audience) return null;
+  const version = await versionById(deps.db, artifact.currentVersionId);
+  return version && { audience, version };
+}
+
+async function audienceOf(
+  deps: Pick<AppDeps, 'db' | 'config'>,
+  artifact: ArtifactRow,
+  viewerId: string | null,
+): Promise<Audience | null> {
   const { db } = deps;
-  if (!(await isActiveMember(db, artifact.workspaceId, artifact.ownerId))) return null;
-  if (viewerId === artifact.ownerId) {
-    const version = await versionById(db, artifact.currentVersionId);
-    return version && { audience: 'owner', version };
+  if (
+    viewerId &&
+    viewerId === artifact.ownerId &&
+    (await isActiveMember(db, artifact.workspaceId, viewerId))
+  ) {
+    return 'owner';
   }
   if (
     viewerId &&
     artifact.visibility === 'org' &&
     (await isActiveMember(db, artifact.workspaceId, viewerId))
   ) {
-    const version = await versionById(db, artifact.currentVersionId);
-    return version && { audience: 'member', version };
+    return 'member';
   }
   const workspace = await getOrganization(db, artifact.workspaceId);
-  if (publiclyServed(deps.config, workspace, artifact)) {
-    const version = await versionById(db, artifact.publicVersionId);
-    return version && { audience: 'public', version };
-  }
-  return null;
+  return publiclyServed(deps.config, workspace, artifact) ? 'public' : null;
 }
 
 // --- The owner's view and changes -------------------------------------------------
@@ -281,7 +276,6 @@ async function hostNames(db: Db, artifact: ArtifactRow) {
 export interface PendingShareRequest {
   approvalId: string;
   visibility: 'org' | 'public';
-  version: number | null;
   createdAt: Date;
 }
 
@@ -312,7 +306,6 @@ async function pendingRequest(
   return {
     approvalId: row.approval.id,
     visibility: args.visibility === 'public' ? 'public' : 'org',
-    version: typeof args.version === 'number' ? args.version : null,
     createdAt: row.approval.createdAt,
   };
 }
@@ -320,8 +313,6 @@ async function pendingRequest(
 export interface SharingState {
   visibility: ArtifactVisibility;
   currentVersion: number | null;
-  /** The version anyone with the link sees, while public. */
-  publicVersion: number | null;
   /** The organization lets members make Artifacts public. */
   publicAllowed: boolean;
   /** An operator took the public link down. */
@@ -344,24 +335,23 @@ export async function getSharing(
   return sharingState(deps, owner, artifact);
 }
 
+/** The sharing of `artifact` as its owner sees it; with `owner` null (an admin), no pending request. */
 async function sharingState(
   deps: SharingDeps,
-  owner: Member,
+  owner: Member | null,
   artifact: ArtifactRow,
 ): Promise<SharingState> {
   const { db, config } = deps;
   const { workspace, botSlug } = await hostNames(db, artifact);
   const current = await versionById(db, artifact.currentVersionId);
-  const pinned = await versionById(db, artifact.publicVersionId);
   return {
     visibility: artifact.visibility,
     currentVersion: current?.version ?? null,
-    publicVersion: artifact.visibility === 'public' ? (pinned?.version ?? null) : null,
     publicAllowed: effectiveSettings(config, workspace).publicArtifactsEnabled,
     takenDown: artifact.takenDownAt !== null,
     ...artifactHostLink(config, botSlug, workspace.slug, artifact.id),
     sharedAt: artifact.sharedAt,
-    pendingRequest: await pendingRequest(db, owner, artifact.id),
+    pendingRequest: owner ? await pendingRequest(db, owner, artifact.id) : null,
   };
 }
 
@@ -369,8 +359,83 @@ export const publicSharingOff = () =>
   new DomainError(
     403,
     'PUBLIC_SHARING_OFF',
-    'Your organization has turned off public links. An owner or admin can turn them on in Settings.',
+    'Your organization has not turned on public links. An owner or admin can turn them on in Settings.',
   );
+
+export const ownerOnly = () =>
+  new DomainError(
+    403,
+    'OWNER_ONLY',
+    'Only its owner can share this Artifact more widely. You can stop sharing it, or share it less widely.',
+  );
+
+/**
+ * Serializes making an Artifact public with turning public links off in its
+ * organization: a share takes this lock shared before it locks the Artifact,
+ * the switch takes it alone (`stopPublicLinks`), so no Artifact is made
+ * public on a setting read just before it went off.
+ */
+const publicLinksLock = (db: Db, workspaceId: string, mode: 'share' | 'alone') =>
+  db.execute(
+    mode === 'share'
+      ? sql`select pg_advisory_xact_lock_shared(hashtext(${`artifact-public:${workspaceId}`}))`
+      : sql`select pg_advisory_xact_lock(hashtext(${`artifact-public:${workspaceId}`}))`,
+  );
+
+/**
+ * Turning public links off (`PATCH /settings`): every public Artifact of the
+ * organization becomes an organization one, in the caller's transaction, so
+ * turning them on again brings no old link back; each owner makes theirs
+ * public again. Audited per Artifact as `artifact.visibility`. Returns how
+ * many working links it stopped (one the service took down was not working).
+ */
+export async function stopPublicLinks(
+  tx: Db,
+  workspaceId: string,
+  actor: AuditActor,
+): Promise<number> {
+  await publicLinksLock(tx, workspaceId, 'alone');
+  const changed = await tx
+    .update(schema.artifacts)
+    .set({ visibility: 'org', sharedBy: actor.id, sharedAt: new Date() })
+    .where(
+      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.visibility, 'public')),
+    )
+    .returning({ id: schema.artifacts.id, takenDownAt: schema.artifacts.takenDownAt });
+  if (changed.length) {
+    await tx.insert(schema.auditLog).values(
+      changed.map((row) => ({
+        workspaceId,
+        actorType: actor.type,
+        actorId: actor.id,
+        action: 'artifact.visibility',
+        targetType: 'artifact',
+        targetId: row.id,
+        metadata: { from: 'public', to: 'org', reason: 'public_links_off' },
+      })),
+    );
+  }
+  // A link the service took down already did not work: it is not one this stopped.
+  return changed.filter((row) => !row.takenDownAt).length;
+}
+
+/**
+ * How many of the organization's public links work now: the links turning
+ * public links off stops. One the service took down does not count.
+ */
+export async function countPublic(db: Db, workspaceId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.artifacts)
+    .where(
+      and(
+        eq(schema.artifacts.workspaceId, workspaceId),
+        eq(schema.artifacts.visibility, 'public'),
+        isNull(schema.artifacts.takenDownAt),
+      ),
+    );
+  return Number(row?.n ?? 0);
+}
 
 export const takenDown = () =>
   new DomainError(
@@ -381,10 +446,6 @@ export const takenDown = () =>
 
 export interface VisibilityChange {
   visibility: ArtifactVisibility;
-  /** For `public`: the version to publish, by number. */
-  version?: number | undefined;
-  /** For `public`, in place of `version`: the version to publish, by id (an approval's). */
-  versionId?: string | undefined;
 }
 
 const RANK: Record<ArtifactVisibility, number> = { private: 0, org: 1, public: 2 };
@@ -395,13 +456,14 @@ export const widens = (current: ArtifactVisibility, next: ArtifactVisibility) =>
 
 /**
  * Changes who may see an Artifact, as `actor` (always a person: the owner,
- * or the owner approving their Bot's request). `public` publishes the named
- * version; with `requireCurrent` it must still be the current one, so a
- * person never confirms a version they did not see. With `caller`, a change
- * that widens it needs a person behind the request (`assertPerson`), judged
+ * or the owner approving their Bot's request). With `caller`, a change that
+ * widens it needs a person behind the request (`assertPerson`), judged
  * against the row as locked, so a script's narrowing never lands as a
  * widening of what the owner changed meanwhile. With `approvalId`, the
- * approval is used up here, once. Locked against concurrent writers; audited.
+ * approval is used up here, once, and only for this Artifact, also when the
+ * share is then refused. `public` needs the organization's public links on,
+ * read under `publicLinksLock`.
+ * Locked against concurrent writers; audited.
  */
 export async function setVisibility(
   deps: SharingDeps,
@@ -410,13 +472,15 @@ export async function setVisibility(
   change: VisibilityChange,
   actor: AuditActor & { type: 'user' },
   options: {
-    requireCurrent?: boolean;
     approvalId?: string;
     caller?: Parameters<typeof assertPerson>[1];
   } = {},
 ): Promise<SharingState> {
   requireArtifactHost(deps.config);
+  const refused: { error?: DomainError } = {};
   const artifact = await deps.db.transaction(async (tx) => {
+    // Before the Artifact's lock, so it is always taken in the same order.
+    if (change.visibility === 'public') await publicLinksLock(tx, owner.workspaceId, 'share');
     const row = await ownedArtifact(tx, owner, artifactId, true);
     if (options.caller && widens(row.visibility, change.visibility)) {
       await assertPerson(tx, options.caller);
@@ -434,73 +498,120 @@ export async function setVisibility(
             eq(schema.approvals.workspaceId, row.workspaceId),
             eq(schema.approvals.status, 'approved'),
             isNull(schema.approvals.consumedAt),
+            sql`${schema.approvals.args}->>'id' = ${row.id}`,
           ),
         )
         .returning({ id: schema.approvals.id });
       if (!claimed) throw notApproved();
     }
-    let publicVersion: VersionRow | null = null;
     if (change.visibility === 'public') {
       const workspace = await getOrganization(tx, row.workspaceId);
-      if (!effectiveSettings(deps.config, workspace).publicArtifactsEnabled) {
-        throw publicSharingOff();
+      const refusal = !effectiveSettings(deps.config, workspace).publicArtifactsEnabled
+        ? publicSharingOff()
+        : row.takenDownAt
+          ? takenDown()
+          : null;
+      if (refusal) {
+        // The owner approved making it public while that was allowed. Refused
+        // now, the approval stays used with nothing shared (this transaction
+        // commits its use), so public links on again do not revive it: the
+        // Bot asks again, and its owner answers again.
+        if (!options.approvalId) throw refusal;
+        refused.error = refusal;
+        return null;
       }
-      if (row.takenDownAt) throw takenDown();
-      if (change.version === undefined && change.versionId === undefined) {
-        throw new DomainError(400, 'VERSION_REQUIRED', 'Name the version to make public');
-      }
-      const [version] = await tx
-        .select()
-        .from(schema.artifactVersions)
-        .where(
-          and(
-            eq(schema.artifactVersions.artifactId, row.id),
-            change.versionId !== undefined
-              ? eq(schema.artifactVersions.id, change.versionId)
-              : eq(schema.artifactVersions.version, change.version!),
-          ),
-        );
-      if (!version) throw notFound('Version not found');
-      if (options.requireCurrent && version.id !== row.currentVersionId) {
-        const current = await versionById(tx, row.currentVersionId);
-        throw new DomainError(
-          409,
-          'VERSION_CONFLICT',
-          `A newer version (v${current?.version ?? '?'}) was saved. Check it, then make it public.`,
-        );
-      }
-      publicVersion = version;
     }
-    const before = await versionById(tx, row.publicVersionId);
-    const [updated] = await tx
-      .update(schema.artifacts)
-      .set({
-        visibility: change.visibility,
-        // Going back to org or private forgets the confirmed version: public
-        // again later needs a person to confirm one again.
-        publicVersionId: publicVersion?.id ?? null,
-        sharedBy: actor.id,
-        sharedAt: new Date(),
-      })
-      .where(eq(schema.artifacts.id, row.id))
-      .returning();
-    await recordAudit(tx, {
-      workspaceId: row.workspaceId,
-      actor,
-      action: 'artifact.visibility',
-      targetType: 'artifact',
-      targetId: row.id,
-      metadata: {
-        from: row.visibility,
-        to: change.visibility,
-        ...(before && row.visibility === 'public' ? { fromVersion: before.version } : {}),
-        ...(publicVersion ? { version: publicVersion.version } : {}),
-        ...(options.approvalId ? { approvalId: options.approvalId } : {}),
-      },
+    return writeVisibility(tx, row, change.visibility, actor, {
+      ...(options.approvalId ? { approvalId: options.approvalId } : {}),
     });
-    return updated!;
   });
+  if (!artifact) throw refused.error!;
   return sharingState(deps, owner, artifact);
+}
+
+async function writeVisibility(
+  tx: Db,
+  row: ArtifactRow,
+  visibility: ArtifactVisibility,
+  actor: AuditActor & { type: 'user' },
+  metadata: Record<string, unknown>,
+): Promise<ArtifactRow> {
+  const [updated] = await tx
+    .update(schema.artifacts)
+    .set({ visibility, sharedBy: actor.id, sharedAt: new Date() })
+    .where(eq(schema.artifacts.id, row.id))
+    .returning();
+  await recordAudit(tx, {
+    workspaceId: row.workspaceId,
+    actor,
+    action: 'artifact.visibility',
+    targetType: 'artifact',
+    targetId: row.id,
+    metadata: { from: row.visibility, to: visibility, ...metadata },
+  });
+  return updated!;
+}
+
+/**
+ * `PUT /artifacts/{id}/sharing`: its owner changes who may see it
+ * (`setVisibility`), or an owner or admin of the organization narrows
+ * someone else's shared Artifact, which is how what a suspended or removed
+ * member shared is stopped. An admin never widens another's Artifact (403
+ * `OWNER_ONLY`) and never reaches a private one (404, as for anyone else);
+ * narrowing needs no person, as an owner's does not. Audited with the owner.
+ */
+export async function changeSharing(
+  deps: SharingDeps,
+  caller: CurrentUser & { apiKeyId?: string | null },
+  artifactId: string,
+  change: VisibilityChange,
+): Promise<SharingState> {
+  requireArtifactHost(deps.config);
+  if (!UUID.test(artifactId)) throw notFound('Artifact not found');
+  const [found] = await deps.db
+    .select({ ownerId: schema.artifacts.ownerId })
+    .from(schema.artifacts)
+    .where(
+      and(
+        eq(schema.artifacts.id, artifactId),
+        eq(schema.artifacts.workspaceId, caller.workspaceId),
+      ),
+    );
+  if (!found || found.ownerId === caller.id || !isOrgAdmin(caller.role)) {
+    return setVisibility(
+      deps,
+      caller,
+      artifactId,
+      change,
+      { type: 'user', id: caller.id },
+      {
+        caller,
+      },
+    );
+  }
+  const artifact = await deps.db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.artifacts)
+      .where(
+        and(
+          eq(schema.artifacts.id, artifactId),
+          eq(schema.artifacts.workspaceId, caller.workspaceId),
+        ),
+      )
+      .for('update');
+    // Only what is shared with the organization is within an admin's reach.
+    if (!row || row.visibility === 'private') throw notFound('Artifact not found');
+    if (RANK[change.visibility] >= RANK[row.visibility]) throw ownerOnly();
+    return writeVisibility(
+      tx,
+      row,
+      change.visibility,
+      { type: 'user', id: caller.id },
+      { owner: row.ownerId },
+    );
+  });
+  return sharingState(deps, null, artifact);
 }
 
 // --- A Bot's request, after its owner approved it -----------------------------------
@@ -510,17 +621,7 @@ const toShare = (args: unknown): ShareRequest | null => {
   if (!a || typeof a.id !== 'string' || (a.visibility !== 'org' && a.visibility !== 'public')) {
     return null;
   }
-  return {
-    id: a.id,
-    visibility: a.visibility,
-    version: typeof a.version === 'number' ? a.version : undefined,
-  };
-};
-
-/** The version a `public` approval was given for, by id (`artifactSharing().prepare`). */
-const approvedVersionId = (args: unknown): string | null => {
-  const id = (args as { version_id?: unknown } | null)?.version_id;
-  return typeof id === 'string' && UUID.test(id) ? id : null;
+  return { id: a.id, visibility: a.visibility };
 };
 
 const notApproved = () =>
@@ -530,14 +631,11 @@ const notApproved = () =>
 
 /**
  * Applies a Bot's share request, only on the approval its owner gave for
- * this exact request in this run, decided by the Artifact's owner and not
- * used before. The policy engine already makes the call wait for that
- * approval; this is the server's own check, so a path that ran the tool any
- * other way still shares nothing.
- *
- * `public` publishes the version the approval names by id, the one the
- * owner was shown, even when a newer version was saved since: that one
- * stays private until a person confirms it.
+ * this exact request (this Artifact, this audience) in this run, decided by
+ * the Artifact's owner and not used before. The policy engine already makes
+ * the call wait for that approval; this is the server's own check, so a path
+ * that ran the tool any other way still shares nothing. What is shared is
+ * the Artifact itself: its viewers see its latest version, now and later.
  */
 export async function shareFromApproval(
   deps: SharingDeps,
@@ -565,21 +663,15 @@ export async function shareFromApproval(
       asked !== null &&
       asked.id === request.id &&
       asked.visibility === request.visibility &&
-      asked.version === request.version &&
       row.decidedBy === owner.id
     );
   });
   if (!approval) throw notApproved();
-  const versionId = approvedVersionId(approval.args);
-  // A public approval always names its version by id; one that does not was never shown one.
-  if (request.visibility === 'public' && !versionId) throw notApproved();
   return setVisibility(
     deps,
     owner,
     request.id,
-    request.visibility === 'public'
-      ? { visibility: 'public', versionId: versionId! }
-      : { visibility: request.visibility },
+    { visibility: request.visibility },
     { type: 'user', id: approval.decidedBy! },
     { approvalId: approval.id },
   );
@@ -593,35 +685,27 @@ export function artifactSharing(
 ): ArtifactSharing | undefined {
   if (!deps.config.artifactHost) return undefined;
   return {
-    async prepare({ id, visibility, version }) {
+    async prepare({ id, visibility }) {
       const artifact = await ownedArtifact(deps.db, owner, id).catch(() => null);
       if (!artifact) return { summary: `Share Artifact ${id}, which you do not have` };
       const title = `“${artifact.title.slice(0, 120)}”`;
       if (visibility === 'org') {
         return {
-          summary: `Share ${title} with everyone in your organization: members can view its latest version, read only`,
+          summary: `Share ${title} with everyone in your organization: members can view it and every future version of it, read only`,
         };
       }
-      // The version is resolved now, so the owner approves one that exists,
-      // and the approval keeps its id: a version saved later under the same
-      // number, or any newer one, is never what gets published on it.
-      const current = await versionById(deps.db, artifact.currentVersionId);
-      const named =
-        version === undefined ? current : await versionByNumber(deps.db, artifact.id, version);
-      if (!named) {
+      // Refused now, with nobody asked: the owner could not approve it anyway.
+      const workspace = await getOrganization(deps.db, artifact.workspaceId);
+      if (!effectiveSettings(deps.config, workspace).publicArtifactsEnabled) {
         throw new Error(
-          version === undefined || !current
-            ? `${title} has no version to make public yet.`
-            : `${title} has no version ${version}; its current version is ${current.version}. Name a version it has.`,
+          `${title} cannot be made public: your organization has not turned on public links. An owner or admin can turn them on in Settings. You can ask to share it with the organization instead.`,
         );
       }
-      const notCurrent =
-        named.id === current?.id
-          ? ''
-          : `, which is not its current version (v${current?.version ?? '?'})`;
+      if (artifact.takenDownAt) {
+        throw new Error(`${title} cannot be made public: the service took its public link down.`);
+      }
       return {
-        summary: `Make version ${named.version} of ${title} public${notCurrent}: anyone with the link can view it, without signing in`,
-        versionId: named.id,
+        summary: `Make ${title} public: anyone with the link can view it and every future version of it, without signing in`,
       };
     },
     async apply(request) {
@@ -630,7 +714,6 @@ export function artifactSharing(
         shared: true,
         artifact_id: request.id,
         visibility: request.visibility,
-        ...(state.publicVersion ? { version: state.publicVersion } : {}),
         ...(state.url ? { url: state.url } : {}),
       };
     },
@@ -693,7 +776,6 @@ export async function listShared(
   requireArtifactHost(deps.config);
   const { db, config } = deps;
   const a = schema.artifacts;
-  const m = schema.workspaceMembers;
   const take = Math.min(Math.max(1, limit), SHARED_PAGE.max);
   const workspace = await getOrganization(db, viewer.workspaceId);
   const publicServed = effectiveSettings(config, workspace).publicArtifactsEnabled;
@@ -705,21 +787,11 @@ export async function listShared(
       and(
         eq(a.workspaceId, viewer.workspaceId),
         inArray(a.visibility, ['org', 'public']),
-        // Nothing of a suspended or removed owner's is shown to anyone.
-        exists(
-          db
-            .select({ id: m.id })
-            .from(m)
-            .where(
-              and(eq(m.workspaceId, a.workspaceId), eq(m.userId, a.ownerId), isNull(m.suspendedAt)),
-            ),
-        ),
+        // What a suspended or removed owner shared stays listed, as `viewOf` serves it.
         or(
-          eq(a.ownerId, viewer.id),
+          viewerActive ? eq(a.ownerId, viewer.id) : undefined,
           viewerActive ? eq(a.visibility, 'org') : undefined,
-          publicServed
-            ? and(eq(a.visibility, 'public'), isNull(a.takenDownAt), isNotNull(a.publicVersionId))
-            : undefined,
+          publicServed ? and(eq(a.visibility, 'public'), isNull(a.takenDownAt)) : undefined,
         ),
         // Keyset on (updated_at, id), read from the cursor row (as the attachments list).
         cursor
@@ -735,13 +807,8 @@ export async function listShared(
 
   const audienceOf = (artifact: ArtifactRow): Audience =>
     artifact.ownerId === viewer.id ? 'owner' : artifact.visibility === 'org' ? 'member' : 'public';
-  // The version each viewer sees; the owner's own public Artifact is listed
-  // as others see it, at the confirmed version.
-  const versionIdOf = (artifact: ArtifactRow) =>
-    artifact.visibility !== 'public'
-      ? artifact.currentVersionId
-      : (artifact.publicVersionId ??
-        (artifact.ownerId === viewer.id ? artifact.currentVersionId : null));
+  // Everyone who may see it sees its latest version.
+  const versionIdOf = (artifact: ArtifactRow) => artifact.currentVersionId;
   const ids = (values: (string | null)[]) => [
     ...new Set(values.filter((v): v is string => v !== null)),
   ];

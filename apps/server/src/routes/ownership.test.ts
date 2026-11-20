@@ -467,11 +467,14 @@ describe('ownership', () => {
     const plain = (await (await call(alice, 'POST', '/api-keys', { name: 'script' })).json()) as {
       key: string;
     };
+    expect((await call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: true })).status).toBe(
+      200,
+    );
     const share = (key: string) =>
       t.app.request(`/api/v1/artifacts/${artifact.id}/sharing`, {
         method: 'PUT',
         headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ visibility: 'public', version: 1, confirmed: true }),
+        body: JSON.stringify({ visibility: 'public', confirmed: true }),
       });
     expect((await share(plain.key)).status).toBe(403);
     const fromPhone = await share(paired.key);

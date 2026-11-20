@@ -17,11 +17,12 @@ import { api, capabilitiesQuery } from '../../app/api.js';
 
 // Sharing an Artifact (plan 21.11), in the viewer: who can see it now, a
 // change to it, the link to copy and Open in browser, and a Bot's request
-// to share it waiting for the owner. Nothing becomes public without the
-// confirmation dialog, which says who will be able to see it and which
-// version; a newer version stays private until the owner confirms it with
-// Update the public version. Shown only when the server hosts Artifacts
-// (`artifactSharing` in /capabilities).
+// to share it waiting for the owner. Whoever can see it sees its latest
+// version. Nothing becomes public without the confirmation dialog, which
+// says who will be able to see it and that later edits, a Bot's included,
+// are public at once. Public is offered only when an owner or admin turned
+// public links on for the organization. Shown only when the server hosts
+// Artifacts (`artifactSharing` in /capabilities).
 
 export type ArtifactSharing = components['schemas']['ArtifactSharing'];
 type Visibility = ArtifactSharing['visibility'];
@@ -53,6 +54,10 @@ export async function openInBrowser(artifactId: string) {
   }
 }
 
+/** What making an Artifact public means for later edits, in one sentence. */
+export const PUBLIC_EDITS_NOTE =
+  'Every later edit, including one your Bot makes, is public as soon as it is saved, without asking you again.';
+
 export const VISIBILITY_LABELS: Record<Visibility, string> = {
   private: 'Only you',
   org: 'Your organization',
@@ -61,8 +66,8 @@ export const VISIBILITY_LABELS: Record<Visibility, string> = {
 
 const DESCRIPTIONS: Record<Visibility, string> = {
   private: 'Nobody else can see it.',
-  org: 'Every member of your organization can view the latest version. Nobody can change it.',
-  public: 'Anyone with the link can view the version you confirmed, without signing in.',
+  org: 'Every member of your organization can view the latest version. Nobody else can change it.',
+  public: 'Anyone with the link can view the latest version, without signing in.',
 };
 
 export function ShareControl({ artifactId, title }: { artifactId: string; title: string }) {
@@ -74,10 +79,8 @@ export function ShareControl({ artifactId, title }: { artifactId: string; title:
 function SharePanel({ artifactId, title }: { artifactId: string; title: string }) {
   const queryClient = useQueryClient();
   const sharing = useQuery(sharingQuery(artifactId));
-  /** The version a public confirmation is for, while the dialog is open. */
-  const [confirming, setConfirming] = useState<{ version: number; approvalId?: string } | null>(
-    null,
-  );
+  /** A public confirmation, while the dialog is open: the owner's own, or a Bot's request. */
+  const [confirming, setConfirming] = useState<{ approvalId?: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
   const refresh = (next?: ArtifactSharing) => {
@@ -85,7 +88,7 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
     return queryClient.invalidateQueries({ queryKey: ['shared-artifacts'] });
   };
   const change = useMutation({
-    mutationFn: (body: { visibility: Visibility; version?: number; confirmed?: true }) =>
+    mutationFn: (body: { visibility: Visibility; confirmed?: true }) =>
       unwrap(
         api.PUT('/api/v1/artifacts/{id}/sharing', {
           params: { path: { id: artifactId } },
@@ -119,23 +122,18 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
   const state = sharing.data;
   const current = state.currentVersion;
   const pending = state.pendingRequest;
-  const stale =
-    state.visibility === 'public' &&
-    state.publicVersion !== null &&
-    current !== null &&
-    state.publicVersion < current;
   const error = change.error ?? decide.error ?? open.error;
-  /** A Bot asks to publish a version other than the current one (an older one: newer ones do not exist). */
-  const pendingOlder =
-    pending?.visibility === 'public' &&
-    pending.version !== null &&
-    current !== null &&
-    pending.version !== current;
+  /** Why the public option cannot be chosen now, or null when it can. */
+  const publicBlocked = state.takenDown
+    ? 'The service took the public link to this Artifact down. It cannot be made public again.'
+    : !state.publicAllowed
+      ? 'Public links are off for your organization. An owner or admin can turn them on in Settings.'
+      : null;
 
   function choose(next: Visibility) {
-    if (next === state.visibility && next !== 'public') return;
+    if (next === state.visibility) return;
     if (next === 'public') {
-      if (current !== null) setConfirming({ version: current });
+      if (current !== null && !publicBlocked) setConfirming({});
       return;
     }
     change.mutate({ visibility: next });
@@ -161,10 +159,11 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
             variant={state.visibility === option ? 'secondary' : 'outline'}
             disabled={
               change.isPending ||
-              (option === 'public' && state.visibility !== 'public' && !state.publicAllowed) ||
-              (option === 'public' && state.takenDown) ||
-              (option === 'public' && current === null)
+              (option === 'public' &&
+                state.visibility !== 'public' &&
+                (publicBlocked !== null || current === null))
             }
+            title={option === 'public' && publicBlocked ? publicBlocked : undefined}
             onClick={() => choose(option)}
           >
             {VISIBILITY_LABELS[option]}
@@ -173,52 +172,30 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
       </div>
       <p className="text-xs text-muted-foreground" data-visibility={state.visibility}>
         {DESCRIPTIONS[state.visibility]}
-        {state.visibility === 'public' && state.publicVersion !== null
-          ? ` The link shows version ${state.publicVersion}.`
-          : ''}
       </p>
-      {!state.publicAllowed && (
-        <p className="text-xs text-muted-foreground">
-          Your organization has turned off public links
-          {state.visibility === 'public' ? ', so this link does not work now.' : '.'}
+      {publicBlocked && (
+        <p
+          className={state.takenDown ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}
+          data-testid="public-blocked"
+        >
+          {publicBlocked}
         </p>
-      )}
-      {state.takenDown && (
-        <p className="text-xs text-destructive">
-          The service took the public link to this Artifact down. It cannot be made public again.
-        </p>
-      )}
-      {stale && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span>
-            Version {current} is newer than the public one. It stays private until you confirm it.
-          </span>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!state.publicAllowed || state.takenDown}
-            onClick={() => setConfirming({ version: current! })}
-          >
-            Update the public version
-          </Button>
-        </div>
       )}
       {pending && (
         <div className="flex flex-col gap-2 rounded border p-2 text-xs" role="status">
           <p>
             {pending.visibility === 'public'
-              ? `Your Bot asks to make version ${pending.version ?? '?'} public, so anyone with the link could view it.`
-              : 'Your Bot asks to share this with everyone in your organization.'}
-            {pendingOlder &&
-              ` Version ${pending.version} is not the current version. Version ${current} stays private unless you confirm it.`}
+              ? 'Your Bot asks to make this public, so anyone with the link could view it and every later version.'
+              : 'Your Bot asks to share this with everyone in your organization, so members could view it and every later version.'}
+            {pending.visibility === 'public' && publicBlocked ? ` ${publicBlocked}` : ''}
           </p>
           <div className="flex gap-2">
             <Button
               size="sm"
-              disabled={decide.isPending}
+              disabled={decide.isPending || (pending.visibility === 'public' && !!publicBlocked)}
               onClick={() =>
                 pending.visibility === 'public'
-                  ? setConfirming({ version: pending.version ?? 0, approvalId: pending.approvalId })
+                  ? setConfirming({ approvalId: pending.approvalId })
                   : decide.mutate({ approvalId: pending.approvalId, decision: 'approve' })
               }
             >
@@ -259,8 +236,7 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
       {error && <p className="text-xs text-destructive">{error.message}</p>}
       <ConfirmPublic
         title={title}
-        version={confirming?.version ?? null}
-        current={current}
+        open={confirming !== null}
         busy={change.isPending || decide.isPending}
         onCancel={() => setConfirming(null)}
         onConfirm={() => {
@@ -268,7 +244,7 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
           if (confirming.approvalId) {
             decide.mutate({ approvalId: confirming.approvalId, decision: 'approve' });
           } else {
-            change.mutate({ visibility: 'public', version: confirming.version, confirmed: true });
+            change.mutate({ visibility: 'public', confirmed: true });
           }
         }}
       />
@@ -276,35 +252,28 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
   );
 }
 
-/** The one step before anything becomes public: who will see it, and which version. */
+/** The one step before anything becomes public: who will see it, now and after every edit. */
 function ConfirmPublic({
   title,
-  version,
-  current,
+  open,
   busy,
   onCancel,
   onConfirm,
 }: {
   title: string;
-  version: number | null;
-  /** The current version, said when it is not the one being published. */
-  current: number | null;
+  open: boolean;
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
 }) {
   return (
-    <Dialog open={version !== null} onOpenChange={(next) => !next && onCancel()}>
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Make this public?</DialogTitle>
           <DialogDescription>
-            Anyone with the link will be able to view version {version} of “{title}”, without
-            signing in. It is not limited to your organization. Later versions stay private until
-            you confirm them. You can stop sharing at any time.
-            {version !== null && current !== null && version !== current
-              ? ` This is not the current version: that is version ${current}.`
-              : ''}
+            Anyone with the link will be able to view “{title}” without signing in. It is not
+            limited to your organization. {PUBLIC_EDITS_NOTE} You can stop sharing at any time.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -312,7 +281,7 @@ function ConfirmPublic({
             Cancel
           </Button>
           <Button disabled={busy} onClick={onConfirm}>
-            Make version {version} public
+            Make it public
           </Button>
         </DialogFooter>
       </DialogContent>

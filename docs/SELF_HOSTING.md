@@ -154,6 +154,9 @@ a Docker container. A self-hosted install does not need it and leaves these empt
 agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
 set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
 the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
+The server calls the Sprites API with Fly's `@fly/sprites` SDK, which adds coarse client headers
+(whether the process has a terminal, its parent's kind, CI) to its requests; set
+`SPRITES_CLIENT_SIGNALS=0` in the server's environment to leave them out.
 
 ### Billing (managed service)
 
@@ -175,9 +178,22 @@ shared page never reaches the app's cookies, and point a wildcard DNS record and
 [apps/artifact-worker](../apps/artifact-worker/README.md), which can terminate the wildcard
 hostname instead and forwards to `/artifact-host/` with this secret. Without it that path answers 404.
 
-Owners and admins can turn public links off for their organization in Settings. An operator can
-take one public link down at once with `openbots artifacts takedown <link> [reason]` (and put it
-back with `openbots artifacts restore <link>`); both are recorded in the organization's audit log.
+An Artifact is private to the person who made it until they share it. Sharing with the
+organization is always possible. Public links are off for every organization until an owner or
+admin turns them on in Settings (Settings > Limits on a self-hosted install, Settings >
+Organization on the managed service). Turning them off makes every public Artifact visible to the
+organization only, and turning them on again brings none of those links back. A shared Artifact
+always shows its latest version, so later edits, a Bot's included, are visible at once. An owner
+or admin can stop sharing any member's Artifact, which is how what a suspended or removed member
+shared is stopped. An operator can take one public link down at once with
+`openbots artifacts takedown <link> [reason]` (and put it back with
+`openbots artifacts restore <link>`); both are recorded in the organization's audit log.
+
+An HTML Artifact runs its scripts in a sandboxed frame with no access to the app or the host's
+cookies, and they cannot fetch anything. They are not cut off from the network, though: browsers
+do not block WebRTC or DNS lookups from that frame, so a script in an Artifact can send what the
+Artifact contains to a server its author names. Treat an Artifact with scripts as able to leak
+what is in it, whoever it is shared with.
 
 ### Egress proxy for the computers
 
@@ -267,11 +283,25 @@ Back up first (below). Migrations run when the new server starts.
   version (or `latest`) first.
 - Built from source: `git pull && docker compose up -d --build`.
 
+Upgrading to the release with shared Artifacts (migration `0048_artifact_sharing`): the migration
+gives every existing Bot its address on the artifact domain, and while it does it locks the
+organizations (`workspaces`) and `bots` tables, so every request that reads or changes a Bot or an
+organization waits until it ends. That takes moments on most installs. On a very large one, upgrade in a
+quiet period.
+
 Computers move to the new computer image too. The server pulls it at start, and each computer is
 made again from it at its next start, keeping its files and browser logins (the Computer page and
 the run's event row say it is updating). A running computer is never replaced under a task: it
 moves after it next stops, at its idle timeout or when you press Stop on its Computer page and
 start it again.
+
+Upgrading to the release that moves to Node 24: the server, the relay and the Bots' computer now
+need Node 24. The official images (server, computer, relay and standalone) already include it, so a
+Docker, compose bundle, Fly or standalone install needs no change. A server or relay run from a
+checkout without Docker needs Node 24 first: run `bash scripts/dev-setup.sh` again (it installs
+Node 24 when the one it finds is another major version), or install Node 24 yourself, then run
+`pnpm install` and `pnpm rebuild` so native modules are built for it. Node 22 is no longer
+accepted by `pnpm install`.
 
 Upgrading from a version without `docker-guard`:
 
@@ -539,11 +569,11 @@ current prices: [Fly.io](https://fly.io/docs/about/pricing/),
 Requirements: Linux or macOS with `curl`, `tar` and `xz`. Nothing else needs to be preinstalled.
 
 ```sh
-bash scripts/dev-setup.sh            # Node 22, pnpm (via corepack), pnpm install
+bash scripts/dev-setup.sh            # Node 24, pnpm (via corepack), pnpm install
 bash scripts/dev-setup.sh --services # also Postgres 16 + pgvector and Redis (Ubuntu, apt)
 ```
 
-The script is idempotent. It reuses a Node 22 on `PATH`, or installs one into a toolchain directory
+The script is idempotent. It reuses a Node 24 on `PATH`, or installs one into a toolchain directory
 (`/workspace/.openbots-toolchain` when it has room, else `~/.local/openbots-toolchain`; set
 `OPENBOTS_TOOLCHAIN_DIR` to choose). It prints the exports to add to your shell and writes them to
 `<toolchain dir>/env.sh`.

@@ -61,10 +61,7 @@ describe('a Bot asking to share an Artifact', () => {
   async function botAsking(
     name: string,
     args: Record<string, unknown>,
-    {
-      versions = 1,
-      approval: expectApproval = true,
-    }: { versions?: number; approval?: boolean } = {},
+    { approval: expectApproval = true }: { approval?: boolean } = {},
   ) {
     const res = await call('POST', '/bots', {
       name,
@@ -83,7 +80,6 @@ describe('a Bot asking to share an Artifact', () => {
       { title: `${name} report`, kind: 'document', botId: bot.id, content: 'quarterly numbers' },
       { userId: ownerId },
     );
-    for (let v = 2; v <= versions; v++) await saveVersion(artifact.id, `v${v}`);
     models.set(bot.id, {
       model: scriptedModel([
         [{ tool: 'request_artifact_share', args: { id: artifact.id, ...args }, id: 's1' }],
@@ -110,27 +106,21 @@ describe('a Bot asking to share an Artifact', () => {
   const saveVersion = (id: string, content: string) =>
     writeArtifact(t.ownerDeps, { id: ownerId, workspaceId }, id, { content }, { userId: ownerId });
 
-  const versionsOf = async (id: string) =>
-    Object.fromEntries(
-      (
-        await t.db
-          .select()
-          .from(schema.artifactVersions)
-          .where(eq(schema.artifactVersions.artifactId, id))
-      ).map((v) => [v.version, v.id]),
-    ) as Record<number, string>;
-
   const visibilityOf = async (id: string) =>
     (await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id)))[0]!;
 
-  it('waits for the owner whatever the settings say, and shows what would be shared', async () => {
-    const { bot, artifactId, approval } = await botAsking('Asker', {
-      visibility: 'public',
-      version: 1,
-    });
+  /** The owner (an admin of their install) turns public links on or off. */
+  const publicLinks = async (on: boolean) =>
+    expect((await call('PATCH', '/settings', { publicArtifactsEnabled: on })).status).toBe(200);
+
+  it('waits for the owner whatever the settings say, and says future versions become public', async () => {
+    await publicLinks(true);
+    const { bot, artifactId, approval } = await botAsking('Asker', { visibility: 'public' });
     const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
     expect(run!.status).toBe('waiting');
     expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    // The approval names the Artifact only: no version is pinned.
+    expect(approval.args).toEqual({ id: artifactId, visibility: 'public' });
     const [message] = await t.db
       .select()
       .from(schema.messages)
@@ -139,18 +129,15 @@ describe('a Bot asking to share an Artifact', () => {
       (p) => p.type === 'widget' && p.kind === 'approval',
     ) as { props: { summary: string; trace: { why: string }[] } };
     expect(widget.props.summary).toBe(
-      'Make version 1 of “Asker report” public: anyone with the link can view it, without signing in',
+      'Make “Asker report” public: anyone with the link can view it and every future version of it, without signing in',
     );
     expect(widget.props.trace.at(-1)!.why).toContain('always waits for its owner');
     // The viewer shows the pending request.
     const sharing = (await (await call('GET', `/artifacts/${artifactId}/sharing`)).json()) as {
-      pendingRequest: { approvalId: string; visibility: string; version: number };
+      pendingRequest: Record<string, unknown>;
     };
-    expect(sharing.pendingRequest).toMatchObject({
-      approvalId: approval.id,
-      visibility: 'public',
-      version: 1,
-    });
+    expect(sharing.pendingRequest).toMatchObject({ approvalId: approval.id, visibility: 'public' });
+    expect(sharing.pendingRequest).not.toHaveProperty('version');
 
     // A script's API key cannot approve it.
     const key = (await (await call('POST', '/api-keys', { name: 'script' })).json()) as {
@@ -170,7 +157,8 @@ describe('a Bot asking to share an Artifact', () => {
       .where(eq(schema.approvals.id, approval.id));
     expect(still!.status).toBe('pending');
 
-    // The owner approves in the app: the version named is published, audited with the approval.
+    // A version saved while the request waits is what the link shows once approved.
+    await saveVersion(artifactId, 'newer numbers');
     const decided = await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
     expect(decided.status).toBe(200);
     await until(async () => {
@@ -192,14 +180,15 @@ describe('a Bot asking to share an Artifact', () => {
     expect(audit).toMatchObject({
       actorType: 'user',
       actorId: ownerId,
-      metadata: { from: 'private', to: 'public', version: 1, approvalId: approval.id },
+      metadata: { from: 'private', to: 'public', approvalId: approval.id },
     });
+    await publicLinks(false);
   });
 
-  it('refuses a version that does not exist, and asks the owner nothing', async () => {
+  it('refuses a public request while public links are off, and asks the owner nothing', async () => {
     const { bot, artifactId } = await botAsking(
-      'Ahead',
-      { visibility: 'public', version: 5 },
+      'Closed',
+      { visibility: 'public' },
       { approval: false },
     );
     const run = await until(async () => {
@@ -207,29 +196,62 @@ describe('a Bot asking to share an Artifact', () => {
       expect(row!.status).toBe('completed');
       return row!;
     });
-    const asked = (
-      await t.db.select().from(schema.approvals).where(eq(schema.approvals.runId, run.id))
-    ).length;
-    expect(asked).toBe(0);
+    const asked = await t.db
+      .select()
+      .from(schema.approvals)
+      .where(eq(schema.approvals.runId, run.id));
+    expect(asked).toHaveLength(0);
     const parts = (
       await t.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
     ).flatMap((m) => m.parts as MessagePart[]);
     const result = parts.find((p) => p.type === 'tool_result') as { result: unknown };
-    expect(JSON.stringify(result.result)).toContain('has no version 5');
-    // Saving version 5 later changes nothing: nothing was ever approved.
-    for (let v = 2; v <= 5; v++) await saveVersion(artifactId, `v${v}`);
+    expect(JSON.stringify(result.result)).toContain('has not turned on public links');
     expect((await visibilityOf(artifactId)).visibility).toBe('private');
   });
 
-  it('publishes exactly the version the owner approved, and says when it is not the current one', async () => {
-    const { artifactId, approval } = await botAsking(
-      'Older',
-      { visibility: 'public', version: 1 },
-      { versions: 2 },
+  it('refuses an approved public request once public links went off meanwhile, and uses the approval up', async () => {
+    await publicLinks(true);
+    const { bot, artifactId, approval } = await botAsking('Switched', { visibility: 'public' });
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+    // An admin turns public links off before the owner answers.
+    await publicLinks(false);
+    const decided = await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
+    expect(decided.status).toBe(200);
+    // The run goes on: the tool gets an error, and nothing is shared.
+    await until(async () => {
+      const [after] = await t.db.select().from(schema.runs).where(eq(schema.runs.id, run!.id));
+      expect(after!.status).toBe('completed');
+    });
+    const parts = (
+      await t.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
+    ).flatMap((m) => m.parts as MessagePart[]);
+    const result = parts.find((p) => p.type === 'tool_result') as {
+      result: unknown;
+      isError?: boolean;
+    };
+    expect(JSON.stringify(result.result)).toContain('has not turned on public links');
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    // The approval was for then: on again, it shares nothing.
+    const [used] = await t.db
+      .select()
+      .from(schema.approvals)
+      .where(eq(schema.approvals.id, approval.id));
+    expect(used!.consumedAt).toBeInstanceOf(Date);
+    await publicLinks(true);
+    const share = artifactServices(
+      t.ownerDeps,
+      { id: run!.id, chatId: bot.chatId },
+      { id: bot.id, ownerId, workspaceId },
+    ).share!;
+    await expect(share.apply({ id: artifactId, visibility: 'public' })).rejects.toThrow(
+      'has not approved',
     );
-    const ids = await versionsOf(artifactId);
-    // The approval names the version itself, not only its number.
-    expect(approval.args).toMatchObject({ version: 1, version_id: ids[1] });
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    await publicLinks(false);
+  });
+
+  it('says plainly that sharing with the organization covers future versions too', async () => {
+    const { approval } = await botAsking('Teammate', { visibility: 'org' });
     const [message] = await t.db
       .select()
       .from(schema.messages)
@@ -238,16 +260,31 @@ describe('a Bot asking to share an Artifact', () => {
       (p) => p.type === 'widget' && p.kind === 'approval',
     ) as { props: { summary: string } };
     expect(widget.props.summary).toBe(
-      'Make version 1 of “Older report” public, which is not its current version (v2): anyone with the link can view it, without signing in',
+      'Share “Teammate report” with everyone in your organization: members can view it and every future version of it, read only',
     );
-    // A newer version is saved while the request waits; the owner approves.
-    await saveVersion(artifactId, 'v3');
-    const decided = await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
-    expect(decided.status).toBe(200);
-    await until(async () => expect((await visibilityOf(artifactId)).visibility).toBe('public'));
-    const shared = await visibilityOf(artifactId);
-    expect(shared.publicVersionId).toBe(ids[1]);
-    expect(shared.currentVersionId).toBe((await versionsOf(artifactId))[3]);
+    await call('POST', `/approvals/${approval.id}/decide`, { decision: 'deny' });
+  });
+
+  it('applies an approval only to the Artifact it names', async () => {
+    const { bot, artifactId, approval } = await botAsking('Exact', { visibility: 'org' });
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+    const { artifact: other } = await createArtifact(
+      t.ownerDeps,
+      { id: ownerId, workspaceId },
+      { title: 'Other', kind: 'document', botId: bot.id, content: 'other' },
+      { userId: ownerId },
+    );
+    const share = artifactServices(
+      t.ownerDeps,
+      { id: run!.id, chatId: bot.chatId },
+      { id: bot.id, ownerId, workspaceId },
+    ).share!;
+    await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
+    await until(async () => expect((await visibilityOf(artifactId)).visibility).toBe('org'));
+    await expect(share.apply({ id: other.id, visibility: 'org' })).rejects.toThrow(
+      'has not approved',
+    );
+    expect((await visibilityOf(other.id)).visibility).toBe('private');
   });
 
   it('uses an approval once, even after its audit entry is gone', async () => {
@@ -304,7 +341,7 @@ describe('a Bot asking to share an Artifact', () => {
     await expect(share.apply({ id: artifactId, visibility: 'org' })).rejects.toThrow(
       'has not approved',
     );
-    await expect(share.apply({ id: artifactId, visibility: 'public', version: 1 })).rejects.toThrow(
+    await expect(share.apply({ id: artifactId, visibility: 'public' })).rejects.toThrow(
       'has not approved',
     );
     expect((await visibilityOf(artifactId)).visibility).toBe('private');

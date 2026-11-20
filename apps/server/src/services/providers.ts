@@ -883,11 +883,13 @@ async function setSmallModel(
   providerId: string,
   modelId: string | null,
 ) {
-  const workspace = await getOrganization(db, workspaceId);
-  const small = { ...storedSettings(workspace).smallModels };
-  if (modelId) small[providerId] = modelId;
-  else delete small[providerId];
-  await updateSettings(db, workspace, { smallModels: small });
+  // Merged from the locked row, so a settings change made meanwhile stays.
+  await updateSettings(db, workspaceId, (current) => {
+    const small = { ...current.smallModels };
+    if (modelId) small[providerId] = modelId;
+    else delete small[providerId];
+    return { smallModels: small };
+  });
 }
 
 /** Refused with 409 while any Bot references the provider (L5). */

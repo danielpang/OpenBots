@@ -681,7 +681,7 @@ describe('Bot limit (B8)', () => {
 
   it('follows the workspace override', async () => {
     const workspace = await ensureWorkspace(t.db);
-    await updateSettings(t.db, workspace, { limits: { botsPerAccount: 3 } });
+    await updateSettings(t.db, workspace.id, { limits: { botsPerAccount: 3 } });
     expect((await post('/bots', { name: 'Three' })).status).toBe(201);
     expect((await post('/bots', { name: 'Four' })).status).toBe(409);
   });

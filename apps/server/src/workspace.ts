@@ -57,9 +57,10 @@ export const storedSettingsSchema = z.object({
   /** Background-task model per provider id, overriding the cheapest-with-tools pick (plan 5.9). */
   smallModels: z.record(z.string(), z.string()).optional(),
   /**
-   * Whether members may make Artifacts public (plan 21.11; on unless an
-   * owner or admin turns it off). Off, existing public links stop working
-   * until it is on again; their Artifacts keep their visibility.
+   * Whether members may make Artifacts public (plan 21.11): off unless an
+   * owner or admin turns it on, so a row written before it existed reads as
+   * off. Turning it off makes every public Artifact an organization one
+   * (`stopPublicLinks`), so on again brings no old link back.
    */
   publicArtifactsEnabled: z.boolean().optional(),
 });
@@ -194,7 +195,7 @@ export function effectiveSettings(
       limits: { ...config.limits, ...stored.limits },
       auditRetentionDays: DEFAULT_AUDIT_RETENTION_DAYS,
       customStdioEnabled: stored.customStdioEnabled ?? false,
-      publicArtifactsEnabled: stored.publicArtifactsEnabled ?? true,
+      publicArtifactsEnabled: stored.publicArtifactsEnabled ?? false,
     };
   }
   const limits: Limits = { ...config.limits, ...stored.limits };
@@ -205,7 +206,7 @@ export function effectiveSettings(
     limits,
     auditRetentionDays: stored.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     customStdioEnabled: stored.customStdioEnabled ?? false,
-    publicArtifactsEnabled: stored.publicArtifactsEnabled ?? true,
+    publicArtifactsEnabled: stored.publicArtifactsEnabled ?? false,
   };
 }
 
@@ -219,21 +220,41 @@ export function raiseLimitHint(config: Pick<Config, 'deployment'>, what = 'it'):
     : `raise ${what} in Settings > Limits`;
 }
 
+/**
+ * Changes an organization's stored settings, merged over the row as locked
+ * here (`FOR NO KEY UPDATE`, inside a transaction of its own or the
+ * caller's), never over a copy read earlier: two admins changing different
+ * settings at once both keep their change, and the caller sees the settings
+ * it replaced as they were when it wrote. `change` is the fields to set, or
+ * a function of the stored settings that returns them. The lock is the one
+ * the update itself would take, so it leaves a key share lock (an insert
+ * whose foreign key names the organization, such as an audit row) free; a
+ * caller that needs more locks takes them after this one.
+ */
 export async function updateSettings(
   db: Db,
-  workspace: Workspace,
-  patch: StoredSettings,
-): Promise<Workspace> {
-  const current = storedSettings(workspace);
-  const next: StoredSettings = {
-    ...current,
-    ...patch,
-    limits: { ...current.limits, ...patch.limits },
-  };
-  const [row] = await db
-    .update(schema.workspaces)
-    .set({ settings: next })
-    .where(eq(schema.workspaces.id, workspace.id))
-    .returning();
-  return row!;
+  workspaceId: string,
+  change: StoredSettings | ((current: StoredSettings) => StoredSettings),
+): Promise<{ before: Workspace; after: Workspace }> {
+  return db.transaction(async (tx) => {
+    const [before] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .for('no key update');
+    if (!before) throw notFound('Organization not found');
+    const current = storedSettings(before);
+    const patch = typeof change === 'function' ? change(current) : change;
+    const next: StoredSettings = {
+      ...current,
+      ...patch,
+      limits: { ...current.limits, ...patch.limits },
+    };
+    const [after] = await tx
+      .update(schema.workspaces)
+      .set({ settings: next })
+      .where(eq(schema.workspaces.id, workspaceId))
+      .returning();
+    return { before, after: after! };
+  });
 }

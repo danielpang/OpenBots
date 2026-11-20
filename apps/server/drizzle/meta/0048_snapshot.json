@@ -6468,12 +6468,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "public_version_id": {
-          "name": "public_version_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "taken_down_at": {
           "name": "taken_down_at",
           "type": "timestamp with time zone",
@@ -6595,19 +6589,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "artifacts_public_version_id_artifact_versions_id_fk": {
-          "name": "artifacts_public_version_id_artifact_versions_id_fk",
-          "tableFrom": "artifacts",
-          "tableTo": "artifact_versions",
-          "columnsFrom": [
-            "public_version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+// The server's own rule, to pin the Worker's copy of it (`fetchPlace`) to it.
+import { contentPolicy } from '../../server/src/artifact-host/handler.js';
 import {
   cacheableRequest,
   cacheableResponse,
   EDGE_CLIENT_IP_HEADER,
   EDGE_HOST_HEADER,
   EDGE_SECRET_HEADER,
+  fetchPlace,
   handle,
   type EdgeRuntime,
   type Env,
@@ -57,6 +60,8 @@ describe('the artifact edge Worker', () => {
           authorization: 'Bearer stolen',
           [EDGE_SECRET_HEADER]: 'forged',
           'x-forwarded-for': '10.0.0.1',
+          'sec-fetch-dest': 'document',
+          'sec-fetch-site': 'none',
         },
       }),
       env,
@@ -68,6 +73,9 @@ describe('the artifact edge Worker', () => {
     expect(forwarded!.headers.get(EDGE_HOST_HEADER)).toBe(HOST);
     expect(forwarded!.headers.get(EDGE_CLIENT_IP_HEADER)).toBe('198.51.100.7');
     expect(forwarded!.headers.get('cookie')).toBe('__Secure-ob_view=v');
+    // Where the browser will put the answer: the server serves a page's content only into its frame.
+    expect(forwarded!.headers.get('sec-fetch-dest')).toBe('document');
+    expect(forwarded!.headers.get('sec-fetch-site')).toBe('none');
     expect(forwarded!.headers.get('authorization')).toBeNull();
     expect(forwarded!.headers.get('x-forwarded-for')).toBeNull();
     expect(forwarded!.redirect).toBe('manual');
@@ -127,6 +135,80 @@ describe('the artifact edge Worker', () => {
       await settle();
       expect(stored.size).toBe(0);
     }
+  });
+
+  it("keeps a page's framed content apart from what a top-level request gets", async () => {
+    const answers: Record<string, string> = {};
+    const { rt, settle, sent } = runtime((request) => {
+      const dest = request.headers.get('sec-fetch-dest') ?? 'none';
+      return new Response(`for ${dest}`, {
+        headers: { 'cache-control': 'public, max-age=60', vary: 'Sec-Fetch-Dest' },
+      });
+    });
+    const get = async (dest: string | null) => {
+      const headers: Record<string, string> = dest
+        ? { 'sec-fetch-dest': dest, 'sec-fetch-site': 'same-origin' }
+        : {};
+      const res = await handle(new Request(`https://${HOST}/${ID}/content`, { headers }), env, rt);
+      await settle();
+      answers[dest ?? 'none'] = await res.text();
+    };
+    await get('iframe');
+    await get('document');
+    await get(null);
+    await get('iframe');
+    expect(answers).toEqual({ iframe: 'for iframe', document: 'for document', none: 'for none' });
+    // The second framed request came from the cache; the others each asked the server.
+    expect(sent).toHaveLength(3);
+  });
+
+  it('keys the cache by what the server tells apart, so made up fetch metadata cannot miss it', async () => {
+    const { rt, settle, sent } = runtime(publicAnswer);
+    const get = async (headers: Record<string, string>) => {
+      await handle(new Request(`https://${HOST}/${ID}/content`, { headers }), env, rt);
+      await settle();
+    };
+    // Each of these gets the page with no script: one answer, asked of the server once.
+    await get({});
+    await get({ 'sec-fetch-dest': 'image', 'sec-fetch-site': 'cross-site' });
+    await get({ 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'none' });
+    await get({ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' });
+    await get({ 'sec-fetch-dest': 'x'.repeat(30), 'sec-fetch-site': 'y'.repeat(30) });
+    expect(sent).toHaveLength(1);
+    // A top-level request is one more, whatever the site says.
+    await get({ 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' });
+    await get({ 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("tells requests apart exactly as the server's handler does", () => {
+    const dests = [null, 'iframe', 'frame', 'document', 'empty', 'image', 'script', 'IFRAME', ''];
+    const sites = [null, 'same-origin', 'same-site', 'cross-site', 'none', 'SAME-ORIGIN', ''];
+    for (const dest of dests) {
+      for (const site of sites) {
+        const headers = new Headers();
+        if (dest !== null) headers.set('sec-fetch-dest', dest);
+        if (site !== null) headers.set('sec-fetch-site', site);
+        const request = new Request(`https://${HOST}/${ID}/content`, { headers });
+        expect(fetchPlace(request), `${dest} ${site}`).toBe(contentPolicy(request));
+      }
+    }
+  });
+
+  it('never caches the page that asks before leaving an Artifact', async () => {
+    const { rt, settle, stored, sent } = runtime(publicAnswer);
+    const to = encodeURIComponent('https://example.com/?d=1');
+    const request = () =>
+      new Request(`https://${HOST}/${ID}/leave?to=${to}`, {
+        headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' },
+      });
+    expect(cacheableRequest(request())).toBe(false);
+    await handle(request(), env, rt);
+    await handle(request(), env, rt);
+    await settle();
+    expect(stored.size).toBe(0);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.url).toBe(`https://app.openbots.example/artifact-host/${ID}/leave?to=${to}`);
   });
 
   it('reads the rules from the headers alone', () => {

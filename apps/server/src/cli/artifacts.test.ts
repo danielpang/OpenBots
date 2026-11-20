@@ -30,6 +30,13 @@ describe('the artifacts command', () => {
       body: JSON.stringify({ name: 'Pages' }),
     });
     const botId = ((await res.json()) as { id: string }).id;
+    // Public links are off until the owner turns them on.
+    const on = await t.app.request('/api/v1/settings', {
+      method: 'PATCH',
+      headers: { origin: ORIGIN, cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ publicArtifactsEnabled: true }),
+    });
+    expect(on.status).toBe(200);
     const owner = { id: ownerId, workspaceId };
     const { artifact } = await createArtifact(
       t.ownerDeps,
@@ -43,7 +50,7 @@ describe('the artifacts command', () => {
         t.deps,
         owner,
         id,
-        { visibility: 'public', version: 1 },
+        { visibility: 'public' },
         {
           type: 'user',
           id: ownerId,

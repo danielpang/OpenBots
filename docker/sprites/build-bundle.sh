@@ -19,7 +19,7 @@
 #
 # Needs Linux on the Sprite's architecture (node-pty is compiled here;
 # provision.sh compiles it again if the binding does not load there), Node
-# 22, pnpm and a C++ toolchain, as the image's build stages do.
+# 24, pnpm and a C++ toolchain, as the image's build stages do.
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,8 +76,8 @@ for tool in node pnpm tar gzip sha256sum gcc; do
   }
 done
 node_version="$(node --version)"
-[[ "$node_version" == v22.* ]] || {
-  echo "the image runs Node 22; this is $node_version" >&2
+[[ "$node_version" == v24.* ]] || {
+  echo "the image runs Node 24; this is $node_version" >&2
   exit 1
 }
 

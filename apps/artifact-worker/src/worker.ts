@@ -29,8 +29,20 @@ export const EDGE_SECRET_HEADER = 'x-openbots-edge-secret';
 export const EDGE_HOST_HEADER = 'x-openbots-artifact-host';
 export const EDGE_CLIENT_IP_HEADER = 'x-openbots-edge-client-ip';
 
-/** The request headers the server may see; nothing else the client sent goes through. */
-const FORWARDED = ['accept', 'accept-language', 'cookie', 'user-agent'];
+/**
+ * The request headers the server may see; nothing else the client sent goes
+ * through. `sec-fetch-dest` and `sec-fetch-site` are the browser's word for
+ * where an answer goes: the server serves a page's content with its scripts
+ * only into the wrapper's frame, and the leaving page only to that page.
+ */
+const FORWARDED = [
+  'accept',
+  'accept-language',
+  'cookie',
+  'user-agent',
+  'sec-fetch-dest',
+  'sec-fetch-site',
+];
 
 const notFound = () =>
   new Response('Not found', {
@@ -48,7 +60,8 @@ const notFound = () =>
  * no cookie, no view token and no credentials, answered 200 with
  * `Cache-Control: public` and no cookie set. A private or organization view
  * always comes with the view cookie or token, and the server marks it
- * `private, no-store`, so it is never stored; both are checked.
+ * `private, no-store`, so it is never stored; both are checked. The page
+ * that asks before leaving an Artifact (`/<id>/leave`) is never stored.
  */
 export function cacheableRequest(request: Request): boolean {
   const url = new URL(request.url);
@@ -56,8 +69,38 @@ export function cacheableRequest(request: Request): boolean {
     request.method === 'GET' &&
     !request.headers.has('cookie') &&
     !request.headers.has('authorization') &&
-    !url.searchParams.has('token')
+    !url.searchParams.has('token') &&
+    !url.pathname.endsWith('/leave')
   );
+}
+
+/**
+ * Where the browser puts the answer, told apart only as the server does
+ * (`contentPolicy` in apps/server/src/artifact-host/handler.ts, which a test
+ * pins this copy to): into a frame on the same host (the wrapper's), as a
+ * page of its own, or anything else.
+ */
+export function fetchPlace(request: Request): 'framed' | 'wrapper' | 'scriptless' {
+  const dest = request.headers.get('sec-fetch-dest');
+  const site = request.headers.get('sec-fetch-site');
+  if (dest === 'iframe' && site === 'same-origin') return 'framed';
+  if (dest === 'document') return 'wrapper';
+  return 'scriptless';
+}
+
+/**
+ * The cache key: the path, and where the browser puts the answer
+ * (`fetchPlace`). The query never changes a public answer, so it is not part
+ * of it (and cannot be used to fill the cache with copies); where the answer
+ * goes does, since a page's content is served with its scripts only into the
+ * wrapper's frame. Only the three outcomes the server tells apart are in it,
+ * never the headers as sent, so made up values cannot miss the cache.
+ */
+export function cacheKey(request: Request): Request {
+  const url = new URL(request.url);
+  const key = new URL(`https://${url.hostname.toLowerCase()}${url.pathname}`);
+  key.searchParams.set('as', fetchPlace(request));
+  return new Request(key, { method: 'GET' });
 }
 
 export function cacheableResponse(response: Response): boolean {
@@ -76,9 +119,7 @@ export async function handle(request: Request, env: Env, runtime: EdgeRuntime): 
   // Only names under the artifact domain; the server checks the label itself.
   if (!host.endsWith(`.${env.ARTIFACT_DOMAIN.toLowerCase()}`)) return notFound();
 
-  // The query never changes a public answer, so it is not part of the key
-  // (and cannot be used to fill the cache with copies).
-  const key = new Request(`https://${host}${url.pathname}`, { method: 'GET' });
+  const key = cacheKey(request);
   const cacheable = cacheableRequest(request);
   if (cacheable) {
     const hit = await runtime.cache.match(key);
