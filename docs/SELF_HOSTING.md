@@ -171,8 +171,11 @@ removed. If the first part fails, the reset fails: the computer was stopped and 
 sessions ended, its files and sign-ins are kept, and its next start sets up a new agent token. The
 member can ask the reset to delete the old Sprite at once instead, from the app or a paired device
 only, not with an API key. A start under way does not hold up a reset: the reset cancels it. A
-stop under way holds it up for at most two minutes, after which the reset takes the computer over,
-and the worker finishes a stop or a start that a stopped process left behind. A retire or a
+stop under way holds it up while the process doing it is alive; a stop whose process died is taken
+over a minute later, and the worker finishes a stop or a start that a stopped process left behind.
+If the reset could neither cut the old Sprite off nor put it back, it says it finishes in the
+background: the computer is free again once the worker takes the old Sprite over, within about ten
+minutes, and a Sprite the member asked to delete is deleted then, never kept. A retire or a
 deletion that keeps failing is given up after 12 attempts and logged as an error; the operator
 lists it and retries it. An operator lists a member's retired computers with `openbots computers
 retired --member <email> --org <organization id>`, every one the worker gave up on with

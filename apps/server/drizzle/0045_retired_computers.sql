@@ -44,6 +44,8 @@ CREATE TABLE "retired_computers" (
 	"fence" text,
 	"context" jsonb,
 	"audited_at" timestamp with time zone,
+	"delete_now" boolean DEFAULT false NOT NULL,
+	"checked_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -102,16 +104,17 @@ GRANT EXECUTE ON FUNCTION openbots_machine_in_use(computer_provider, text, text)
 -- The fences every process enforces (services/computer-fence.ts): the agent
 -- token hash of each machine a reset took off a computer, in any
 -- organization, so a process that missed the bus message, or started after
--- it, still refuses that token. Hashes and computer ids only; its owner reads
--- only those columns.
-GRANT SELECT ("computer_id", "fence", "created_at") ON "retired_computers" TO openbots_system;
+-- it, still refuses that token, and ends what it runs on that machine (the
+-- owner's coding sessions and stdio connectors). Hashes and ids only; its
+-- owner reads only those columns.
+GRANT SELECT ("computer_id", "owner_id", "workspace_id", "fence", "created_at") ON "retired_computers" TO openbots_system;
 --> statement-breakpoint
 CREATE POLICY system_read ON "retired_computers" FOR SELECT TO openbots_system USING (true);
 --> statement-breakpoint
-CREATE FUNCTION openbots_computer_fences(p_since timestamptz) RETURNS TABLE (computer_id uuid, fence text, created_at timestamptz)
+CREATE FUNCTION openbots_computer_fences(p_since timestamptz) RETURNS TABLE (computer_id uuid, owner_id uuid, workspace_id uuid, fence text, created_at timestamptz)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
   AS $$
-    SELECT r.computer_id, r.fence, r.created_at
+    SELECT r.computer_id, r.owner_id, r.workspace_id, r.fence, r.created_at
     FROM retired_computers r
     WHERE r.fence IS NOT NULL AND r.created_at >= p_since
   $$;

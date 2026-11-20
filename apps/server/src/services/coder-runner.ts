@@ -75,6 +75,7 @@ import {
   type CodingSessionRow,
 } from './coder-state.js';
 import { agentFor, beginComputerUse, EXEC_TOUCH_MS, startComputer } from './computer.js';
+import { fenceOf, watchFences } from './computer-fence.js';
 import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
 import { runSource } from './policy.js';
@@ -171,6 +172,8 @@ export interface CoderRunnerOptions {
 interface LiveSession {
   workspaceId: string;
   computerId: string | null;
+  /** The fence of the machine's agent token the session runs on (computer-fence.ts). */
+  fence: string | null;
   control(msg: CoderControl): void;
 }
 
@@ -183,15 +186,26 @@ export function createCoderWorker(
 ): JobHandler<CoderJob> {
   const live: LiveSessions = new Map();
   let subscribed: Promise<unknown> | null = null;
+  // A reset took the machine away (computer-fence.ts): the sessions on it
+  // stop, from the bus or from the database's fences, so a process that
+  // missed the stop message stops them all the same.
+  let fences: (() => void) | null = null;
   const listen = () =>
-    (subscribed ??= subscribeCoderControl(deps, (msg) => {
-      if (msg.type === 'stop_all') {
+    (subscribed ??= Promise.resolve().then(() => {
+      fences ??= watchFences(({ fence }) => {
         for (const [sessionId, session] of live) {
-          if (session.computerId === msg.computerId) session.control({ type: 'stop', sessionId });
+          if (session.fence === fence) session.control({ type: 'stop', sessionId });
         }
-        return;
-      }
-      live.get(msg.sessionId)?.control(msg);
+      });
+      return subscribeCoderControl(deps, (msg) => {
+        if (msg.type === 'stop_all') {
+          for (const [sessionId, session] of live) {
+            if (session.computerId === msg.computerId) session.control({ type: 'stop', sessionId });
+          }
+          return;
+        }
+        live.get(msg.sessionId)?.control(msg);
+      });
     }));
   return async (job) => {
     await listen();
@@ -295,6 +309,9 @@ export async function runSession(
     get computerId() {
       return runner.computerId;
     },
+    get fence() {
+      return runner.fence;
+    },
     control: (msg) => {
       inWorkspace(claimed.workspaceId, () => runner.control(msg)).catch((error: unknown) =>
         deps.logger.warn({ err: error, sessionId }, 'coder control failed'),
@@ -318,6 +335,7 @@ type AccountRow = typeof schema.coderAccounts.$inferSelect;
 /** One session's job: everything it holds while the CLI runs. */
 class SessionRunner {
   computerId: string | null = null;
+  fence: string | null = null;
   private session: CodingSessionRow;
   private proc: CoderProcess | null = null;
   /** The adapter's protocol session, for a `jsonrpc` transport: it answers prompts, not `proc`. */
@@ -452,6 +470,7 @@ class SessionRunner {
 
     const { computer } = await startComputer(deps, this.owner, { type: 'bot', id: bot.id });
     this.computerId = computer.id;
+    this.fence = fenceOf(computer.agentToken);
     this.use = beginComputerUse(deps, computer, 'coding_session', {
       touchMs: this.options.touchMs ?? EXEC_TOUCH_MS,
     });

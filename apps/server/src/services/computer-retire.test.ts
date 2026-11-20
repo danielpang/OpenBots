@@ -30,6 +30,7 @@ import {
   RETIRED_COMPUTERS_QUEUE,
   RETIRE_LEASE_MS,
   RETIRED_LEASE_MS,
+  RETIRED_RECHECK_MS,
   RETIRED_MAX_ATTEMPTS,
   RETIRED_SWEEP_MS,
   retiredComputerHandler,
@@ -145,11 +146,27 @@ describe('retired computers', () => {
         .from(schema.retiredComputers)
         .where(eq(schema.retiredComputers.id, retiredId))
     )[0]?.claim ?? undefined;
-  const job = async (retiredId: string, kind: 'retire' | 'delete') => {
+  const job = async (retiredId: string, kind: 'retire' | 'delete', now?: Date) => {
     const claim = await claimOf(retiredId);
     return t.inOrganization(() =>
-      runRetiredComputerJob(t.deps, machines(), { retiredId, kind, ...(claim ? { claim } : {}) }),
+      runRetiredComputerJob(
+        t.deps,
+        machines(),
+        { retiredId, kind, ...(claim ? { claim } : {}) },
+        now,
+      ),
     );
+  };
+  /**
+   * The sweep's one more run of a retired machine's steps inside, past
+   * `RETIRED_RECHECK_MS` (a provisioning the reset cancelled may have put an
+   * agent back): queued once, run, and not again.
+   */
+  const recheck = async (row: { id: string; retiredAt: Date }) => {
+    const at = new Date(row.retiredAt.getTime() + RETIRED_RECHECK_MS + 1);
+    expect(await sweep(at)).toBe(1);
+    await job(row.id, 'retire', at);
+    expect(await sweep(at)).toBe(0);
   };
   const callsOn = (name: string, from = 0) =>
     sprites.api.calls.slice(from).filter((c) => c.name === name);
@@ -655,6 +672,7 @@ describe('retired computers', () => {
       await isolate(m.ownerId);
       const [row] = await retiredOf(m.ownerId);
       expect(await sweep()).toBe(0);
+      await recheck(row!);
       expect(await sweep(new Date(row!.deleteAfter.getTime() - 1))).toBe(0);
       expect(sprites.api.sprites.has(row!.providerRef)).toBe(true);
       // Two workers sweep at once: one claims it.
@@ -1184,7 +1202,8 @@ describe('retired computers', () => {
       expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
       expect(old.urlAuth).toBe('sprite');
       expect(old.policy).toEqual(SPRITES_DENY_ALL);
-      // Idempotent, and it can still be deleted when due, or restored.
+      // Idempotent past its one more run inside, and it can still be deleted when due, or restored.
+      await recheck((await retiredOf(m.ownerId))[0]!);
       expect(await sweep(later)).toBe(0);
       expect((await m.row()).containerId).toBeNull();
     });

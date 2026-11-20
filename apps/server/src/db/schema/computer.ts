@@ -195,8 +195,22 @@ export const retiredComputers = pgTable(
      * whoever finishes it, in any process.
      */
     context: jsonb('context'),
-    /** When the retire's audit (and a reset's) and cleanup were written: once. */
+    /**
+     * When the retire's audit (and a reset's) and the reset's cleanup were
+     * written, with the member's computer released: once, by whoever sealed it.
+     */
     auditedAt: timestamptz('audited_at'),
+    /**
+     * The member asked for it to be deleted at once rather than kept: written
+     * with the record (`delete_after` is then its retire time), honoured by
+     * every actor that finishes it, and never restorable.
+     */
+    deleteNow: boolean('delete_now').notNull().default(false),
+    /**
+     * When its steps inside were run once more, past the longest a
+     * provisioning the reset cancelled could still run (computer-retire.ts).
+     */
+    checkedAt: timestamptz('checked_at'),
     createdAt: createdAt(),
   },
   (t) => [

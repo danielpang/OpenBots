@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import type { Db } from '../db/client.js';
 import { outsideScope, rowsOf } from '../db/scope.js';
+import { bestEffort } from './best-effort.js';
 
 // The fence a reset puts around the machine it took away (computer-retire.ts,
 // computer.ts `destroyComputer`). Once the machine is out of reach, nothing in
@@ -34,17 +35,27 @@ export interface ComputerFence {
   computerId: string;
   /** The SHA-256, hex, of the row's sealed agent token at the reset. */
   fence: string;
+  /** The computer's owner and organization, for what ends the owner's work on it. */
+  ownerId?: string;
+  workspaceId?: string;
 }
 
-/** Fences this process knows of; a few per reset, so a bounded set is plenty. */
-const fenced = new Set<string>();
-const FENCES_KEPT = 10_000;
+/**
+ * Fences this process knows of, each with when it may be forgotten: past the
+ * longest a retired machine is kept (`FENCE_HISTORY_MS` after its record).
+ * Only an expired one is ever dropped, so no number of resets can push a
+ * live fence out.
+ */
+const fenced = new Map<string, number>();
 /** How often each process reads the fences recorded since its last read. */
 export const FENCE_POLL_MS = 10_000;
 /** How far back a read reaches past the last one: a record committed late is still seen. */
 const FENCE_POLL_OVERLAP_MS = 10 * 60_000;
-/** How far back the first read reaches: longer than any machine is kept. */
-const FENCE_HISTORY_MS = 8 * 24 * 60 * 60_000;
+/** How far back the first read reaches, and how long a fence is kept: longer than any machine is kept. */
+export const FENCE_HISTORY_MS = 8 * 24 * 60 * 60_000;
+/** How often the expired fences are looked for. */
+const FENCE_PRUNE_MS = 60 * 60_000;
+let pruned = 0;
 const listening = new WeakMap<object, Promise<Unsubscribe>>();
 const watchers = new Set<(fence: ComputerFence) => void>();
 
@@ -58,9 +69,13 @@ export function fenceOf(agentToken: Uint8Array | null | undefined): string | nul
   return agentToken ? createHash('sha256').update(agentToken).digest('hex') : null;
 }
 
-function remember(fence: string) {
-  if (fenced.size >= FENCES_KEPT) fenced.delete(fenced.values().next().value!);
-  fenced.add(fence);
+function remember(fence: string, since: number) {
+  const now = Date.now();
+  if (now - pruned >= FENCE_PRUNE_MS) {
+    pruned = now;
+    for (const [known, until] of fenced) if (until <= now) fenced.delete(known);
+  }
+  fenced.set(fence, Math.max(fenced.get(fence) ?? 0, since + FENCE_HISTORY_MS));
 }
 
 /** Whether a row read before a reset names the machine that reset took away. */
@@ -69,9 +84,9 @@ export function isFenced(row: { agentToken: Uint8Array | null }): boolean {
   return fence !== null && fenced.has(fence);
 }
 
-function deliver(message: ComputerFence) {
+function deliver(message: ComputerFence, since = Date.now()) {
   if (fenced.has(message.fence)) return;
-  remember(message.fence);
+  remember(message.fence, since);
   for (const watcher of watchers) {
     try {
       watcher(message);
@@ -89,11 +104,27 @@ function deliver(message: ComputerFence) {
 export async function loadFences(db: Db, since: Date): Promise<number> {
   const result = await outsideScope(() =>
     db.execute(
-      sql`select computer_id, fence from openbots_computer_fences(${since.toISOString()}::timestamptz)`,
+      sql`select computer_id, owner_id, workspace_id, fence, created_at from openbots_computer_fences(${since.toISOString()}::timestamptz)`,
     ),
   );
-  const rows = rowsOf<{ computer_id: string | null; fence: string }>(result);
-  for (const row of rows) deliver({ computerId: row.computer_id ?? '', fence: row.fence });
+  const rows = rowsOf<{
+    computer_id: string | null;
+    owner_id: string;
+    workspace_id: string;
+    fence: string;
+    created_at: string | Date;
+  }>(result);
+  for (const row of rows) {
+    deliver(
+      {
+        computerId: row.computer_id ?? '',
+        fence: row.fence,
+        ownerId: row.owner_id,
+        workspaceId: row.workspace_id,
+      },
+      new Date(row.created_at).getTime(),
+    );
+  }
   return rows.length;
 }
 
@@ -114,7 +145,13 @@ export function listenForFences(deps: {
     ready = (async () => {
       const unsubscribe = await bus.subscribe<ComputerFence>(COMPUTER_FENCE_CHANNEL, (msg) => {
         if (typeof msg?.computerId !== 'string' || typeof msg.fence !== 'string') return;
-        deliver({ computerId: msg.computerId, fence: msg.fence });
+        deliver({
+          computerId: msg.computerId,
+          fence: msg.fence,
+          ...(typeof msg.ownerId === 'string' && typeof msg.workspaceId === 'string'
+            ? { ownerId: msg.ownerId, workspaceId: msg.workspaceId }
+            : {}),
+        });
       });
       let since = new Date(Date.now() - FENCE_HISTORY_MS);
       const poll = async () => {
@@ -141,12 +178,39 @@ export function listenForFences(deps: {
 }
 
 /**
- * Called with every fence this process learns of, its own included; for what
- * holds a machine open (sockets, a sign-in). Returns the way to stop.
+ * Called with every fence this process learns of, its own included, from the
+ * bus or from the database: for what holds a machine open (sockets, a
+ * sign-in, coding sessions, stdio connectors). Returns the way to stop.
  */
 export function watchFences(watcher: (fence: ComputerFence) => void): () => void {
   watchers.add(watcher);
   return () => watchers.delete(watcher);
+}
+
+/**
+ * Fences the machine `row` had in this process only, at once (no I/O): what a
+ * reset does before anything else once its record committed, so nothing here
+ * talks to the old agent while the cut runs. The message, or null when the
+ * row had no token.
+ */
+export function fenceHere(row: {
+  id: string;
+  agentToken?: Uint8Array | null;
+  fence?: string | null;
+  ownerId?: string;
+  workspaceId?: string;
+}): ComputerFence | null {
+  const fence = row.fence ?? fenceOf(row.agentToken);
+  if (!fence) return null;
+  const message: ComputerFence = {
+    computerId: row.id,
+    fence,
+    ...(row.ownerId && row.workspaceId
+      ? { ownerId: row.ownerId, workspaceId: row.workspaceId }
+      : {}),
+  };
+  deliver(message);
+  return message;
 }
 
 /**
@@ -157,15 +221,19 @@ export function watchFences(watcher: (fence: ComputerFence) => void): () => void
  */
 export async function fenceComputer(
   deps: Pick<AppDeps, 'logger'> & { infra: Pick<AppDeps['infra'], 'bus'> },
-  row: { id: string; agentToken?: Uint8Array | null; fence?: string | null },
+  row: {
+    id: string;
+    agentToken?: Uint8Array | null;
+    fence?: string | null;
+    ownerId?: string;
+    workspaceId?: string;
+  },
 ): Promise<void> {
-  const fence = row.fence ?? fenceOf(row.agentToken);
-  if (!fence) return;
-  const message = { computerId: row.id, fence };
-  deliver(message);
-  await deps.infra.bus
-    .publish<ComputerFence>(COMPUTER_FENCE_CHANNEL, message)
-    .catch((error: unknown) =>
+  const message = fenceHere(row);
+  if (!message) return;
+  await bestEffort(
+    deps.infra.bus.publish<ComputerFence>(COMPUTER_FENCE_CHANNEL, message),
+    (error) =>
       deps.logger.warn({ err: error, computerId: row.id }, 'publishing a computer fence failed'),
-    );
+  );
 }

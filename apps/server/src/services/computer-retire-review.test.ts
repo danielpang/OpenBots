@@ -577,18 +577,25 @@ describe('retired computers, second review', () => {
       await loadFences(t.deps.db, new Date(0));
       expect(isFenced(before)).toBe(true);
       expect(() => agentFor(t.ownerDeps, before)).toThrow(/was reset/);
-      // The reset's cleanup went with the record.
-      const [checkout] = await t.db
-        .select()
-        .from(schema.repoCheckouts)
-        .where(eq(schema.repoCheckouts.repoId, repo!.id));
-      expect(checkout).toMatchObject({ state: 'missing' });
+      // The reset's cleanup waits for its point of no return: the record
+      // alone changes nothing of the member's, so an undo would have nothing
+      // to put back.
+      const checkout = async () =>
+        (
+          await t.db
+            .select()
+            .from(schema.repoCheckouts)
+            .where(eq(schema.repoCheckouts.repoId, repo!.id))
+        )[0];
+      expect(await checkout()).toMatchObject({ state: 'ready' });
       const [row] = await retiredOf(m.ownerId);
       expect(await audits('computer.retire', row!.id)).toHaveLength(0);
       expect(await sweep(new Date(row!.nextAttemptAt!.getTime() + 1))).toBe(1);
+      // The job never undoes: it settles the reset, once, then cuts and seals.
       await job(row!.id, 'retire');
       await job(row!.id, 'retire');
       outOfReach(before.containerId!);
+      expect(await checkout()).toMatchObject({ state: 'missing' });
       expect(await audits('computer.retire', row!.id)).toHaveLength(1);
       const resets = (
         await t.db
