@@ -1,7 +1,7 @@
 import { spriteName } from '@openbots/computer';
 import { schema, type Db } from '@openbots/server/db/client';
 import { forEachWorkspace } from '@openbots/server/db/scope';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { HOUR_SECONDS } from './plans.js';
 import { ledgerSecondsBetween } from './store.js';
 
@@ -17,7 +17,10 @@ import { ledgerSecondsBetween } from './store.js';
 
 /** What the provider billed for one Sprite in a window. */
 export interface ProviderUsage {
-  /** The Sprite's name, as Fly knows it (`<prefix>-<computer id without dashes>`). */
+  /**
+   * The Sprite's name, as Fly knows it: `<prefix>-<computer id without dashes>`, or the
+   * machine key in place of the id after a full reset.
+   */
   name: string;
   /** Seconds it was awake and billed. */
   awakeSeconds: number;
@@ -34,7 +37,7 @@ export interface ProviderUsageSource {
 
 export interface Discrepancy {
   workspaceId: string | null;
-  /** Sprites the provider billed that no organization's computer is. */
+  /** Sprites the provider billed that no organization's computer is or was (retired). */
   sprites?: string[];
   ledgerHours: number;
   providerHours: number;
@@ -64,13 +67,8 @@ export async function reconcile(
   const found: Discrepancy[] = [];
   const claimed = new Set<string>();
   await forEachWorkspace(db, async (workspaceId) => {
-    const computers = await db
-      .select({ id: schema.computers.id })
-      .from(schema.computers)
-      .where(eq(schema.computers.workspaceId, workspaceId));
     let providerSeconds = 0;
-    for (const { id } of computers) {
-      const name = spriteName(id, namePrefix);
+    for (const name of await spritesOf(db, workspaceId, namePrefix)) {
       if (!billed.has(name)) continue;
       claimed.add(name);
       providerSeconds += billed.get(name)!;
@@ -97,6 +95,41 @@ export async function reconcile(
     });
   }
   return found.sort((a, b) => b.overMeteredHours - a.overMeteredHours);
+}
+
+/**
+ * The names of every Sprite an organization's computers have had. A computer
+ * is named from its machine key once a full reset gave it one, else from its
+ * id; the Sprite a reset retired keeps its old name, recorded on its
+ * `retired_computers` row, and the member's usage before the reset was on it.
+ */
+async function spritesOf(db: Db, workspaceId: string, namePrefix: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  const computers = await db
+    .select({
+      id: schema.computers.id,
+      provider: schema.computers.provider,
+      containerId: schema.computers.containerId,
+      spec: schema.computers.spec,
+    })
+    .from(schema.computers)
+    .where(eq(schema.computers.workspaceId, workspaceId));
+  for (const computer of computers) {
+    const machineKey = (computer.spec as { machineKey?: string } | null)?.machineKey;
+    names.add(spriteName(machineKey ?? computer.id, namePrefix));
+    if (computer.provider === 'sprites' && computer.containerId) names.add(computer.containerId);
+  }
+  const retired = await db
+    .select({ providerRef: schema.retiredComputers.providerRef })
+    .from(schema.retiredComputers)
+    .where(
+      and(
+        eq(schema.retiredComputers.workspaceId, workspaceId),
+        eq(schema.retiredComputers.provider, 'sprites'),
+      ),
+    );
+  for (const { providerRef } of retired) names.add(providerRef);
+  return names;
 }
 
 /**
