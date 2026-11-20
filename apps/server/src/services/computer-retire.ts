@@ -1548,14 +1548,17 @@ export async function restoreRetiredComputer(
     throw computerBusy(current.status);
   }
   let unretired = false;
+  let replaced: RetiredRow | null = null;
   const ref = machineRef(retired);
   try {
-    let replaced: RetiredRow | null = null;
     let row = current;
+    // The row names every machine that may still exist under it, one whose
+    // home a reset cleared in place too (computer.ts `resetMachine`): it is
+    // retired, never left in service unnamed.
     if (row.containerId) {
       await endWork(deps, row);
       let checkpointId: string | null = null;
-      if (machines.checkpoint && row.agentUrl) {
+      if (machines.checkpoint) {
         checkpointId = await machines
           .checkpoint(
             machineRef(row),
@@ -1586,13 +1589,16 @@ export async function restoreRetiredComputer(
         .where(ours);
       if (!still) throw computerChanged();
     };
-    if (retired.checkpointId) {
-      await stillOurs();
-      await machines.restore?.(ref, retired.checkpointId);
-    }
     await stillOurs();
-    // Set first: an unretire that fails part way still leaves it to be retired again.
+    // Set before anything changes the machine: a checkpoint restore puts its
+    // old agent and token back on the disk, and a restore or an unretire that
+    // fails part way (or lands though its answer was lost) still leaves it to
+    // be cut and cleared inside again.
     unretired = true;
+    if (retired.checkpointId) {
+      await machines.restore?.(ref, retired.checkpointId);
+      await stillOurs();
+    }
     await machines.unretire!(ref);
     const result = await deps.db.transaction(async (tx) => {
       // Checked again where it counts: a removal waits for this to commit, or this sees it.
@@ -1647,6 +1653,30 @@ export async function restoreRetiredComputer(
     await publishStatus(deps, result.computer, 'stopped');
     return { ...result, replaced };
   } catch (error) {
+    // What the record says now decides what is left to do. The last
+    // transaction may have committed though its answer was lost: the machine
+    // is then the member's computer, and nothing of it is undone.
+    let now: Pick<RetiredRow, 'status' | 'claim'> | null | 'unknown';
+    try {
+      const [read] = await deps.db
+        .select({ status: schema.retiredComputers.status, claim: schema.retiredComputers.claim })
+        .from(schema.retiredComputers)
+        .where(eq(schema.retiredComputers.id, retired.id));
+      now = read ?? null;
+    } catch (again) {
+      now = 'unknown';
+      deps.logger.error({ err: again, retiredId: retired.id }, 'reading a restore back failed');
+    }
+    if (now !== 'unknown' && now?.status === 'restored') {
+      const done = await restoredAfterAll(deps, retired, replaced).catch(() => null);
+      if (done) return done;
+      // Committed, but not readable now: the restore stands; the operator reads it again.
+      throw error;
+    }
+    // Not readable: the lease runs out, and the sweep takes the machine back
+    // if the restore did not commit (`sweepRetiredComputers`). Cutting it
+    // here could cut off a machine that is the member's after all.
+    if (now === 'unknown') throw error;
     // Put back in service but not recorded as the member's: out of service again.
     let sealed = true;
     if (unretired) {
@@ -1662,4 +1692,36 @@ export async function restoreRetiredComputer(
     await release(sealed);
     throw error;
   }
+}
+
+/**
+ * A restore whose last transaction committed though its caller saw it fail:
+ * what it made, read back. Null when the member's computer no longer names
+ * the restored machine (something moved it on since).
+ */
+async function restoredAfterAll(
+  deps: Deps,
+  retired: RetiredRow,
+  replaced: RetiredRow | null,
+): Promise<Restored | null> {
+  const [restored] = await deps.db
+    .select()
+    .from(schema.retiredComputers)
+    .where(eq(schema.retiredComputers.id, retired.id));
+  const [computer] = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(
+      and(
+        eq(schema.computers.workspaceId, retired.workspaceId),
+        eq(schema.computers.ownerId, retired.ownerId),
+        eq(schema.computers.containerId, retired.providerRef),
+      ),
+    );
+  if (!restored || !computer) return null;
+  deps.logger.warn(
+    { retiredId: retired.id, computerId: computer.id },
+    'a restore committed though its answer was lost; it stands',
+  );
+  return { restored, replaced, computer };
 }

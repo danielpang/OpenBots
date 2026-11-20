@@ -1448,14 +1448,30 @@ export async function stopComputer(
   by: AuditActor = { type: 'user', id: row.ownerId },
 ): Promise<ComputerRow> {
   if (!row.agentUrl || row.status === 'stopped') return row;
-  endStartWork(row.id);
   // A claim of its own: a start or a job meanwhile writes nothing over it.
+  // Only of the row as read (its status and generation): a reset, a start or
+  // another stop that took it since keeps it, and a stop still held (a
+  // reset's retirement included) is never taken over (`abandonedStop`).
   const [claimed] = await deps.db
     .update(schema.computers)
     .set({ status: 'stopping', statusAt: sql`clock_timestamp()`, generation: nextGeneration() })
-    .where(eq(schema.computers.id, row.id))
+    .where(
+      and(
+        eq(schema.computers.id, row.id),
+        eq(schema.computers.status, row.status),
+        sameGeneration(row),
+        row.status === 'stopping' ? abandonedStop() : undefined,
+      ),
+    )
     .returning();
-  if (!claimed) return row;
+  if (!claimed) {
+    const [now] = await deps.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.id, row.id));
+    return now ?? row;
+  }
+  endStartWork(row.id);
   await publishStatus(deps, claimed, 'stopping');
   return stopMachine(deps, claimed, by);
 }
@@ -1515,7 +1531,11 @@ export interface MachineReset {
  * deleted through its record with `deleteOld`; otherwise the provider removes
  * the container and its home volume, and the state volume only with
  * `signIns`. The row stays, `stopped`, with no machine, so the next start
- * makes a fresh one. Docker and Sprites only: the remote machine is not the
+ * makes a fresh one; where the provider keeps the machine and clears its home
+ * in place (a Sprite reset without its sign-ins), the row goes on naming it
+ * (`containerId`), with no agent, so the next start provisions that machine
+ * again and a later full reset or restore retires it. A row never forgets a
+ * machine that still exists. Docker and Sprites only: the remote machine is not the
  * server's to remove (409 `RESET_UNSUPPORTED`). A stop that fails does not
  * stop the reset, since removing or retiring the machine stops it anyway.
  * Once the old machine is gone or out of reach, every process fences its
@@ -1622,12 +1642,16 @@ export async function resetMachine(
       throw computerUnavailable(`The computer could not be reset: ${message}`);
     }
   }
+  // A machine the provider kept (a Sprite whose home was cleared in place)
+  // is still named on the row: it holds the state directory, the sign-ins
+  // with it, so a later full reset or a restore finds it and retires it.
+  const kept = !options.signIns && machines.keepsMachineOnHomeReset === true;
   const reset = await setStatusIf(
     deps,
     current,
     'stopped',
     {
-      containerId: null,
+      containerId: kept ? current.containerId : null,
       agentUrl: null,
       agentToken: null,
       volumeName: current.volumeName ?? volumeName(row.id),

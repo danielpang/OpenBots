@@ -444,6 +444,8 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
   const provider: ComputerProvider = {
     name: 'sprites',
     ...(options.provision ? { version: options.provision.version } : {}),
+    // `destroy` without `state` clears the home and keeps the Sprite.
+    keepsMachineOnHomeReset: true,
     async create(spec) {
       const key = spec.machineKey ?? spec.computerId;
       // A key that is already one of our names (a restored Sprite's) names it as it is.
