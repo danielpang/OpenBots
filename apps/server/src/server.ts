@@ -49,6 +49,8 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
   if (makeNonDumpable())
     logger.info('stdio connectors run as nobody; this process is non-dumpable');
   const config = loadConfig();
+  // The driver's name only: never the bucket, the endpoint or the prefix.
+  logger.info({ driver: config.storage.driver }, 'file storage');
   // The core alone cannot make an organization: the managed service runs from ee/server.
   if (config.deployment === 'managed' && !extensions.organizations) {
     throw new Error(

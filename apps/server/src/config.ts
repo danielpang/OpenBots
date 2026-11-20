@@ -16,6 +16,7 @@ import {
   type Limits,
   type ProcessLimits,
 } from '@openbots/shared';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import { isCidr } from './client-ip.js';
 import { resolveSecretFiles } from './env-files.js';
@@ -155,9 +156,18 @@ const envSchema = z.object({
   // Where stored files live (storage/index.ts). Checked together by storageFrom below.
   OPENBOTS_STORAGE_DRIVER: withDefault(z.enum(['local', 's3']), 'local'),
   OPENBOTS_S3_BUCKET: optional(
-    z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, {
-      message: 'must be a bucket name: 3 to 63 lower case letters, digits, dots and hyphens',
-    }),
+    z
+      .string()
+      .refine(
+        (name) =>
+          /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(name) &&
+          !/\.\.|\.-|-\./.test(name) &&
+          !/^\d+\.\d+\.\d+\.\d+$/.test(name),
+        {
+          message:
+            'must be a bucket name: 3 to 63 lower case letters, digits, dots and hyphens, with no dot next to another dot or a hyphen, and not shaped like an IP address',
+        },
+      ),
   ),
   OPENBOTS_S3_ENDPOINT: optional(z.url({ protocol: /^https?$/ })),
   OPENBOTS_S3_REGION: optional(
@@ -659,19 +669,60 @@ function storageFrom(e: z.infer<typeof envSchema>): StorageConfig {
       '  OPENBOTS_S3_ENDPOINT: needed with OPENBOTS_STORAGE_DRIVER=s3, unless OPENBOTS_S3_REGION names an AWS region',
     );
   }
+  if (!e.OPENBOTS_S3_ENDPOINT && e.OPENBOTS_S3_REGION === 'auto') {
+    problems.push(
+      "  OPENBOTS_S3_REGION: auto needs OPENBOTS_S3_ENDPOINT (R2, MinIO); for AWS, name the bucket's region",
+    );
+  }
+  if (e.OPENBOTS_S3_ENDPOINT) {
+    const url = new URL(e.OPENBOTS_S3_ENDPOINT);
+    if (url.username || url.password || url.search || url.hash) {
+      problems.push(
+        "  OPENBOTS_S3_ENDPOINT: must be the service's address alone, with no user name, password, query or fragment (the keys go in OPENBOTS_S3_ACCESS_KEY_ID and OPENBOTS_S3_SECRET_ACCESS_KEY)",
+      );
+    } else if (url.protocol === 'http:' && !onThisNetwork(url.hostname)) {
+      problems.push(
+        '  OPENBOTS_S3_ENDPOINT: use https; plain http is taken only for this machine, a single label name such as a compose service, or a private address',
+      );
+    }
+  }
   if (problems.length) throw new Error(`invalid configuration:\n${problems.join('\n')}`);
   const region = e.OPENBOTS_S3_REGION ?? 'auto';
+  const endpoint = e.OPENBOTS_S3_ENDPOINT ?? `https://s3.${region}.amazonaws.com`;
+  // An endpoint of one's own (R2, MinIO) is addressed by path; AWS by bucket hostname.
+  const pathStyle = e.OPENBOTS_S3_PATH_STYLE ?? !!e.OPENBOTS_S3_ENDPOINT;
+  // <bucket>.<host> with a dot in the bucket is not covered by the host's wildcard certificate.
+  if (!pathStyle && e.OPENBOTS_S3_BUCKET!.includes('.') && endpoint.startsWith('https:')) {
+    throw new Error(
+      'invalid configuration:\n  OPENBOTS_S3_BUCKET: a name with dots cannot be reached by bucket hostname over https; set OPENBOTS_S3_PATH_STYLE=true or use a name without dots',
+    );
+  }
   return {
     driver: 's3',
     bucket: e.OPENBOTS_S3_BUCKET!,
-    endpoint: e.OPENBOTS_S3_ENDPOINT ?? `https://s3.${region}.amazonaws.com`,
+    endpoint,
     region,
     accessKeyId: e.OPENBOTS_S3_ACCESS_KEY_ID!,
     secretAccessKey: e.OPENBOTS_S3_SECRET_ACCESS_KEY!,
     prefix: e.OPENBOTS_S3_PREFIX ? `${e.OPENBOTS_S3_PREFIX}/` : '',
-    // An endpoint of one's own (R2, MinIO) is addressed by path; AWS by bucket hostname.
-    pathStyle: e.OPENBOTS_S3_PATH_STYLE ?? !!e.OPENBOTS_S3_ENDPOINT,
+    pathStyle,
   };
+}
+
+/**
+ * Whether a plain http endpoint stays off the public internet: this machine
+ * (loopback), a single label name (a compose service such as `minio`), or a
+ * private address literal (10/8, 172.16/12, 192.168/16, fc00::/7).
+ */
+function onThisNetwork(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const family = isIP(host);
+  if (family === 4) {
+    const [a, b] = host.split('.').map(Number) as [number, number];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (family === 6) return host === '::1' || /^f[cd][0-9a-f]{0,2}:/.test(host);
+  return host === 'localhost' || !host.includes('.');
 }
 
 const GITHUB_APP_REQUIRED = [

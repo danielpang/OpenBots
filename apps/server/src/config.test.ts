@@ -119,6 +119,93 @@ describe('loadConfig', () => {
       );
     });
 
+    /** The configuration error `env` gives, which must not hold any of `values`. */
+    const refusal = (env: Record<string, string>, ...values: string[]) => {
+      let message = '';
+      try {
+        loadConfig({ ...base, ...env });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      for (const value of values) expect(message).not.toContain(value);
+      return message;
+    };
+
+    it('refuses an endpoint with credentials, a query or a fragment in it', () => {
+      for (const endpoint of [
+        'https://user:pw-SECRETX@acct.r2.cloudflarestorage.com',
+        'https://user-SECRETX@acct.r2.cloudflarestorage.com',
+        'https://acct.r2.cloudflarestorage.com/?x-SECRETX=1',
+        'https://acct.r2.cloudflarestorage.com/#SECRETX',
+      ]) {
+        expect(
+          refusal({ ...r2, OPENBOTS_S3_ENDPOINT: endpoint }, 'SECRETX', 'acct.r2'),
+          endpoint,
+        ).toMatch(/OPENBOTS_S3_ENDPOINT: must be the service's address alone/);
+      }
+    });
+
+    it('refuses region auto without an endpoint, which names no AWS region', () => {
+      const { OPENBOTS_S3_ENDPOINT: _, ...aws } = r2;
+      expect(refusal({ ...aws, OPENBOTS_S3_REGION: 'auto' })).toMatch(
+        /OPENBOTS_S3_REGION: auto needs OPENBOTS_S3_ENDPOINT/,
+      );
+    });
+
+    it('refuses bucket names AWS would not take, or could not reach over https', () => {
+      for (const bucket of ['192.168.1.1', 'a..b', 'a.-b', 'a-.b']) {
+        expect(refusal({ ...r2, OPENBOTS_S3_BUCKET: bucket }, bucket), bucket).toMatch(
+          /OPENBOTS_S3_BUCKET: must be a bucket name/,
+        );
+      }
+      // A dotted name does not match the certificate of <bucket>.<host> over https.
+      const { OPENBOTS_S3_ENDPOINT: _, ...aws } = r2;
+      const dotted = {
+        ...aws,
+        OPENBOTS_S3_REGION: 'us-east-1',
+        OPENBOTS_S3_BUCKET: 'files.example',
+      };
+      expect(refusal(dotted, 'files.example')).toMatch(
+        /OPENBOTS_S3_BUCKET: a name with dots cannot be reached by bucket hostname over https; set OPENBOTS_S3_PATH_STYLE=true or use a name without dots/,
+      );
+      expect(
+        loadConfig({ ...base, ...dotted, OPENBOTS_S3_PATH_STYLE: 'true' }).storage,
+      ).toMatchObject({ bucket: 'files.example', pathStyle: true });
+      // By path, the default with an endpoint, a dotted name is fine.
+      expect(
+        loadConfig({ ...base, ...r2, OPENBOTS_S3_BUCKET: 'files.example' }).storage,
+      ).toMatchObject({ pathStyle: true });
+    });
+
+    it('takes plain http only on this machine or a private network', () => {
+      for (const endpoint of [
+        'http://127.0.0.1:9000',
+        'http://localhost:9000',
+        'http://[::1]:9000',
+        'http://minio:9000',
+        'http://10.1.2.3:9000',
+        'http://172.20.0.5:9000',
+        'http://192.168.1.10',
+        'http://[fd00::5]:9000',
+      ]) {
+        expect(
+          loadConfig({ ...base, ...r2, OPENBOTS_S3_ENDPOINT: endpoint }).storage,
+          endpoint,
+        ).toMatchObject({ endpoint });
+      }
+      for (const endpoint of [
+        'http://storage.example.com',
+        'http://8.8.8.8:9000',
+        'http://172.32.0.1',
+        'http://[2001:db8::1]',
+      ]) {
+        expect(
+          refusal({ ...r2, OPENBOTS_S3_ENDPOINT: endpoint }, endpoint.slice(7)),
+          endpoint,
+        ).toMatch(/OPENBOTS_S3_ENDPOINT: use https/);
+      }
+    });
+
     it('takes the keys from files, like the other secrets', () => {
       const dir = mkdtempSync(join(tmpdir(), 'openbots-s3-'));
       writeFileSync(join(dir, 'id'), 'id-from-file\n');
