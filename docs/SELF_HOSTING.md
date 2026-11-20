@@ -167,11 +167,16 @@ is kept for 7 days, out of service, in case support needs to restore it, then de
 the worker. For those 7 days it still holds the old sign-ins (the coding agents' and the browser
 logins) and the old home, and only an operator can reach it: before the reset answers, its URL is
 made private and it may reach no host; then, in the background, its agent and agent token are
-removed. If the first part fails, the reset fails and nothing changes. The member can ask the reset
-to delete the old Sprite at once instead. A retire or a deletion that keeps failing is given up
-after 12 attempts and logged as an error; the operator lists it and retries it. An operator lists a
-member's retired computers with `openbots computers retired --member <email> --org <organization
-id>`, restores one with `openbots computers restore <id> --by <your name> --org <organization id>`,
+removed. If the first part fails, the reset fails: the computer was stopped and its coding
+sessions ended, its files and sign-ins are kept, and its next start sets up a new agent token. The
+member can ask the reset to delete the old Sprite at once instead, from the app or a paired device
+only, not with an API key. A start under way does not hold up a reset: the reset cancels it. A
+stop under way holds it up for at most two minutes, after which the reset takes the computer over,
+and the worker finishes a stop or a start that a stopped process left behind. A retire or a
+deletion that keeps failing is given up after 12 attempts and logged as an error; the operator
+lists it and retries it. An operator lists a member's retired computers with `openbots computers
+retired --member <email> --org <organization id>`, every one the worker gave up on with
+`openbots computers retired --gave-up --org <organization id>`, restores one with `openbots computers restore <id> --by <your name> --org <organization id>`,
 which keeps the member's current computer for 7 days in turn, and retries one the worker gave up on
 with `openbots computers retry <id> --by <your name> --org <organization id>`. `--by` names the
 operator in the audit log. A self-hosted install with one organization can leave out `--org`.

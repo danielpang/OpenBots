@@ -5,6 +5,7 @@ import { DomainError } from '../errors.js';
 import { createLogger } from '../logger.js';
 import { computerProvider } from '../services/computer.js';
 import {
+  listGivenUp,
   listRetiredComputers,
   restoreRetiredComputer,
   retryRetiredComputer,
@@ -17,7 +18,9 @@ import type { CliContext, CliResult } from './context.js';
 // of a member's retired computers, the old machines a reset that forgot the
 // sign-ins keeps for seven days, the restore that makes one the member's
 // computer again, and the retry of one the retired-computers job gave up on
-// (services/computer-retire.ts). There is no route or screen for this: only
+// (services/computer-retire.ts); `retired --gave-up` lists every row the
+// job gave up on in the organization, whoever it was. There is no route or
+// screen for this: only
 // an operator with the server's database and provider token can do it. The
 // CLI has no sign-in, so a restore or retry names its operator with `--by`
 // (a name or email, recorded as given); it is audited by the system with
@@ -25,6 +28,7 @@ import type { CliContext, CliResult } from './context.js';
 
 export const COMPUTERS_USAGE = [
   'usage: openbots computers retired --member <email or user id> [--org <organization id>]',
+  '       openbots computers retired --gave-up [--org <organization id>]',
   '       openbots computers restore <retired id> --by <your name> [--org <organization id>]',
   '       openbots computers retry <retired id> --by <your name> [--org <organization id>]',
   '--org is required on the managed service; a self-hosted install has one organization.',
@@ -36,13 +40,19 @@ const OPERATOR = /^[^\p{C}]{1,200}$/u;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** `--name value` pairs and the rest, in order. */
+/** Flags that take no value. */
+const SWITCHES = ['--gave-up'];
+
+/** `--name value` pairs (a switch alone), and the rest, in order. */
 function parse(args: string[]): { flags: Map<string, string>; rest: string[] } | null {
   const flags = new Map<string, string>();
   const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg.startsWith('--')) {
+    if (SWITCHES.includes(arg)) {
+      if (flags.has(arg)) return null;
+      flags.set(arg, '');
+    } else if (arg.startsWith('--')) {
       const value = args[++i];
       if (value === undefined || flags.has(arg)) return null;
       flags.set(arg, value);
@@ -51,9 +61,10 @@ function parse(args: string[]): { flags: Map<string, string>; rest: string[] } |
   return { flags, rest };
 }
 
-function line(row: RetiredRow): string {
+function line(row: RetiredRow, withOwner = false): string {
   return [
     row.id,
+    ...(withOwner ? [`member ${row.ownerId}`] : []),
     row.status,
     `retired ${row.retiredAt.toISOString()}`,
     row.status === 'deleted'
@@ -73,7 +84,7 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
   const { db, config, write } = ctx;
   const [command, ...more] = args;
   const parsed = parse(more);
-  const known = ['--org', '--member', '--by'];
+  const known = ['--org', '--member', '--by', ...SWITCHES];
   if (
     !parsed ||
     !['retired', 'restore', 'retry'].includes(command ?? '') ||
@@ -96,6 +107,22 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
     return 1;
   }
   const org = workspaceId;
+
+  if (command === 'retired' && flags.has('--gave-up')) {
+    // Every row the job gave up on in the organization, whoever's: what an
+    // operator works through without being asked about one member.
+    if (flags.has('--member') || flags.has('--by') || rest.length) {
+      write(COMPUTERS_USAGE);
+      return 2;
+    }
+    const rows = await inWorkspace(org, () => listGivenUp(db, { workspaceId: org }));
+    if (!rows.length) {
+      write('No retired computers are waiting for an operator.');
+      return 0;
+    }
+    for (const row of rows) write(line(row, true));
+    return 0;
+  }
 
   if (command === 'retired') {
     const member = flags.get('--member');
@@ -146,7 +173,7 @@ export async function runComputers(args: string[], ctx: CliContext): CliResult {
 
   const [id, ...extra] = rest;
   const operator = flags.get('--by')?.trim();
-  if (!id || extra.length || flags.has('--member') || !operator) {
+  if (!id || extra.length || flags.has('--member') || flags.has('--gave-up') || !operator) {
     write(COMPUTERS_USAGE);
     return 2;
   }

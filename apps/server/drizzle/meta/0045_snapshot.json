@@ -3300,6 +3300,20 @@
           "primaryKey": false,
           "notNull": true
         },
+        "status_at": {
+          "name": "status_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "container_id": {
           "name": "container_id",
           "type": "text",
@@ -3522,6 +3536,30 @@
           "primaryKey": false,
           "notNull": false
         },
+        "claim": {
+          "name": "claim",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fence": {
+          "name": "fence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context": {
+          "name": "context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "audited_at": {
+          "name": "audited_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3575,6 +3613,22 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "retired_computers_fence": {
+          "name": "retired_computers_fence",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "fence is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
