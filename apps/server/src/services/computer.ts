@@ -628,6 +628,19 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
   return { computer: row, durationMs: Date.now() - began, updated };
 }
 
+/** The git identity writes a start left running, by computer id (`afterStart`). */
+const startWork = new Map<string, { controller: AbortController; done: Promise<void> }>();
+
+/** Ends the writes a start left running on the computer: none begins after this. */
+function endStartWork(computerId: string) {
+  startWork.get(computerId)?.controller.abort();
+}
+
+/** Settles once the git identity writes a start left running on the computer have ended. */
+export async function startWorkSettled(computerId: string): Promise<void> {
+  await startWork.get(computerId)?.done;
+}
+
 /** What follows every start: the audit row, the repositories' jobs, git identity, wallpaper. */
 async function afterStart(
   deps: AppDeps,
@@ -640,10 +653,23 @@ async function afterStart(
   queueRepoJobs(deps, row.id);
   // The owner's git identity in the computer's git config (git-identity.ts),
   // for commits made by hand in the terminal. Loaded here, not imported, so
-  // the two modules do not import each other.
-  void import('./git-identity.js')
-    .then(({ applyGitIdentityOnComputer }) => applyGitIdentityOnComputer(deps, owner))
-    .catch((error: unknown) => deps.logger.warn({ err: error }, 'git identity failed'));
+  // the two modules do not import each other. A stop ends it between its
+  // writes (`endStartWork`), so it never calls a stopped computer's agent,
+  // which would wake a paused Sprite.
+  endStartWork(row.id);
+  const controller = new AbortController();
+  const done = import('./git-identity.js')
+    .then(({ applyGitIdentityOnComputer }) =>
+      applyGitIdentityOnComputer(deps, owner, undefined, controller.signal),
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => deps.logger.warn({ err: error }, 'git identity failed'),
+    )
+    .finally(() => {
+      if (startWork.get(row.id)?.controller === controller) startWork.delete(row.id);
+    });
+  startWork.set(row.id, { controller, done });
   // The hour's wallpaper (K5) on the computer's own clock (its TZ); the agent
   // keeps it current from here.
   agentFor(deps, row)
@@ -1103,6 +1129,7 @@ export async function stopComputer(
   by: AuditActor = { type: 'user', id: row.ownerId },
 ): Promise<ComputerRow> {
   if (!row.agentUrl || row.status === 'stopped') return row;
+  endStartWork(row.id);
   return stopMachine(deps, await setStatus(deps, row, 'stopping'), by);
 }
 
@@ -1265,6 +1292,7 @@ async function stopMachine(
   by: AuditActor,
   failed: Partial<ComputerRow> = {},
 ): Promise<ComputerRow> {
+  endStartWork(row.id);
   // Its owner's stdio connectors running in it end first, in every process.
   await deps.infra.bus
     .publish<McpControl>(MCP_CONTROL_CHANNEL, {
