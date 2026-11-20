@@ -77,7 +77,12 @@ describe('stdio connectors in the computer (managed)', () => {
   let orgB: string;
 
   beforeAll(async () => {
-    t = await createTestApp({ OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_SIGNUP_MODE: 'open' });
+    t = await createTestApp({
+      OPENBOTS_DEPLOYMENT: 'managed',
+      OPENBOTS_SIGNUP_MODE: 'open',
+      // Off by default on the hosted service; this suite runs the Filesystem server.
+      OPENBOTS_FOLDER_CONNECTORS: 'true',
+    });
     computers = useComputers(t.ownerDeps);
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
@@ -350,7 +355,11 @@ describe('stdio connectors and computer admission (managed)', () => {
 
   beforeAll(async () => {
     t = await createTestApp(
-      { OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_SIGNUP_MODE: 'open' },
+      {
+        OPENBOTS_DEPLOYMENT: 'managed',
+        OPENBOTS_SIGNUP_MODE: 'open',
+        OPENBOTS_FOLDER_CONNECTORS: 'true',
+      },
       {
         extensions: {
           admitComputerWork: (request) => {

@@ -27,6 +27,10 @@ const CapabilitiesSchema = z
       description:
         'Admins may turn on custom command (stdio) connectors (OPENBOTS_CUSTOM_STDIO; off by default on the managed service)',
     }),
+    folderConnectors: z.boolean().optional().openapi({
+      description:
+        'Folder (filesystem) connectors can be added and run (OPENBOTS_FOLDER_CONNECTORS; off by default on the managed service). Off: the catalog leaves them out, adding one answers 403 `FOLDER_CONNECTORS_UNAVAILABLE`, and one that exists reads as disabled and offers no tools.',
+    }),
     localEndpoints: z.boolean().optional().openapi({
       description:
         'Admins may mark endpoints as on their own network (OPENBOTS_LOCAL_ENDPOINTS; off by default on the managed service)',
@@ -77,13 +81,15 @@ export const capabilityRoutes = createRouter().openapi(
     },
   }),
   (c) => {
-    const { oauth, deployment, localToken, customStdio, localEndpoints } = c.var.deps.config;
+    const { oauth, deployment, localToken, customStdio, folderConnectors, localEndpoints } =
+      c.var.deps.config;
     return c.json(
       {
         oauth: { github: !!oauth.github, google: !!oauth.google },
         computer: computerAvailable(c.var.deps),
         deployment,
         customStdio,
+        folderConnectors,
         localEndpoints,
         relay: !!c.var.deps.config.relayUrl,
         version: serverVersion(),

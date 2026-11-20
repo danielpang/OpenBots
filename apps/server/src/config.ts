@@ -146,6 +146,7 @@ const envSchema = z.object({
   ),
   OPENBOTS_LOCAL_ENDPOINTS: optional(z.stringbool()),
   OPENBOTS_CUSTOM_STDIO: optional(z.stringbool()),
+  OPENBOTS_FOLDER_CONNECTORS: optional(z.stringbool()),
   OPENBOTS_STDIO_RUNNER: optional(z.enum(['host', 'computer'])),
   OPENBOTS_ALLOW_HOST_STDIO: withDefault(z.stringbool(), 'false'),
   OPENBOTS_SIGNUP_MODE: withDefault(
@@ -386,6 +387,15 @@ export interface Config {
    */
   customStdio: boolean;
   /**
+   * Whether folder (filesystem) connectors may be added and run
+   * (OPENBOTS_FOLDER_CONNECTORS): each serves a folder of its owner's on
+   * this server's disk, under `<filesDir>/connectors/`, which one machine
+   * of several does not share. On by default for a self-hosted install;
+   * off by default on the managed service. Off, adding one is refused and
+   * one that exists does not run and reads as unavailable.
+   */
+  folderConnectors: boolean;
+  /**
    * Where stdio connectors run (OPENBOTS_STDIO_RUNNER). `host`, the default
    * for a self-hosted install, runs them as child processes of this server,
    * as an unprivileged user. `computer`, the default on the managed service,
@@ -396,9 +406,11 @@ export interface Config {
    */
   stdioRunner: StdioRunner;
   /**
-   * OPENBOTS_FILES_DIR: uploads and Artifact blobs with the local storage
-   * driver, and always the filesystem connectors' folders (`connectors/`)
-   * and coding session logs (`coders/`), which stay on this machine.
+   * OPENBOTS_FILES_DIR: uploads, Artifact blobs and coding session logs
+   * (`coders/`) with the local storage driver; with s3, only the spools of
+   * the sessions this machine runs (services/coder-log.ts). Folder
+   * connectors' folders (`connectors/`) are here with either driver, when
+   * they are on.
    */
   filesDir: string;
   /**
@@ -466,6 +478,19 @@ export interface Config {
 /** Set these public identifiers after creating the shared GitHub App. Never put secrets here. */
 export const DEFAULT_GITHUB_CONNECTOR_CLIENT_ID = 'Iv23liyL74CRKUWIUXhq';
 export const DEFAULT_GITHUB_CONNECTOR_APP_SLUG = 'openbots-github';
+
+/**
+ * What the server warns about at start in how storage is set up, or null.
+ * The s3 driver is for a server on several machines, but folder connectors
+ * keep their folders on one machine's disk (`<filesDir>/connectors/`), so a
+ * folder made on one is missing on the others. Names the setting only.
+ */
+export function storageWarning(
+  config: Pick<Config, 'storage' | 'folderConnectors'>,
+): string | null {
+  if (config.storage.driver !== 's3' || !config.folderConnectors) return null;
+  return "OPENBOTS_STORAGE_DRIVER=s3 with folder connectors on (OPENBOTS_FOLDER_CONNECTORS): their folders stay on each machine's own disk, so on several machines a connector finds a different folder, or none; set OPENBOTS_FOLDER_CONNECTORS=false";
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const secrets = resolveSecretFiles(env);
@@ -568,6 +593,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     signupMode: e.OPENBOTS_SIGNUP_MODE,
     localEndpoints: e.OPENBOTS_LOCAL_ENDPOINTS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
     customStdio: e.OPENBOTS_CUSTOM_STDIO ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
+    folderConnectors: e.OPENBOTS_FOLDER_CONNECTORS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
     stdioRunner,
     filesDir: e.OPENBOTS_FILES_DIR,
     storage,

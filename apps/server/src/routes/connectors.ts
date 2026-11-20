@@ -388,7 +388,7 @@ export const connectorRoutes = createRouter()
       },
     }),
     async (c) => {
-      const entries = await catalogWithPolicy(c.var.deps.db, c.var.user);
+      const entries = await catalogWithPolicy(c.var.deps.db, c.var.user, c.var.deps.config);
       return c.json(
         {
           items: entries.map(({ entry: e, disabledByAdmin }) => ({
@@ -470,7 +470,7 @@ export const connectorRoutes = createRouter()
           'Invalid connector or missing secret; a path outside your directory (`INVALID_PATH`) or a private database host (`PRIVATE_HOST`)',
         ),
         403: problemResponse(
-          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`); a custom stdio server from a member (\`CUSTOM_STDIO_ADMIN_ONLY\`) or while they are off (\`CUSTOM_STDIO_DISABLED\`)`,
+          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`); a custom stdio server from a member (\`CUSTOM_STDIO_ADMIN_ONLY\`) or while they are off (\`CUSTOM_STDIO_DISABLED\`); a folder connector where they are off (\`FOLDER_CONNECTORS_UNAVAILABLE\`)`,
         ),
         409: problemResponse('Slug taken (`SLUG_TAKEN`)'),
         ...authProblems,
@@ -548,7 +548,7 @@ export const connectorRoutes = createRouter()
           'Invalid change (`PINNED` for catalog command or URL, `INVALID_PATH`, `PRIVATE_HOST`)',
         ),
         403: problemResponse(
-          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`), or a custom stdio server you may not run (\`CUSTOM_STDIO_ADMIN_ONLY\`, \`CUSTOM_STDIO_DISABLED\`)`,
+          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`), or a custom stdio server you may not run (\`CUSTOM_STDIO_ADMIN_ONLY\`, \`CUSTOM_STDIO_DISABLED\`), or a folder connector where they are off (\`FOLDER_CONNECTORS_UNAVAILABLE\`)`,
         ),
         ...notFoundProblem,
         ...authProblems,
@@ -663,7 +663,7 @@ export const connectorRoutes = createRouter()
         ),
         400: problemResponse('Built-ins have no MCP session (`NOT_AN_MCP_SERVER`)'),
         403: problemResponse(
-          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`), or a custom stdio server you may not run (\`CUSTOM_STDIO_ADMIN_ONLY\`, \`CUSTOM_STDIO_DISABLED\`)`,
+          `${DISABLED_BY_ADMIN} (\`CONNECTOR_BLOCKED\`), or a custom stdio server you may not run (\`CUSTOM_STDIO_ADMIN_ONLY\`, \`CUSTOM_STDIO_DISABLED\`), or a folder connector where they are off (\`FOLDER_CONNECTORS_UNAVAILABLE\`)`,
         ),
         ...notFoundProblem,
         ...authProblems,

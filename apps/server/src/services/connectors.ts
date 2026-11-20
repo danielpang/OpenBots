@@ -194,6 +194,14 @@ export const customStdioDisabled = () =>
     `Command (stdio) servers are off for this workspace. ${STDIO_INSTEAD}`,
   );
 
+/** Folder connectors are off on this install (OPENBOTS_FOLDER_CONNECTORS). */
+export const folderConnectorsUnavailable = () =>
+  new DomainError(
+    403,
+    'FOLDER_CONNECTORS_UNAVAILABLE',
+    'Folder connectors are not available on this server. Add files to a Bot from its computer or by an HTTP connector instead.',
+  );
+
 const keyring = (deps: Pick<AppDeps, 'config'>) => keyringFromConfig(deps.config);
 
 export const oauthRedirectUrl = (deps: Pick<AppDeps, 'config'>) =>
@@ -484,6 +492,28 @@ export function isCustomStdio(row: Pick<ConnectorRow, 'kind' | 'catalogId'>): bo
 }
 
 /**
+ * A folder connector: a catalog stdio server with a `user_dir` setting (the
+ * Filesystem server), which serves a folder of its owner's files.
+ */
+export function isFolderConnector(row: Pick<ConnectorRow, 'kind' | 'catalogId'>): boolean {
+  if (row.kind !== 'mcp_stdio' || !row.catalogId) return false;
+  return !!catalogEntry(row.catalogId)?.params?.some((p) => p.user_dir);
+}
+
+/**
+ * Whether the install keeps the connector from running whoever asks: a
+ * folder connector where OPENBOTS_FOLDER_CONNECTORS is off (the managed
+ * service's default, whose machines share no disk). One that exists reads
+ * as disabled and offers no tools, rather than failing a run.
+ */
+export function unavailableHere(
+  config: Pick<AppDeps['config'], 'folderConnectors'>,
+  row: Pick<ConnectorRow, 'kind' | 'catalogId'>,
+): boolean {
+  return !config.folderConnectors && isFolderConnector(row);
+}
+
+/**
  * Why the user may not run custom stdio servers, or null: they must be an
  * admin, with the setting on. Never where the install keeps them off
  * (OPENBOTS_CUSTOM_STDIO, off by default on the managed service, where the
@@ -641,9 +671,21 @@ async function checkConfined(
 
 // --- Catalog --------------------------------------------------------------------
 
-export async function catalogWithPolicy(db: Db, viewer: Viewer) {
+/**
+ * The catalog as this viewer may add from it: each entry with whether the
+ * connector policy blocks it. Folder entries are left out where the install
+ * keeps folder connectors off, so no app offers one (older apps included).
+ */
+export async function catalogWithPolicy(
+  db: Db,
+  viewer: Viewer,
+  config: Pick<AppDeps['config'], 'folderConnectors'>,
+) {
   const rules = await blockRules(db, viewer.workspaceId);
-  return loadCatalog().entries.map((entry) => {
+  const entries = loadCatalog().entries.filter(
+    (entry) => config.folderConnectors || !entry.params?.some((p) => p.user_dir),
+  );
+  return entries.map((entry) => {
     const config =
       entry.kind === 'builtin' ? null : configFromCatalog(entry, { auth: entry.http?.auth[0] });
     return { entry, disabledByAdmin: blockedBy({ config }, rules) !== null };
@@ -697,7 +739,10 @@ function toRecord(
               : {}),
           }
         : null,
-    disabledByAdmin: isBlocked(row, rules) || (stdioRefused && isCustomStdio(row)),
+    disabledByAdmin:
+      isBlocked(row, rules) ||
+      (stdioRefused && isCustomStdio(row)) ||
+      unavailableHere(deps.config, row),
     toolCount,
   };
 }
@@ -847,6 +892,9 @@ export async function createConnector(
   }
   checkRequired(entry, params, secrets);
   const catalogId = entry?.id ?? matchCatalog(transport);
+  if (unavailableHere(deps.config, { kind: kindOf(transport), catalogId })) {
+    throw folderConnectorsUnavailable();
+  }
   if (isCustomStdio({ kind: kindOf(transport), catalogId })) {
     const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
@@ -993,6 +1041,9 @@ export async function updateConnector(
   if (changedUrl) delete secrets.oauth;
   checkRequired(entry, params, secrets);
   const catalogId = entry?.id ?? matchCatalog(transport);
+  if (unavailableHere(deps.config, { kind: row.kind, catalogId })) {
+    throw folderConnectorsUnavailable();
+  }
   if (isCustomStdio({ kind: row.kind, catalogId })) {
     const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
@@ -1342,6 +1393,7 @@ async function sessionFor(
   const row = await rowById(deps.db, id);
   const rules = await blockRules(deps.db, row.workspaceId);
   if (isBlocked(row, rules)) throw connectorBlocked();
+  if (unavailableHere(deps.config, row)) throw folderConnectorsUnavailable();
   if (isCustomStdio(row)) {
     const refusal = await customStdioRefusal(deps, row.workspaceId, row.ownerId);
     if (refusal) throw refusal;
@@ -1458,6 +1510,8 @@ async function stdioLaunchFor(
   /** Folders under the computer's home to create first. */
   dirs: string[];
 }> {
+  // Checked by every caller too: no folder is made where they are off.
+  if (unavailableHere(deps.config, row)) throw new Error(folderConnectorsUnavailable().message);
   const stored = readConfig(row);
   const config = stored.transport;
   if (config.transport !== 'stdio') throw new Error('Not a stdio connector.');
@@ -1958,6 +2012,7 @@ export async function testConnector(
   }
   const rules = await blockRules(deps.db, viewer.workspaceId);
   if (isBlocked(row, rules)) throw connectorBlocked();
+  if (unavailableHere(deps.config, row)) throw folderConnectorsUnavailable();
   if (isCustomStdio(row)) {
     const refusal = await customStdioRefusal(deps, viewer.workspaceId, viewer.id);
     if (refusal) throw refusal;
@@ -2658,7 +2713,10 @@ async function usableMcpConnectors(
     blockRules(db, bot.workspaceId),
     customStdioRefusal(deps, bot.workspaceId, bot.ownerId),
   ]);
-  return connectors.filter((c) => !isBlocked(c, rules) && !(refusal && isCustomStdio(c)));
+  return connectors.filter(
+    (c) =>
+      !isBlocked(c, rules) && !(refusal && isCustomStdio(c)) && !unavailableHere(deps.config, c),
+  );
 }
 
 /** Calls a permitted tool for a Bot through the manager; re-checks the block list and the Bot's lists. */

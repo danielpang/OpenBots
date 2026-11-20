@@ -227,14 +227,29 @@ is tried again up to four times; while the store is down, reading or storing a f
 credential.
 
 On AWS, give the key `s3:ListBucket` on the bucket as well as `s3:GetObject`, `s3:PutObject` and
-`s3:DeleteObject` on its objects: without it, AWS answers a request for a file that is not there
-with 403 Access Denied instead of 404, so a missing file looks like a permission error (and
-`openbots storage copy` fails every file it has not copied yet, saying so). R2 and MinIO answer 404
-either way.
+`s3:DeleteObject` on its objects: coding session logs are found by listing, and without it AWS
+answers a request for a file that is not there with 403 Access Denied instead of 404, so a missing
+file looks like a permission error (and `openbots storage copy` fails every file it has not copied
+yet, saying so). R2 and MinIO answer 404 either way; an R2 token needs Object Read and Write.
 
-`OPENBOTS_FILES_DIR` stays in use with the `s3` driver for the filesystem connectors' folders and
-the coding agents' session logs, which belong to the machine that runs them. The Artifact host
-keeps serving through the server with either driver (the Cloudflare Worker forwards to it).
+Coding session logs go to the bucket too, under the same `orgs/<organization id>/` prefix. The
+machine running a session appends its output to a spool file,
+`OPENBOTS_FILES_DIR/coders/<session id>.<offset>.spool`, and stores it in numbered parts: once 1 MB
+is waiting, 30 seconds after output starts waiting, and when the session ends, when the spool is
+removed. Any machine reads a session's log from the bucket, the running ones included; the
+session's live feed in the apps does not depend on it. A machine that stops in the middle of a
+session loses at most the output of its last 30 seconds (and never more than 1 MB); if its disk
+survives, the spool is stored the next time the worker starts there. Because the logs are found by
+listing the bucket, the key needs list permission (`s3:ListBucket` on AWS, below).
+
+`OPENBOTS_FILES_DIR` stays in use with the `s3` driver for those spools and for folder (Filesystem)
+connectors, whose folders are on the disk of the machine that runs them. On several machines a
+folder made on one is missing on the others, so turn them off there with
+`OPENBOTS_FOLDER_CONNECTORS=false` (the server warns at start when the `s3` driver runs with them
+on). Off, adding one is refused with 403 `FOLDER_CONNECTORS_UNAVAILABLE`, the catalog leaves them
+out, and one that exists does not run and shows as disabled. A self-hosted install keeps them on
+unless you set it. The Artifact host keeps serving through the server with either driver (the
+Cloudflare Worker forwards to it).
 
 **Moving an install that already has files.** Rows written before stay as they are; only where
 their bytes live changes. The last copy runs with the server stopped, so a file uploaded during the
@@ -248,7 +263,9 @@ move cannot be left behind:
    file on disk against its size and sha256, uploads it, and checks it arrived. `--dry-run` only
    counts. It prints one line for each file it could not copy (by its id) and a summary, and exits
    with status 1 if any was missing, did not match its record or failed. It skips what is already
-   in the bucket, so it can be stopped and run again at any time.
+   in the bucket, so it can be stopped and run again at any time. It copies the coding session logs
+   in `OPENBOTS_FILES_DIR/coders/` as well; run it on each machine that ran sessions, since a log
+   left on another machine's disk stays there.
 3. Stop the server: `docker compose stop openbots` (every api and worker process, if you run them
    apart).
 4. Run the copy a final time, as in step 2. It sends only what was uploaded since the last run.
@@ -258,7 +275,8 @@ move cannot be left behind:
 
 It never deletes anything, from the disk or the bucket. Once the server has run on the bucket for a
 while, the old copies under `OPENBOTS_FILES_DIR/orgs/` and its two character directories can be
-removed by hand (keep `connectors/` and `coders/`). To go back to `local`, unset the settings: the
+removed by hand, and so can the `<session id>.log` files in `coders/` once the copy has stored
+them (keep `connectors/`, and the `.spool` files of sessions still running). To go back to `local`, unset the settings: the
 files on disk are as they were, without anything uploaded since.
 
 ### Egress proxy for the computers
@@ -436,9 +454,9 @@ links to the relay with. If both copies run, they dial the relay as one server a
 reaches whichever linked last. Stop the old install (`docker compose down`,
 `docker stop -t 60 <container>`, `fly machine stop`) before you start the restored one.
 
-**With the `s3` storage driver** ([Object storage](#object-storage)), uploads and Artifact files
-are in the bucket, not in the `files` volume, so `files.tar.gz` holds only the connectors' folders
-and session logs. Back the bucket up with your provider's own tools (versioning, replication or a
+**With the `s3` storage driver** ([Object storage](#object-storage)), uploads, Artifact files
+and coding session logs are in the bucket, not in the `files` volume, so `files.tar.gz` holds only
+the folder connectors' folders and the unsent end of running sessions' logs. Back the bucket up with your provider's own tools (versioning, replication or a
 scheduled copy) at the same time as the database: a restore needs both from the same moment, since
 a file whose record is in the dump but whose object is gone reads as not found.
 
