@@ -162,6 +162,37 @@ describe.each(drivers)('the %s blob store', (_name, make) => {
     await expect(store.get(other)).rejects.toSatisfy((e) => isStorageError(e, 'rejected'));
   });
 
+  it("lists one organization's blobs by key prefix, with their sizes", async () => {
+    const org = randomUUID();
+    const other = randomUUID();
+    const put = (ws: string, key: string, text: string) =>
+      store.put({ workspaceId: ws, storageKey: `${ws}/${key}` }, bytesOf(text), {
+        size: text.length,
+        sha256: sha(bytesOf(text)),
+      });
+    await put(org, 'logpart_a_0001', 'one');
+    await put(org, 'logpart_a_0002', 'three');
+    await put(org, 'logpart_b_0001', 'other session');
+    await put(org, 'notlisted', 'x');
+    await put(other, 'logpart_a_0001', 'another organization');
+    expect(await store.list(org, 'logpart_a_')).toEqual([
+      { storageKey: `${org}/logpart_a_0001`, size: 3 },
+      { storageKey: `${org}/logpart_a_0002`, size: 5 },
+    ]);
+    expect((await store.list(org, 'logpart_')).map((b) => b.storageKey)).toEqual([
+      `${org}/logpart_a_0001`,
+      `${org}/logpart_a_0002`,
+      `${org}/logpart_b_0001`,
+    ]);
+    expect(await store.list(randomUUID(), 'logpart_')).toEqual([]);
+    for (const prefix of ['', 'a', '../x', 'a/b', 'with space']) {
+      await expect(store.list(org, prefix)).rejects.toSatisfy((e) => isStorageError(e, 'rejected'));
+    }
+    await expect(store.list('not-an-organization', 'logpart_')).rejects.toSatisfy((e) =>
+      isStorageError(e, 'rejected'),
+    );
+  });
+
   it('keeps blobs of the same key in different organizations apart', async () => {
     const key = randomUUID();
     const [first, second] = [randomUUID(), randomUUID()];

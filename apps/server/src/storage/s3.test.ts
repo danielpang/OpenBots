@@ -341,4 +341,33 @@ describe('the S3 blob store', () => {
     expect(res.status).toBe(400);
     expect(s3.objects.has(`orgs/${workspaceId}/unsigned`)).toBe(false);
   });
+  it('lists by prefix a page at a time, under the configured prefix, and maps a refusal', async () => {
+    const put = async (s: ReturnType<typeof store>, key: string) =>
+      s.put({ workspaceId, storageKey: `${workspaceId}/${key}` }, bytes, {
+        size: bytes.byteLength,
+        sha256: sha(bytes),
+      });
+    const prefixed = store({ prefix: 'openbots/prod/' }, { listPageSize: 2 });
+    for (const n of [1, 2, 3, 4, 5]) await put(prefixed, `paged_${n}`);
+    await put(store(), 'paged_6');
+    s3.requests.length = 0;
+    const listed = await prefixed.list(workspaceId, 'paged_');
+    expect(listed.map((b) => b.storageKey)).toEqual(
+      [1, 2, 3, 4, 5].map((n) => `${workspaceId}/paged_${n}`),
+    );
+    expect(listed.every((b) => b.size === bytes.byteLength)).toBe(true);
+    // Three pages of two, each one signed GET on the bucket.
+    expect(s3.requests.map((r) => [r.method, r.key])).toEqual([
+      ['GET', ''],
+      ['GET', ''],
+      ['GET', ''],
+    ]);
+
+    s3.fail(1, { status: 403, code: 'AccessDenied' });
+    const refused = await prefixed.list(workspaceId, 'paged_').catch((e: unknown) => e);
+    expect(isStorageError(refused, 'rejected')).toBe(true);
+    expectNothingSecret(refused, 'paged_');
+    s3.fail(1, { status: 503, code: 'SlowDown' });
+    expect(await prefixed.list(workspaceId, 'paged_')).toHaveLength(5);
+  });
 });

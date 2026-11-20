@@ -20,8 +20,12 @@ import { S3BlobStore } from './s3.js';
 // The methods are what the files service needs and no more: put (before the
 // row is written), get (whole, or a byte range for `read_attachment`), head
 // (the copy command's "already there?" and its check after a copy), and
-// delete (a blob whose row was never written). Nothing deletes blobs in bulk
-// yet; that comes with the deletion of an organization, by its key prefix.
+// delete (a blob whose row was never written). `list` finds one
+// organization's blobs by the start of their key: coding session logs
+// (services/coder-log.ts) are kept as numbered parts with no row of their
+// own, so their reader and the sweep of logs whose session is gone list
+// them. Nothing deletes blobs in bulk yet; that comes with the deletion of
+// an organization, by its key prefix.
 
 /** A blob, as its `files` row names it. */
 export interface BlobRef {
@@ -44,6 +48,12 @@ export interface PutOptions {
   md5?: string;
 }
 
+/** A blob `list` found: its full storage key (`<organization>/<key>`) and size. */
+export interface ListedBlob {
+  storageKey: string;
+  size: number;
+}
+
 /** The bytes to store: whole, or a stream made fresh for each attempt. */
 export type PutBody = Uint8Array | (() => Readable);
 
@@ -57,6 +67,12 @@ export interface BlobStore {
   head(ref: BlobRef): Promise<{ size: number } | null>;
   /** Removes the blob; one that is already gone is not an error. */
   delete(ref: BlobRef): Promise<void>;
+  /**
+   * The organization's blobs whose key (after `<organization>/`) starts with
+   * `keyPrefix`, in key order. The prefix is one the server made: two or
+   * more of [A-Za-z0-9_-]. Bare keys from before organizations are not listed.
+   */
+  list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]>;
 }
 
 export type StorageErrorKind =
@@ -109,6 +125,15 @@ export function parseRef(ref: BlobRef): { workspaceId: string; inKey: boolean; k
     throw new StorageError('rejected', 'Storage key belongs to another organization');
   }
   return { workspaceId: ref.workspaceId, inKey: !!keyWorkspace, key };
+}
+
+const KEY_PREFIX = /^[A-Za-z0-9_-]{2,200}$/;
+
+/** Checks `list`'s arguments: an organization id and a prefix the server made. */
+export function parseListing(workspaceId: string, keyPrefix: string): void {
+  if (!WORKSPACE_ID.test(workspaceId) || !KEY_PREFIX.test(keyPrefix)) {
+    throw new StorageError('rejected', 'Malformed storage key prefix');
+  }
 }
 
 /** The store the config names; cheap to make, so made where it is needed. */

@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
   StorageError,
+  parseListing,
   parseRef,
   type BlobRef,
+  type ListedBlob,
   type BlobStore,
   type ByteRange,
   type PutBody,
@@ -80,6 +82,27 @@ export class LocalBlobStore implements BlobStore {
     await rm(this.path(ref), { force: true }).catch((error: unknown) => {
       throw localError(error);
     });
+  }
+
+  async list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
+    parseListing(workspaceId, keyPrefix);
+    // Every key with the prefix shares its first two characters, so one shard holds them all.
+    const shard = path.join(this.filesDir, 'orgs', workspaceId, keyPrefix.slice(0, 2));
+    let names: string[];
+    try {
+      names = await readdir(shard);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw localError(error);
+    }
+    const listed: ListedBlob[] = [];
+    for (const name of names
+      .filter((n) => n.startsWith(keyPrefix) && /^[A-Za-z0-9_-]+$/.test(n))
+      .sort()) {
+      const info = await stat(path.join(shard, name)).catch(() => null);
+      if (info?.isFile()) listed.push({ storageKey: `${workspaceId}/${name}`, size: info.size });
+    }
+    return listed;
   }
 }
 

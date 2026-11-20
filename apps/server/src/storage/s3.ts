@@ -4,8 +4,10 @@ import { AwsV4Signer } from 'aws4fetch';
 import { checked } from './local.js';
 import {
   StorageError,
+  parseListing,
   parseRef,
   type BlobRef,
+  type ListedBlob,
   type BlobStore,
   type ByteRange,
   type PutBody,
@@ -35,6 +37,9 @@ import {
 //   whole object (a store or proxy that ignored Range) is refused, not read.
 // - Redirects are not followed: a 3xx is refused, as a sign of the wrong
 //   region or endpoint.
+// - `list` is ListObjectsV2 on the bucket, by the organization's key prefix,
+//   a page at a time (1000 keys, the most S3 sends), following its
+//   continuation token.
 
 export interface S3StorageConfig {
   driver: 's3';
@@ -61,6 +66,8 @@ export interface S3Options {
   timeoutMs?: number;
   /** The longest a read's body may go without a byte. */
   idleMs?: number;
+  /** Keys per `list` page (max-keys); 1000, the most S3 answers with, by default. */
+  listPageSize?: number;
   fetch?: typeof fetch;
 }
 
@@ -77,6 +84,8 @@ type Body = { kind: 'bytes'; bytes: Uint8Array } | { kind: 'stream'; make: () =>
 interface Send {
   method: 'GET' | 'PUT' | 'HEAD' | 'DELETE';
   key: string;
+  /** Query parameters; only for a request on the bucket itself (`key` empty). */
+  query?: Record<string, string>;
   headers?: Record<string, string>;
   body?: Body;
   /** The body's length, which lengthens the deadline. */
@@ -90,6 +99,7 @@ export class S3BlobStore implements BlobStore {
   private readonly maxBackoffMs: number;
   private readonly timeoutMs: number;
   private readonly idleMs: number;
+  private readonly listPageSize: number;
   private readonly fetch: typeof fetch;
 
   constructor(
@@ -101,6 +111,7 @@ export class S3BlobStore implements BlobStore {
     this.maxBackoffMs = options.maxBackoffMs ?? 3_000;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.idleMs = options.idleMs ?? 60_000;
+    this.listPageSize = Math.min(1000, Math.max(1, options.listPageSize ?? 1000));
     this.fetch = options.fetch ?? globalThis.fetch;
   }
 
@@ -110,14 +121,24 @@ export class S3BlobStore implements BlobStore {
     return `${this.config.prefix}orgs/${workspaceId}/${key}`;
   }
 
-  /** The object's URL. Keys hold only [A-Za-z0-9/_-], so none needs escaping. */
-  url(key: string): string {
+  /**
+   * The object's URL, or the bucket's for an empty key. Keys hold only
+   * [A-Za-z0-9/_-], so none needs escaping; query values are escaped.
+   */
+  url(key: string, query?: Record<string, string>): string {
     const base = new URL(this.config.endpoint);
     const root = base.pathname.replace(/\/+$/, '');
+    const search = query
+      ? `?${Object.entries(query)
+          .sort(([a], [b]) => (a < b ? -1 : 1))
+          .map(([name, value]) => `${rfc3986(name)}=${rfc3986(value)}`)
+          .join('&')}`
+      : '';
     if (this.config.pathStyle) {
-      return `${base.origin}${root}/${this.config.bucket}/${key}`;
+      const bucket = key ? `/${this.config.bucket}/${key}` : `/${this.config.bucket}`;
+      return `${base.origin}${root}${bucket}${search}`;
     }
-    return `${base.protocol}//${this.config.bucket}.${base.host}${root}/${key}`;
+    return `${base.protocol}//${this.config.bucket}.${base.host}${root}/${key}${search}`;
   }
 
   async put(ref: BlobRef, body: PutBody, options: PutOptions): Promise<void> {
@@ -199,6 +220,44 @@ export class S3BlobStore implements BlobStore {
     await discard(res);
   }
 
+  async list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
+    parseListing(workspaceId, keyPrefix);
+    const orgPrefix = `${this.config.prefix}orgs/${workspaceId}/`;
+    const listed: ListedBlob[] = [];
+    let token: string | undefined;
+    for (;;) {
+      const query: Record<string, string> = {
+        'list-type': '2',
+        prefix: `${orgPrefix}${keyPrefix}`,
+        'max-keys': String(this.listPageSize),
+        ...(token ? { 'continuation-token': token } : {}),
+      };
+      const res = await this.send({ method: 'GET', key: '', query });
+      if (res.status === 404) {
+        await discard(res);
+        throw new StorageError('rejected', 'Object storage has no such bucket (HTTP 404)', 404);
+      }
+      if (!res.ok) throw await refused(res);
+      const page = parseListPage(await res.text().catch(() => ''));
+      if (!page) {
+        throw new StorageError(
+          'unavailable',
+          'Object storage answered a listing it did not finish',
+        );
+      }
+      for (const { key, size } of page.contents) {
+        if (!key.startsWith(orgPrefix)) continue;
+        const own = key.slice(orgPrefix.length);
+        // Only keys the server makes: anything else in the bucket is not ours to name.
+        if (!/^[A-Za-z0-9_-]+$/.test(own)) continue;
+        listed.push({ storageKey: `${workspaceId}/${own}`, size });
+      }
+      if (!page.truncated || !page.next) break;
+      token = page.next;
+    }
+    return listed.sort((a, b) => (a.storageKey < b.storageKey ? -1 : 1));
+  }
+
   /**
    * One request, tried again on a network failure, a 5xx or a 429. Answers
    * the first response that is neither; throws once the tries run out.
@@ -217,7 +276,7 @@ export class S3BlobStore implements BlobStore {
       try {
         const signed = await new AwsV4Signer({
           method: request.method,
-          url: this.url(request.key),
+          url: this.url(request.key, request.query),
           headers: { 'x-amz-content-sha256': EMPTY_SHA256, ...request.headers },
           accessKeyId: this.config.accessKeyId,
           secretAccessKey: this.config.secretAccessKey,
@@ -312,6 +371,46 @@ async function* chunks(
   } finally {
     reader.cancel().catch(() => {});
   }
+}
+
+/** RFC 3986 escaping, as SigV4 canonicalizes a query. */
+const rfc3986 = (value: string) =>
+  encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+
+const XML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+};
+const unescapeXml = (text: string) =>
+  text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (_, name: string) =>
+    name.startsWith('#')
+      ? String.fromCodePoint(
+          name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : Number(name.slice(1)),
+        )
+      : XML_ENTITIES[name.toLowerCase()]!,
+  );
+
+/** A ListObjectsV2 answer's keys and sizes, and its continuation; null when it is not one. */
+export function parseListPage(
+  xml: string,
+): { contents: { key: string; size: number }[]; truncated: boolean; next?: string } | null {
+  if (!/<ListBucketResult[\s>]/.test(xml) || !/<\/ListBucketResult>\s*$/.test(xml)) return null;
+  const contents: { key: string; size: number }[] = [];
+  for (const [, body] of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+    const key = /<Key>([\s\S]*?)<\/Key>/.exec(body!)?.[1];
+    const size = /<Size>(\d+)<\/Size>/.exec(body!)?.[1];
+    if (key === undefined || size === undefined) return null;
+    contents.push({ key: unescapeXml(key), size: Number(size) });
+  }
+  const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
+  const next = /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml)?.[1];
+  return { contents, truncated, ...(next ? { next: unescapeXml(next) } : {}) };
 }
 
 /** Whether a ranged read's answer is a 206 whose Content-Range starts at `offset`. */

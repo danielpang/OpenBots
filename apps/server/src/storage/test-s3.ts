@@ -5,7 +5,8 @@ import { verifySigV4 } from './test-sigv4.js';
 
 // An S3-compatible store in this process, for tests and for running the
 // server against the s3 driver without a network (storage/s3.ts). It speaks
-// PUT, GET (with Range), HEAD and DELETE for one bucket, addressed by path
+// PUT, GET (with Range), HEAD and DELETE for one bucket, and ListObjectsV2
+// (GET on the bucket with list-type=2, prefix, max-keys and a continuation token), addressed by path
 // (`<endpoint>/<bucket>/<key>`) or by bucket hostname (a Host of
 // `<bucket>.<anything>`), and checks what a real store checks: the SigV4
 // signature, verified by test-sigv4.ts (written from the specification and
@@ -103,12 +104,44 @@ export async function startTestS3(
         return answer(res, failure.how.status, failure.how.code);
       }
     }
-    if (first !== bucket || !key) return answer(res, 404, 'NoSuchBucket');
+    const listing = !key && req.method === 'GET' && url.searchParams.get('list-type') === '2';
+    if (first !== bucket || (!key && !listing)) return answer(res, 404, 'NoSuchBucket');
     const denied = verifySigV4(
       { method: req.method ?? '', url: req.url ?? '/', headers: req.headers },
       { accessKeyId, secretAccessKey, region },
     );
     if (denied) return answer(res, denied === 'InvalidRequest' ? 400 : 403, denied);
+
+    if (listing) {
+      const prefix = url.searchParams.get('prefix') ?? '';
+      const max = Math.min(1000, Number(url.searchParams.get('max-keys') ?? 1000) || 1000);
+      const after = url.searchParams.get('continuation-token') ?? '';
+      const keys = [...objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
+      const page = keys.slice(0, max);
+      const truncated = keys.length > max;
+      // The key itself as the token, escaped as XML, as a real store's opaque one would be.
+      const escape = (text: string) =>
+        text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const body =
+        `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${bucket}</Name>` +
+        `<Prefix>${escape(prefix)}</Prefix><KeyCount>${page.length}</KeyCount><MaxKeys>${max}</MaxKeys>` +
+        `<IsTruncated>${truncated}</IsTruncated>` +
+        page
+          .map(
+            (k) =>
+              `<Contents><Key>${escape(k)}</Key><Size>${objects.get(k)!.byteLength}</Size></Contents>`,
+          )
+          .join('') +
+        (truncated
+          ? `<NextContinuationToken>${escape(page[page.length - 1]!)}</NextContinuationToken>`
+          : '') +
+        `</ListBucketResult>`;
+      res.writeHead(200, {
+        'content-type': 'application/xml',
+        'content-length': Buffer.byteLength(body),
+      });
+      return void res.end(body);
+    }
 
     switch (req.method) {
       case 'PUT': {
