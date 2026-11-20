@@ -47,6 +47,12 @@ export interface TestS3 {
    * guessing how long a test needs.
    */
   hold(method?: string): { reached: Promise<void>; release(): void };
+  /**
+   * Holds the answer to the next listing (ListObjectsV2) until `release`:
+   * the listing is taken when the request arrives and sent later, as a
+   * slow network delivers an answer that is out of date by then.
+   */
+  holdListing(): { reached: Promise<void>; release(): void };
   /** Drops every failure `fail` set that is still to come: the store is back. */
   recover(): void;
   close(): Promise<void>;
@@ -70,6 +76,7 @@ export async function startTestS3(
     method?: string;
   }[] = [];
   const holds: { method?: string; arrived: () => void; released: Promise<void> }[] = [];
+  const listingHolds: { arrived: () => void; released: Promise<void> }[] = [];
 
   const answer = (res: ServerResponse, status: number, code?: string) => {
     const body = code ? xmlError(code) : '';
@@ -141,6 +148,11 @@ export async function startTestS3(
           ? `<NextContinuationToken>${escape(page[page.length - 1]!)}</NextContinuationToken>`
           : '') +
         `</ListBucketResult>`;
+      const answerHeld = listingHolds.shift();
+      if (answerHeld) {
+        answerHeld.arrived();
+        await answerHeld.released;
+      }
       res.writeHead(200, {
         'content-type': 'application/xml',
         'content-length': Buffer.byteLength(body),
@@ -231,6 +243,14 @@ export async function startTestS3(
     },
     recover() {
       failures.length = 0;
+    },
+    holdListing() {
+      let arrived!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => (arrived = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      listingHolds.push({ arrived, released });
+      return { reached, release };
     },
     hold(method) {
       let arrived!: () => void;

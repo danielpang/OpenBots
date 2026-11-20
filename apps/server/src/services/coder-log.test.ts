@@ -379,6 +379,7 @@ describe('a session log while object storage is unavailable (s3 driver)', () => 
     );
     // The next run here stores it first, after what was stored before.
     const next = await SessionLogWriter.open(writerMachine, session);
+    await next.whenPlaced();
     expect(next.bytes).toBe('stored before the outage\nwritten while the store is down\n'.length);
     next.write('after');
     await next.close();
@@ -405,6 +406,8 @@ describe('a session log while object storage is unavailable (s3 driver)', () => 
     await writer.close();
     up();
     const next = await SessionLogWriter.open(writerMachine, session);
+    // Opening waits at most its deadline; what `full` counts is known once placed.
+    await next.whenPlaced();
     expect(next.full).toBe(true);
     await next.close();
     const whole = await readSessionLog(readerMachine, session, SESSION_LOG_MAX * 2);
@@ -414,6 +417,73 @@ describe('a session log while object storage is unavailable (s3 driver)', () => 
     expect(whole.endsWith(`${SESSION_LOG_FULL}\n`)).toBe(true);
     expect(whole.split(SESSION_LOG_FULL)).toHaveLength(2);
     expect(whole.startsWith(`${line}\n`.repeat(6))).toBe(true);
+  });
+
+  it("lets a closed run's last try on this machine finish before a new run takes its place", async () => {
+    const session = newSession();
+    const line = 'z'.repeat(1024 * 1024 - 1);
+    // Six lines stored by an earlier run.
+    s3.objects.set(
+      `orgs/${session.workspaceId}/coderlog_${session.id}_000000000000_0123456789ab`,
+      Buffer.from(`${line}\n`.repeat(6)),
+    );
+    // The run's store does not answer while it opens: it spools, place unknown.
+    const listing = s3.hold('GET');
+    const run = await SessionLogWriter.open(writerMachine, session, { openMs: 20, closeMs: 20 });
+    await listing.reached;
+    for (let i = 0; i < 4; i++) run.write(line);
+    // Its end does not wait for the store either: its last try is still on its way.
+    await run.close();
+    // The next run starts here meanwhile. It may not take its place before
+    // that try ends; `openMs` only bounds how long its start waits for that,
+    // and is long enough for a run that did not wait to have asked the store.
+    const nextListing = s3.hold('GET');
+    const part = s3.hold('PUT');
+    const opening = SessionLogWriter.open(writerMachine, session, { openMs: 200 });
+    await Promise.race([nextListing.reached, opening]);
+    // The closed run's try goes on: it finds its place, cuts its spool at the
+    // cap and sends that as a part, which the store holds for now.
+    listing.release();
+    await part.reached;
+    nextListing.release();
+    const next = await opening;
+    part.release();
+    await next.whenPlaced();
+    expect(next.full).toBe(true);
+    next.write('after the cap');
+    await next.close();
+    const whole = await readSessionLog(readerMachine, session, SESSION_LOG_MAX * 2);
+    expect(whole.startsWith(`${line}\n`.repeat(6))).toBe(true);
+    expect(whole.endsWith(`${SESSION_LOG_FULL}\n`)).toBe(true);
+    expect(whole.split(SESSION_LOG_FULL)).toHaveLength(2);
+    expect(whole).not.toContain('after the cap');
+    // No two runs' parts start at the same place.
+    const offsets = [...s3.objects.keys()]
+      .filter((k) => k.includes(session.id))
+      .map((k) => k.split('_')[2]);
+    expect(new Set(offsets).size).toBe(offsets.length);
+  });
+
+  it("reads the log whole on the writer's machine while a closed run's last try moves its spool", async () => {
+    const session = newSession();
+    const first = await SessionLogWriter.open(writerMachine, session);
+    first.write('stored first');
+    await first.close();
+    const listing = s3.hold('GET');
+    const run = await SessionLogWriter.open(writerMachine, session, { openMs: 20, closeMs: 20 });
+    await listing.reached;
+    run.write('spooled before its place was known');
+    await run.close();
+    // A read here lists the store; the answer is out of date when it arrives.
+    const answer = s3.holdListing();
+    const reading = readSessionLog(writerMachine, session, 1_000);
+    await answer.reached;
+    // Meanwhile the closed run's try places its spool, stores it and removes it.
+    listing.release();
+    await run.whenStored();
+    expect(await spools(session)).toEqual([]);
+    answer.release();
+    expect(await reading).toBe('stored first\nspooled before its place was known\n');
   });
 
   it('asks the store a bounded number of times while it is down for a whole run, warning at a bounded rate with no content', async () => {

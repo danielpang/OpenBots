@@ -9,6 +9,7 @@ import {
   rm,
   stat,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { buffer } from 'node:stream/consumers';
@@ -339,6 +340,22 @@ async function within(work: Promise<unknown>, ms: number): Promise<boolean> {
 const warned = new WeakMap<object, { at: number; suppressed: number }>();
 
 /**
+ * By session, the one try to store the rest of its log that a closed
+ * writer in this process may still have on its way (`close` waits for it
+ * only up to its deadline). It renames, cuts and removes that writer's
+ * spool, so until it ends no other writer here may look at the session's
+ * spools or take its place from the store: a run that opened meanwhile
+ * would miss that spool and take the place its part is about to fill.
+ */
+const closing = new Map<string, Promise<void>>();
+
+/** Waits for a closed writer's last try for the session in this process, if one is on its way. */
+async function afterClosing(sessionId: string, own?: Promise<void> | null): Promise<void> {
+  const earlier = closing.get(sessionId);
+  if (earlier && earlier !== own) await earlier;
+}
+
+/**
  * Warns about the log's storage at most once per LOG_WARN_MS for each
  * logger, saying how many were left out. The error is named by its storage
  * error message (which names no bucket, key or content) or its errno.
@@ -393,6 +410,8 @@ export class SessionLogWriter {
   /** The file could not be appended to or measured: nothing more is written. */
   private broken = false;
   private resolving: Promise<void> | null = null;
+  /** This writer's last try, once closed (s3). */
+  private finishing: Promise<void> | null = null;
   /** No store request before this (after a failure), and the wait that set it. */
   private retryAt = 0;
   private backoff = 0;
@@ -507,8 +526,27 @@ export class SessionLogWriter {
     return this.resolving;
   }
 
+  /**
+   * Settles once the try to find the spool's place that is on its way has
+   * ended (at once when none is): `full` and `bytes` then count what is
+   * stored and what this machine still held. Never rejects.
+   */
+  whenPlaced(): Promise<void> {
+    return this.resolving ? this.resolving.catch(() => {}) : Promise.resolve();
+  }
+
+  /**
+   * Settles once this closed writer's last try to store the rest has ended
+   * (at once before `close`, or with the local driver). Never rejects.
+   */
+  whenStored(): Promise<void> {
+    return this.finishing ?? Promise.resolve();
+  }
+
   private async findBase() {
     const store = this.store!;
+    // A run that ended here may still be storing its spool: its part comes first.
+    await afterClosing(this.session.id, this.finishing);
     await storeSpools(this.deps, store, this.session, this.path);
     const parts = await listParts(store, this.session);
     const base = storedEnd(parts);
@@ -624,6 +662,11 @@ export class SessionLogWriter {
     this.clearTimer();
     if (!this.store) return;
     const finishing = this.uploads.then(() => this.finish());
+    this.finishing = finishing;
+    closing.set(this.session.id, finishing);
+    void finishing.then(() => {
+      if (closing.get(this.session.id) === finishing) closing.delete(this.session.id);
+    });
     if (!(await within(finishing, this.settings.closeMs))) {
       warnRarely(
         this.deps.logger,
@@ -691,13 +734,60 @@ interface Piece {
   read(from: number, length: number): Promise<Buffer>;
 }
 
+/** The most times a read lists again because spools here changed while it listed. */
+const READ_TRIES = 3;
+
+/** The names of the session's spools on this machine, sorted. */
+async function spoolNames(deps: LogDeps, sessionId: string): Promise<string> {
+  const names = await readdir(codersDir(deps)).catch(() => [] as string[]);
+  return names
+    .filter((name) => name === `${sessionId}.log` || SPOOL.exec(name)?.[1] === sessionId)
+    .sort()
+    .join('/');
+}
+
 async function readStoredTail(
   deps: LogDeps,
   store: BlobStore,
   session: LogSession,
   maxBytes: number,
 ): Promise<string> {
-  const parts = await listParts(store, session);
+  // A writer here renames its spool once it knows its place, and removes it
+  // once stored. The spools are opened before the store is listed (an open
+  // file reads on through a rename or removal), and the listing is taken
+  // again when their names changed meanwhile, so a spool is never counted
+  // at the wrong place nor missed.
+  for (let tries = 1; ; tries++) {
+    const names = await spoolNames(deps, session.id);
+    const spools = await localSpools(deps, session.id);
+    const opened: { handle: FileHandle; base: number | null; size: number }[] = [];
+    let vanished = false;
+    try {
+      for (const spool of spools) {
+        const handle = await open(spool.file, 'r').catch(() => null);
+        if (!handle) {
+          vanished = true;
+          continue;
+        }
+        opened.push({ handle, base: spool.base, size: (await handle.stat()).size });
+      }
+      const parts = await listParts(store, session);
+      const changed = vanished || (await spoolNames(deps, session.id)) !== names;
+      if (changed && tries < READ_TRIES) continue;
+      return await readPieces(store, session, parts, opened, maxBytes);
+    } finally {
+      await Promise.all(opened.map(({ handle }) => handle.close().catch(() => {})));
+    }
+  }
+}
+
+async function readPieces(
+  store: BlobStore,
+  session: LogSession,
+  parts: Part[],
+  spools: { handle: FileHandle; base: number | null; size: number }[],
+  maxBytes: number,
+): Promise<string> {
   const end = storedEnd(parts);
   const candidates: Piece[] = parts.map((part) => ({
     start: part.offset,
@@ -714,16 +804,20 @@ async function readStoredTail(
     },
   }));
   // The writer's machine (or one with a log from before the s3 driver) has more.
-  for (const spool of await localSpools(deps, session.id)) {
-    const size = await fileSize(spool.file);
-    const base = spool.base ?? end;
+  for (const { handle, base: placed, size } of spools) {
+    const base = placed ?? end;
     if (base + size <= end) continue;
     const start = Math.max(end, base);
     candidates.push({
       start,
       size: base + size - start,
-      read: (from, length) =>
-        readRange(spool.file, start - base + from, length).catch(() => Buffer.alloc(0)),
+      read: async (from, length) => {
+        const out = Buffer.alloc(Math.max(0, length));
+        const { bytesRead } = await handle
+          .read(out, 0, out.length, start - base + from)
+          .catch(() => ({ bytesRead: 0 }));
+        return out.subarray(0, bytesRead);
+      },
     });
   }
   // In order, each byte from the first piece that has it: overlaps (a part
@@ -765,6 +859,8 @@ export async function removeSessionLog(deps: LogDeps, session: LogSession): Prom
     return;
   }
   checkSession(session);
+  // A closed run's last try here would otherwise store its spool after this.
+  await afterClosing(session.id);
   for (const spool of await localSpools(deps, session.id)) await rm(spool.file, { force: true });
   for (const part of await listParts(store, session)) {
     await store.delete({ workspaceId: session.workspaceId, storageKey: part.storageKey });
@@ -813,6 +909,7 @@ export async function storeLeftoverSpools(
   for (const row of rows) {
     if (running(row.id) || ['starting', 'running', 'waiting'].includes(row.status)) continue;
     try {
+      await afterClosing(row.id);
       stored += await storeSpools(deps, store, {
         id: row.id,
         workspaceId,
