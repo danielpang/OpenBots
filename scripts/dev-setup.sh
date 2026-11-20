@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstraps the OpenBots toolchain: Node 22, pnpm (via corepack) and the
+# Bootstraps the OpenBots toolchain: Node 24, pnpm (via corepack) and the
 # workspace dependencies. Safe to run repeatedly.
 #
 #   bash scripts/dev-setup.sh              # Node, pnpm, pnpm install
@@ -12,7 +12,7 @@
 #   OPENBOTS_MIN_FREE_MB    free space a first install needs on the toolchain volume (default 768)
 set -euo pipefail
 
-NODE_MAJOR=22
+NODE_MAJOR=24
 MIN_FREE_MB="${OPENBOTS_MIN_FREE_MB:-768}"
 SERVICES_MIN_FREE_MB=500
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -101,10 +101,10 @@ node_major() {
 }
 
 NODE_BIN_DIR=""
-if [ -x "$NODE_DIR/bin/node" ] && [ "$(node_major "$NODE_DIR/bin/node")" -ge "$NODE_MAJOR" ]; then
+if [ -x "$NODE_DIR/bin/node" ] && [ "$(node_major "$NODE_DIR/bin/node")" -eq "$NODE_MAJOR" ]; then
   NODE_BIN_DIR="$NODE_DIR/bin"
   log "Using Node $("$NODE_BIN_DIR/node" --version) from $NODE_DIR"
-elif command -v node >/dev/null 2>&1 && [ "$(node_major node)" -ge "$NODE_MAJOR" ]; then
+elif command -v node >/dev/null 2>&1 && [ "$(node_major node)" -eq "$NODE_MAJOR" ]; then
   NODE_BIN_DIR="$(dirname "$(command -v node)")"
   log "Using Node $(node --version) from PATH ($NODE_BIN_DIR)"
 fi

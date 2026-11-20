@@ -27,6 +27,30 @@ describe('tool policy', () => {
     expect(ToolPolicySchema.safeParse({ triggers: { cron: {} } }).success).toBe(false);
   });
 
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    'keeps the setting for a tool named %s, as the database returns it',
+    (name) => {
+      // JSON.parse makes an own `__proto__` key, as the database driver does.
+      const stored: unknown = JSON.parse(
+        `{"tools":{"${name}":"deny"},"triggers":{"webhook":{"tools":{"${name}":"deny"}}}}`,
+      );
+      const policy = resolveToolPolicy(stored);
+      expect(Object.hasOwn(policy.tools, name)).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(policy.tools, name)?.value).toBe('deny');
+      const webhook = policy.triggers.webhook?.tools ?? {};
+      expect(Object.getOwnPropertyDescriptor(webhook, name)?.value).toBe('deny');
+      expect(Object.getPrototypeOf(policy.tools)).toBe(Object.prototype);
+      const { httpAllowlist: _none, ...again } = policy;
+      expect(resolveToolPolicy(again)).toEqual(policy);
+    },
+  );
+
+  it('ignores a __proto__ tool setting that is not a decision', () => {
+    const policy = resolveToolPolicy(JSON.parse('{"tools":{"__proto__":"maybe","bash":"deny"}}'));
+    expect(Object.hasOwn(policy.tools, '__proto__')).toBe(false);
+    expect(policy.tools).toEqual({ bash: 'deny' });
+  });
+
   it('drops only the coder key that does not parse, and keeps the rest of the policy', () => {
     const stored = {
       tools: { bash: 'deny' },
