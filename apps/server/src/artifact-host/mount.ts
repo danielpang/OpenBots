@@ -32,14 +32,53 @@ export function artifactHostDeps(deps: AppDeps): ArtifactHostDeps | null {
     allow: async (key) =>
       (await deps.infra.limiter.consume(key, { window: 60, max: HOST_RATE_LIMIT })).allowed,
     // A token is good once: its nonce is claimed for longer than it lives.
-    claim: async (nonce) =>
-      (
-        await deps.infra.limiter.consume(`artifact-token:${nonce}`, {
-          window: VIEW_TOKEN_SECONDS * 2,
-          max: 1,
-        })
-      ).allowed,
+    // With Redis the claim is a bucket of one in the shared limiter (one
+    // atomic script, seen by every API process). Without it the server is
+    // one process, and the claim is kept apart from the limiter's buckets,
+    // which drop their oldest under a flood of addresses.
+    claim:
+      deps.infra.kind === 'redis'
+        ? async (nonce) =>
+            (
+              await deps.infra.limiter.consume(`artifact-token:${nonce}`, {
+                window: CLAIM_SECONDS,
+                max: 1,
+              })
+            ).allowed
+        : (() => {
+            const claims = new MemoryClaims();
+            return async (nonce: string) => claims.claim(nonce, CLAIM_SECONDS * 1000);
+          })(),
   };
+}
+
+const CLAIM_SECONDS = VIEW_TOKEN_SECONDS * 2;
+
+/**
+ * Claimed nonces in one process: each kept until it expires, never dropped
+ * early. Full of live claims (more tokens minted in two minutes than it
+ * holds), it refuses a new one rather than forget an old one: that viewer
+ * opens the link again.
+ */
+export class MemoryClaims {
+  private readonly claims = new Map<string, number>();
+
+  constructor(
+    private readonly max = 100_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  claim(key: string, ttlMs: number): boolean {
+    const now = this.now();
+    const until = this.claims.get(key);
+    if (until !== undefined && until > now) return false;
+    if (until === undefined && this.claims.size >= this.max) {
+      for (const [k, expires] of this.claims) if (expires <= now) this.claims.delete(k);
+      if (this.claims.size >= this.max) return false;
+    }
+    this.claims.set(key, now + ttlMs);
+    return true;
+  }
 }
 
 const hostnameOf = (host: string | undefined) =>
