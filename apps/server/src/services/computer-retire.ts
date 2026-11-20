@@ -973,7 +973,7 @@ class ClaimLost extends Error {}
  */
 async function failed(
   deps: Deps,
-  machines: ComputerProvider,
+  machines: ComputerProvider | null,
   row: RetiredRow,
   from: 'retiring' | 'deleting',
   error: unknown,
@@ -996,7 +996,10 @@ async function failed(
     if (!outOfReach) {
       try {
         // A provider that cannot say keeps it for an operator.
-        const state = machines.retiredState ? await machines.retiredState(machineRef(row)) : null;
+        const state =
+          machines?.name === row.provider && machines.retiredState
+            ? await machines.retiredState(machineRef(row))
+            : null;
         outOfReach = state === 'retired' || state === 'gone';
       } catch (again) {
         deps.logger.warn({ err: again, retiredId: row.id }, 'checking a retired computer failed');
@@ -1141,8 +1144,8 @@ async function finishRetire(
  * for good, once it took the row from the claim it was queued with (a claim
  * of its own, so a job delivered twice runs once). Does nothing for a row in
  * any other status (another worker finished it, or an operator restored it
- * meanwhile), for a claim another took, or when the provider is not the
- * row's (the claim runs out and it is tried again later).
+ * meanwhile) or for a claim another took. Where the install has not the
+ * row's provider, the attempt fails and counts toward giving up.
  */
 export async function runRetiredComputerJob(
   deps: Deps,
@@ -1155,13 +1158,6 @@ export async function runRetiredComputerJob(
     .from(schema.retiredComputers)
     .where(eq(schema.retiredComputers.id, job.retiredId));
   if (!found) return;
-  if (!machines || machines.name !== found.provider || !retainsOnReset(machines)) {
-    deps.logger.warn(
-      { retiredId: found.id, provider: found.provider },
-      'a retired computer is on a provider this install no longer has; left for later',
-    );
-    return;
-  }
   const status = job.kind === 'retire' ? 'retiring' : 'deleting';
   if (found.status !== status || (job.kind === 'retire' && found.gaveUpAt)) return;
   if (!job.claim || !UUID.test(job.claim)) return;
@@ -1183,6 +1179,22 @@ export async function runRetiredComputerJob(
     )
     .returning();
   if (!row) return;
+  // A provider this install does not have (not configured, or another one):
+  // a failed attempt like any other, retried with backoff and then given up
+  // for an operator (`gave_up_at`, `computers retired --gave-up`), which also
+  // lets the member's computer go (computer.ts `abandonedStop`). Never left
+  // waiting without a count.
+  if (!machines || machines.name !== row.provider || !retainsOnReset(machines)) {
+    await failed(
+      deps,
+      null,
+      row,
+      status,
+      new Error(`This install has no ${row.provider} provider to finish it`),
+      now,
+    );
+    return;
+  }
   // A record the reset did not settle (its process died, its cut failed and
   // could not be undone, its seal failed): the job never undoes it, so this
   // is past the point of no return. Settled first, before any call on the

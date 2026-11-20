@@ -78,6 +78,7 @@ import { fenceComputer, isFenced } from './computer-fence.js';
 import {
   PROVISION_HEARTBEAT_MS,
   PROVISION_STALE_MS,
+  STOPPING_GIVE_UP_MS,
   STOPPING_HEARTBEAT_MS,
   STOPPING_TAKEOVER_MS,
 } from './computer-timing.js';
@@ -1223,9 +1224,20 @@ async function stillStopping(deps: AppDeps, row: ComputerRow): Promise<boolean> 
 }
 
 /**
+ * How a `stopping` holder refreshes its claim (computer-timing.ts); tests
+ * set them short.
+ */
+export const stopTimings = {
+  heartbeatMs: STOPPING_HEARTBEAT_MS,
+  giveUpMs: STOPPING_GIVE_UP_MS,
+};
+
+/**
  * Runs `fn` while holding the `stopping` claim on `row`: every
  * `STOPPING_HEARTBEAT_MS` the claim is refreshed (`stillStopping`). Should a
  * refresh find it taken (this process stalled past `STOPPING_TAKEOVER_MS`),
+ * or no refresh land for `STOPPING_GIVE_UP_MS` (the database out of reach,
+ * so the claim may be taken soon without this process hearing of it),
  * `fn`'s signal is aborted, which ends the provider's call where it can.
  */
 async function holdingStop<T>(
@@ -1234,20 +1246,37 @@ async function holdingStop<T>(
   fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const lost = new AbortController();
+  const giveUp = () =>
+    setTimeout(
+      () => lost.abort(new Error('The computer could not be held: its claim was not refreshed')),
+      stopTimings.giveUpMs,
+    );
+  // From the claim the caller just wrote or refreshed.
+  let unheard = giveUp();
+  unheard.unref?.();
   const timer = setInterval(() => {
     stillStopping(deps, row).then(
       (held) => {
-        if (!held) lost.abort(new Error('The computer was taken over meanwhile'));
+        if (!held) {
+          lost.abort(new Error('The computer was taken over meanwhile'));
+          return;
+        }
+        clearTimeout(unheard);
+        if (!lost.signal.aborted) {
+          unheard = giveUp();
+          unheard.unref?.();
+        }
       },
       (error: unknown) =>
         deps.logger.warn({ err: error, computerId: row.id }, 'refreshing a stop failed'),
     );
-  }, STOPPING_HEARTBEAT_MS);
+  }, stopTimings.heartbeatMs);
   timer.unref?.();
   try {
     return await fn(lost.signal);
   } finally {
     clearInterval(timer);
+    clearTimeout(unheard);
   }
 }
 

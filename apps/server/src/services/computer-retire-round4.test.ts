@@ -11,14 +11,21 @@ import type { CliContext } from '../cli/context.js';
 import { schema } from '../db/client.js';
 import { createTestApp, type TestApp } from '../test-app.js';
 import { useTestSprites, type TestSprites } from '../test-computer.js';
+import { inEveryOrganization } from '../workers.js';
 import {
   computerProvider,
   destroyComputer,
   provisionTimings,
+  recoverStaleComputers,
   stopComputer,
+  stopTimings,
   type ComputerRow,
 } from './computer.js';
-import { restoreRetiredComputer, runRetiredComputerJob } from './computer-retire.js';
+import {
+  RETIRED_MAX_ATTEMPTS,
+  restoreRetiredComputer,
+  runRetiredComputerJob,
+} from './computer-retire.js';
 import { runRescueJob } from './repos-rescue.js';
 
 // The fourth review of retired computers (plan 9.5): a computer row never
@@ -359,6 +366,113 @@ describe('retired computers, fourth review', () => {
             ),
           ),
       ).toHaveLength(1);
+    });
+  });
+
+  describe('6. a reset that cannot refresh its claim', () => {
+    it('ends its home clearing before the claim can be taken over', async () => {
+      const m = await member('claim-unheard@example.com');
+      const before = await m.row();
+      const notes = '/home/bot/notes.md';
+      sprites.api.sprites.get(before.containerId!)!.files.set(notes, new Uint8Array([1]));
+      const provider = machines();
+      const destroy = provider.destroy;
+      let entered!: () => void;
+      const inside = new Promise<void>((resolve) => (entered = resolve));
+      let down = false;
+      let aborted = false;
+      provider.destroy = async (ref, options) => {
+        entered();
+        // The home clearing runs long, until its signal ends it.
+        await new Promise<void>((resolve, reject) => {
+          const fallback = setTimeout(resolve, 3_000);
+          options?.signal?.addEventListener('abort', () => {
+            clearTimeout(fallback);
+            aborted = true;
+            down = false;
+            reject(options.signal!.reason as Error);
+          });
+        });
+        return destroy.call(provider, ref, options);
+      };
+      // The database goes out of reach for this process's refreshes.
+      const db = t.deps.db;
+      const unreachable = new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'update' && down) {
+            return () => {
+              throw new Error('Connection terminated unexpectedly');
+            };
+          }
+          const value = Reflect.get(target, prop) as unknown;
+          return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+        },
+      });
+      const timings = { ...stopTimings };
+      stopTimings.heartbeatMs = 20;
+      stopTimings.giveUpMs = 200;
+      let answer: unknown;
+      try {
+        const reset = t
+          .inOrganization(() =>
+            destroyComputer({ ...t.deps, db: unreachable }, before, { signIns: false }),
+          )
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        await inside;
+        down = true;
+        answer = await reset;
+      } finally {
+        provider.destroy = destroy;
+        Object.assign(stopTimings, timings);
+      }
+      expect(aborted).toBe(true);
+      expect(answer).toMatchObject({ status: 503, code: 'COMPUTER_UNAVAILABLE' });
+      // Nothing was cleared.
+      expect(sprites.api.sprites.get(before.containerId!)!.files.has(notes)).toBe(true);
+    });
+  });
+
+  describe('7. a record on a provider this install does not have', () => {
+    it('counts its attempts, gives up for an operator, and lets the computer go', async () => {
+      const m = await member('no-provider@example.com');
+      await m.reset(true);
+      await isolate(m.ownerId);
+      const [record] = await retiredOf(m.ownerId);
+      // As a reset that died before it settled: the record open, the computer held `stopping`.
+      await t.db
+        .update(schema.retiredComputers)
+        .set({
+          status: 'retiring',
+          sealedAt: null,
+          auditedAt: null,
+          claim: crypto.randomUUID(),
+          nextAttemptAt: null,
+        })
+        .where(eq(schema.retiredComputers.id, record!.id));
+      await t.db
+        .update(schema.computers)
+        .set({ status: 'stopping', statusAt: new Date(Date.now() - 60 * 60_000) })
+        .where(eq(schema.computers.ownerId, m.ownerId));
+      for (let i = 0; i < RETIRED_MAX_ATTEMPTS; i++) {
+        const [now] = await retiredOf(m.ownerId);
+        await t.inOrganization(() =>
+          runRetiredComputerJob(t.deps, null, {
+            retiredId: now!.id,
+            kind: 'retire',
+            claim: now!.claim ?? undefined,
+          }),
+        );
+      }
+      const [after] = await retiredOf(m.ownerId);
+      expect(after).toMatchObject({ attempts: RETIRED_MAX_ATTEMPTS, status: 'retiring' });
+      expect(after!.gaveUpAt).not.toBeNull();
+      expect(after!.lastError).toMatch(/no sprites provider/);
+      // Given up, it no longer holds the member's computer.
+      await inEveryOrganization(t.deps, () => recoverStaleComputers(t.deps));
+      expect((await m.row()).status).toBe('stopped');
     });
   });
 });
