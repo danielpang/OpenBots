@@ -34,6 +34,13 @@ describe('artifact host mounts', () => {
       body: JSON.stringify({ name: 'Edge' }),
     });
     const botId = ((await res.json()) as { id: string }).id;
+    // Public links are off until the owner turns them on.
+    const on = await t.app.request('/api/v1/settings', {
+      method: 'PATCH',
+      headers: { origin: ORIGIN, cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ publicArtifactsEnabled: true }),
+    });
+    expect(on.status).toBe(200);
     const owner = { id: ownerId, workspaceId };
     const { artifact } = await createArtifact(
       t.ownerDeps,
@@ -46,7 +53,7 @@ describe('artifact host mounts', () => {
         t.deps,
         owner,
         artifact.id,
-        { visibility: 'public', version: 1 },
+        { visibility: 'public' },
         { type: 'user', id: ownerId },
       ),
     );

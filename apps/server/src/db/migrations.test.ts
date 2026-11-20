@@ -486,7 +486,6 @@ describe('artifact_sharing backfill (plan 21.11)', () => {
     const [row] = await db.select().from(schema.artifacts);
     expect(row).toMatchObject({
       visibility: 'private',
-      publicVersionId: null,
       sharedBy: null,
       takenDownAt: null,
     });

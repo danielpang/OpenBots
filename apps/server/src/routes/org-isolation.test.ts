@@ -107,7 +107,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   'put /api/v1/connectors/{id}/trusted': { trusted: true },
   'put /api/v1/connectors/{id}/local': { local: false },
   'put /api/v1/artifacts/{id}': { content: 'overwritten' },
-  'put /api/v1/artifacts/{id}/sharing': { visibility: 'public', version: 1, confirmed: true },
+  'put /api/v1/artifacts/{id}/sharing': { visibility: 'public', confirmed: true },
   'patch /api/v1/routines/{id}': { name: 'Taken' },
   'patch /api/v1/skills/{id}': { name: 'Taken' },
   'put /api/v1/skills/{id}/blocked-bots': { botIds: [] },

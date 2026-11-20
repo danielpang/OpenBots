@@ -1,10 +1,11 @@
 import { unwrap } from '@openbots/api-client';
-import { Button, Input, Switch } from '@openbots/ui';
-import { capabilitiesQuery, meQuery } from '@openbots/web/api';
+import { Button, Input } from '@openbots/ui';
+import { meQuery } from '@openbots/web/api';
 import { isAdmin } from '@openbots/web/extensions';
 import {
   LimitFields,
   limitsPatch,
+  PublicLinksSetting,
   SaveRow,
   settingsQuery,
   useSaveSettings,
@@ -17,7 +18,7 @@ import { CreateOrganizationForm } from './create-organization.js';
 // Settings > Organization (plan 21.5): its name, and for owners and admins
 // its limits and how long its audit log keeps rows, under the ceiling the
 // service sets, and whether members may make Artifacts public (plan 21.11;
-// the setting and its rules are the core's `/settings`). Everyone may create
+// off by default; the setting, its rules and its control are the core's). Everyone may create
 // another organization or leave this one; the last owner cannot leave.
 
 export function OrganizationSettings() {
@@ -77,38 +78,8 @@ function NameSection({ admin }: { admin: boolean }) {
   );
 }
 
-/** Public links to Artifacts, on or off for the whole organization; off stops the ones that exist. */
-export function SharingSection() {
-  const capabilities = useQuery(capabilitiesQuery);
-  const { data } = useQuery(settingsQuery);
-  const save = useSaveSettings();
-  if (!capabilities.data?.artifactSharing || !data) return null;
-  // While a change is saving, show the value asked for, not the one before it.
-  const asked = save.isPending ? save.variables?.publicArtifactsEnabled : undefined;
-  const checked = asked ?? data.publicArtifactsEnabled;
-  return (
-    <section className="flex flex-col gap-3">
-      <h2 className="font-medium">Sharing</h2>
-      <label className="flex items-start gap-3 text-sm">
-        <Switch
-          name="publicArtifactsEnabled"
-          checked={checked}
-          disabled={save.isPending}
-          onChange={(event) => save.mutate({ publicArtifactsEnabled: event.target.checked })}
-        />
-        <span className="flex flex-col gap-1">
-          <span className="font-medium">Allow public links</span>
-          <span className="text-muted-foreground">
-            Members can make an Artifact public, so anyone with its link can view it without signing
-            in. Turning this off stops every public link in the organization until you turn it on
-            again.
-          </span>
-        </span>
-      </label>
-      {save.error && <p className="text-sm text-destructive">{save.error.message}</p>}
-    </section>
-  );
-}
+/** Public links to Artifacts for the organization: the core's setting (plan 21.11). */
+export const SharingSection = PublicLinksSetting;
 
 function LimitsSection() {
   const { data } = useQuery(settingsQuery);

@@ -3,6 +3,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { adminProblems, authenticated, createRouter, problemResponse } from '../openapi.js';
 import { LimitsSchema } from '../schemas.js';
 import { DomainError } from '../errors.js';
+import { countPublic, stopPublicLinks } from '../services/artifact-sharing.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { stopCustomStdio } from '../services/connectors.js';
 import type { Limits } from '@openbots/shared';
@@ -37,7 +38,11 @@ const SettingsSchema = z
     }),
     publicArtifactsEnabled: z.boolean().openapi({
       description:
-        'Whether members may make Artifacts public, so anyone with the link can view them (default true). Turning it off stops every public link in the organization until it is on again.',
+        'Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back.',
+    }),
+    publicArtifacts: z.number().int().openapi({
+      description:
+        'How many Artifacts are public now: the links that turning `publicArtifactsEnabled` off would stop',
     }),
     ceilings: z.object(LimitsSchema.shape).nullable().openapi({
       description:
@@ -63,7 +68,11 @@ const settingsResponse = {
 /** The settings in effect for the organization, with the ceilings its limits stay under. */
 async function settingsOf(deps: AppDeps, workspace: Workspace) {
   const ceilings = await limitsCeiling(deps, workspace);
-  return { ...effectiveSettings(deps.config, workspace, ceilings), ceilings };
+  return {
+    ...effectiveSettings(deps.config, workspace, ceilings),
+    publicArtifacts: await countPublic(deps.db, workspace.id),
+    ceilings,
+  };
 }
 
 /** The least an organization keeps its audit log for on the managed service. */
@@ -153,14 +162,24 @@ export const settingsRoutes = createRouter()
           );
         }
       }
-      const workspace = await updateSettings(db, current, patch);
-      await recordAudit(db, {
-        workspaceId: workspace.id,
-        actor: userActor(c.var.user),
-        action: 'settings.update',
-        targetType: 'workspace',
-        targetId: workspace.id,
-        metadata: patch,
+      const actor = userActor(c.var.user);
+      const workspace = await db.transaction(async (tx) => {
+        const updated = await updateSettings(tx, current, patch);
+        // Off makes every public link an organization one, in this
+        // transaction: on again brings none of them back (plan 21.11).
+        const stopped =
+          patch.publicArtifactsEnabled === false
+            ? await stopPublicLinks(tx, updated.id, actor)
+            : undefined;
+        await recordAudit(tx, {
+          workspaceId: updated.id,
+          actor,
+          action: 'settings.update',
+          targetType: 'workspace',
+          targetId: updated.id,
+          metadata: stopped ? { ...patch, publicLinksStopped: stopped } : patch,
+        });
+        return updated;
       });
       // Their calls are refused from now on; their running children stop too (S-1).
       if (patch.customStdioEnabled === false) await stopCustomStdio(c.var.deps, workspace.id);

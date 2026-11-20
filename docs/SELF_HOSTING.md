@@ -175,9 +175,16 @@ shared page never reaches the app's cookies, and point a wildcard DNS record and
 [apps/artifact-worker](../apps/artifact-worker/README.md), which can terminate the wildcard
 hostname instead and forwards to `/artifact-host/` with this secret. Without it that path answers 404.
 
-Owners and admins can turn public links off for their organization in Settings. An operator can
-take one public link down at once with `openbots artifacts takedown <link> [reason]` (and put it
-back with `openbots artifacts restore <link>`); both are recorded in the organization's audit log.
+An Artifact is private to the person who made it until they share it. Sharing with the
+organization is always possible. Public links are off for every organization until an owner or
+admin turns them on in Settings (Settings > Limits on a self-hosted install, Settings >
+Organization on the managed service). Turning them off makes every public Artifact visible to the
+organization only, and turning them on again brings none of those links back. A shared Artifact
+always shows its latest version, so later edits, a Bot's included, are visible at once. An owner
+or admin can stop sharing any member's Artifact, which is how what a suspended or removed member
+shared is stopped. An operator can take one public link down at once with
+`openbots artifacts takedown <link> [reason]` (and put it back with
+`openbots artifacts restore <link>`); both are recorded in the organization's audit log.
 
 ### Egress proxy for the computers
 
@@ -266,6 +273,12 @@ Back up first (below). Migrations run when the new server starts.
 - A compose bundle install is pinned to its release: set `OPENBOTS_VERSION` in `.env` to the new
   version (or `latest`) first.
 - Built from source: `git pull && docker compose up -d --build`.
+
+Upgrading to the release with shared Artifacts (migration `0048_artifact_sharing`): the migration
+gives every existing Bot its address on the artifact domain, and while it does it locks the
+organizations (`workspaces`) and `bots` tables, so every request that reads or changes a Bot or an
+organization waits until it ends. That takes moments on most installs. On a very large one, upgrade in a
+quiet period.
 
 Computers move to the new computer image too. The server pulls it at start, and each computer is
 made again from it at its next start, keeping its files and browser logins (the Computer page and

@@ -18,7 +18,6 @@ const ok = (data: unknown) => ({ data, response: { ok: true, status: 200 } });
 const sharing = (over: Partial<ArtifactSharing> = {}): ArtifactSharing => ({
   visibility: 'private',
   currentVersion: 2,
-  publicVersion: null,
   publicAllowed: true,
   takenDown: false,
   url: `https://writer-1a2b3c4d--acme-0f0f0f0f.openbots-artifacts.example/${ID}/`,
@@ -41,14 +40,8 @@ beforeEach(() => {
     state ? ok(state) : { data: undefined, error: {}, response: { ok: false, status: 404 } },
   );
   mockPut.mockImplementation(async (_path, options) => {
-    const body = (
-      options as { body: { visibility: ArtifactSharing['visibility']; version?: number } }
-    ).body;
-    state = {
-      ...state!,
-      visibility: body.visibility,
-      publicVersion: body.visibility === 'public' ? (body.version ?? null) : null,
-    };
+    const body = (options as { body: { visibility: ArtifactSharing['visibility'] } }).body;
+    state = { ...state!, visibility: body.visibility };
     return ok(state);
   });
   mockPost.mockImplementation(async (path) =>
@@ -101,7 +94,7 @@ describe('Artifact sharing on the phone', () => {
     expect(await screen.findByRole('button', { name: 'Share link' })).toBeTruthy();
   });
 
-  it('makes nothing public unless the person confirms who will see which version', async () => {
+  it('makes nothing public unless the person confirms, and says later edits are public too', async () => {
     setup();
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Anyone with the link' })).toBeTruthy(),
@@ -111,31 +104,26 @@ describe('Artifact sharing on the phone', () => {
     await waitFor(() => expect(alert).toHaveBeenCalledTimes(1));
     expect(alert.mock.calls[0]![0]).toBe('Make this public?');
     expect(alert.mock.calls[0]![1]).toContain(
-      'Anyone with the link will be able to view version 2 of “Plan”, without signing in.',
+      'Anyone with the link will be able to view “Plan” without signing in.',
+    );
+    expect(alert.mock.calls[0]![1]).toContain(
+      'Every later edit, including one your Bot makes, is public as soon as it is saved, without asking you again.',
     );
     expect(mockPut).not.toHaveBeenCalled();
 
-    answer = 'Make version 2 public';
+    answer = 'Make it public';
     fireEvent.press(screen.getByRole('button', { name: 'Anyone with the link' }));
     await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
     expect((mockPut.mock.calls[0]![1] as { body: unknown }).body).toEqual({
       visibility: 'public',
-      version: 2,
       confirmed: true,
     });
-  });
-
-  it('keeps a newer version private until the person updates the public one', async () => {
-    state = sharing({ visibility: 'public', publicVersion: 1, currentVersion: 3 });
-    answer = 'Make version 3 public';
-    setup();
-    fireEvent.press(await screen.findByRole('button', { name: 'Update the public version' }));
-    await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
-    expect((mockPut.mock.calls[0]![1] as { body: unknown }).body).toEqual({
-      visibility: 'public',
-      version: 3,
-      confirmed: true,
-    });
+    expect(
+      await screen.findByText(
+        'Anyone with the link can view the latest version, without signing in.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Update the public version' })).toBeNull();
   });
 
   it("answers a Bot's request to make it public through the same confirmation", async () => {
@@ -143,29 +131,6 @@ describe('Artifact sharing on the phone', () => {
       pendingRequest: {
         approvalId: 'appr-1',
         visibility: 'public',
-        version: 1,
-        createdAt: '2026-11-19T10:00:00.000Z',
-      },
-    });
-    answer = 'Cancel';
-    setup();
-    fireEvent.press(await screen.findByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(alert).toHaveBeenCalled());
-    expect(mockPost).not.toHaveBeenCalled();
-    answer = 'Make version 1 public';
-    fireEvent.press(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
-    expect(mockPost.mock.calls[0]![0]).toBe('/api/v1/approvals/{id}/decide');
-    expect((mockPost.mock.calls[0]![1] as { body: unknown }).body).toEqual({ decision: 'approve' });
-  });
-
-  it('says when the version a Bot asks to publish is not the current one', async () => {
-    state = sharing({
-      currentVersion: 3,
-      pendingRequest: {
-        approvalId: 'appr-1',
-        visibility: 'public',
-        version: 1,
         createdAt: '2026-11-19T10:00:00.000Z',
       },
     });
@@ -173,14 +138,17 @@ describe('Artifact sharing on the phone', () => {
     setup();
     expect(
       await screen.findByText(
-        'Your Bot asks to make version 1 public, so anyone with the link could view it. Version 1 is not the current version. Version 3 stays private unless you confirm it.',
+        'Your Bot asks to make this public, so anyone with the link could view it and every later version.',
       ),
     ).toBeTruthy();
     fireEvent.press(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(alert).toHaveBeenCalled());
-    expect(alert.mock.calls[0]![1]).toContain(
-      'This is not the current version: that is version 3.',
-    );
+    expect(mockPost).not.toHaveBeenCalled();
+    answer = 'Make it public';
+    fireEvent.press(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0]![0]).toBe('/api/v1/approvals/{id}/decide');
+    expect((mockPost.mock.calls[0]![1] as { body: unknown }).body).toEqual({ decision: 'approve' });
   });
 
   it('says why it has no link', async () => {
@@ -202,10 +170,14 @@ describe('Artifact sharing on the phone', () => {
     open.mockRestore();
   });
 
-  it('offers no public option when the organization turned public links off', async () => {
+  it('offers no public option, and says why, while the organization has public links off', async () => {
     state = sharing({ publicAllowed: false });
     setup();
-    expect(await screen.findByText('Your organization has turned off public links.')).toBeTruthy();
+    expect(
+      await screen.findByText(
+        'Public links are off for your organization. An owner or admin can turn them on in Settings.',
+      ),
+    ).toBeTruthy();
     expect(
       screen.getByRole('button', { name: 'Anyone with the link' }).props.accessibilityState
         ?.disabled,

@@ -5028,7 +5028,7 @@ export interface paths {
         };
       };
     };
-    /** Change who may see an Artifact (owner; a person, for anything wider than before) */
+    /** Change who may see an Artifact (owner; a person, for anything wider than before), or narrow another member's (owner or admin of the organization) */
     put: {
       parameters: {
         query?: never;
@@ -5053,7 +5053,7 @@ export interface paths {
             'application/json': components['schemas']['ArtifactSharing'];
           };
         };
-        /** @description `public` without `confirmed` and `version` (`CONFIRMATION_REQUIRED`) */
+        /** @description `public` without `confirmed` (`CONFIRMATION_REQUIRED`) */
         400: {
           headers: {
             [name: string]: unknown;
@@ -5071,7 +5071,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description An API key widening it (`PERSON_REQUIRED`), or public links are off in the organization (`PUBLIC_SHARING_OFF`) */
+        /** @description An API key widening it (`PERSON_REQUIRED`), public links are not on in the organization (`PUBLIC_SHARING_OFF`), or an admin widening another member's Artifact (`OWNER_ONLY`) */
         403: {
           headers: {
             [name: string]: unknown;
@@ -5080,7 +5080,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description No such Artifact or version, or this install does not host Artifacts */
+        /** @description No such Artifact the caller owns or, as an owner or admin, sees shared; or this install does not host Artifacts */
         404: {
           headers: {
             [name: string]: unknown;
@@ -5089,7 +5089,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description A newer version was saved (`VERSION_CONFLICT`), or the public link was taken down (`TAKEN_DOWN`) */
+        /** @description The public link was taken down (`TAKEN_DOWN`) */
         409: {
           headers: {
             [name: string]: unknown;
@@ -11751,8 +11751,10 @@ export interface components {
       auditRetentionDays: number;
       /** @description Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may) */
       customStdioEnabled: boolean;
-      /** @description Whether members may make Artifacts public, so anyone with the link can view them (default true). Turning it off stops every public link in the organization until it is on again. */
+      /** @description Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back. */
       publicArtifactsEnabled: boolean;
+      /** @description How many Artifacts are public now: the links that turning `publicArtifactsEnabled` off would stop */
+      publicArtifacts: number;
       /** @description The most each limit may be on the managed service; null on a self-hosted install, which has none */
       ceilings: {
         botsPerAccount: number;
@@ -13605,10 +13607,9 @@ export interface components {
     };
     ArtifactSharing: {
       visibility: components['schemas']['ArtifactVisibility'];
+      /** @description Its latest version: what everyone who may see it sees */
       currentVersion: number | null;
-      /** @description While public: the version anyone with the link sees. Later versions stay private until the owner confirms again. */
-      publicVersion: number | null;
-      /** @description The organization lets members make Artifacts public */
+      /** @description An owner or admin turned public links on for the organization (off by default) */
       publicAllowed: boolean;
       /** @description The service took the public link down; it cannot be made public again */
       takenDown: boolean;
@@ -13635,16 +13636,13 @@ export interface components {
       approvalId: string;
       /** @enum {string} */
       visibility: 'org' | 'public';
-      version: number | null;
       /** Format: date-time */
       createdAt: string;
     } | null;
     ArtifactSharingChange: {
       visibility: components['schemas']['ArtifactVisibility'];
-      /** @description For `public`: the version the person confirmed; it must be the current one */
-      version?: number;
       /**
-       * @description For `public`: the person confirmed that anyone with the link will be able to view it
+       * @description For `public`: the person confirmed that anyone with the link will be able to view it and every later version
        * @enum {boolean}
        */
       confirmed?: true;
@@ -13665,7 +13663,7 @@ export interface components {
       kind: 'document' | 'code' | 'data' | 'design' | 'file';
       title: string;
       visibility: components['schemas']['ArtifactVisibility'];
-      /** @description The version the caller may see */
+      /** @description Its latest version, which the caller sees */
       version: {
         version: number;
         mime: string;

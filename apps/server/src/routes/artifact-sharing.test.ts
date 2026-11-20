@@ -13,7 +13,6 @@ const DOMAIN = 'openbots-artifacts.test';
 interface Sharing {
   visibility: 'private' | 'org' | 'public';
   currentVersion: number | null;
-  publicVersion: number | null;
   publicAllowed: boolean;
   takenDown: boolean;
   url: string | null;
@@ -27,8 +26,10 @@ describe('sharing Artifacts (plan 21.11)', () => {
   let carol: string;
   let dave: string;
   let aliceId: string;
+  let carolId: string;
   let daveId: string;
   let botId: string;
+  let carolBotId: string;
 
   beforeAll(async () => {
     t = await createTestApp({
@@ -41,9 +42,12 @@ describe('sharing Artifacts (plan 21.11)', () => {
     carol = (await t.signUp('carol@example.com')).cookie!; // a member
     dave = (await t.signUp('dave@example.com')).cookie!; // a member, suspended later
     aliceId = await t.userId('alice@example.com');
+    carolId = await t.userId('carol@example.com');
     daveId = await t.userId('dave@example.com');
     const res = await call(alice, 'POST', '/bots', { name: 'Writer' });
     botId = ((await res.json()) as { id: string }).id;
+    const carolBot = await call(carol, 'POST', '/bots', { name: 'Helper' });
+    carolBotId = ((await carolBot.json()) as { id: string }).id;
   });
   afterAll(() => t.close());
 
@@ -75,6 +79,35 @@ describe('sharing Artifacts (plan 21.11)', () => {
     return artifact.id;
   }
 
+  /** One of Carol's, made by her own Bot. */
+  async function carolsArtifact(title: string, content = 'carol text') {
+    const { artifact } = await createArtifact(
+      t.ownerDeps,
+      { id: carolId, workspaceId },
+      { title, kind: 'document', botId: carolBotId, content },
+      { userId: carolId },
+    );
+    return artifact.id;
+  }
+
+  /** An owner or admin turns public links on or off for the organization. */
+  const publicLinks = (on: boolean) =>
+    json<{ publicArtifactsEnabled: boolean; publicArtifacts: number }>(
+      call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: on }),
+    );
+
+  const visibilityOf = async (id: string) =>
+    (await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id)))[0]!.visibility;
+
+  const auditOf = async (id: string) =>
+    t.db
+      .select()
+      .from(schema.auditLog)
+      .where(
+        and(eq(schema.auditLog.action, 'artifact.visibility'), eq(schema.auditLog.targetId, id)),
+      )
+      .orderBy(schema.auditLog.createdAt);
+
   const edit = (id: string, content: string) =>
     writeArtifact(t.ownerDeps, { id: aliceId, workspaceId }, id, { content }, { userId: aliceId });
 
@@ -104,8 +137,7 @@ describe('sharing Artifacts (plan 21.11)', () => {
     expect(sharing).toMatchObject({
       visibility: 'private',
       currentVersion: 1,
-      publicVersion: null,
-      publicAllowed: true,
+      publicAllowed: false,
       takenDown: false,
       pendingRequest: null,
     });
@@ -180,66 +212,83 @@ describe('sharing Artifacts (plan 21.11)', () => {
     });
   });
 
-  it('makes public only the version a person confirmed, until they confirm again', async () => {
-    const id = await newArtifact('Launch', 'draft one');
-    await edit(id, 'draft two');
+  it('keeps public links off in a new organization until an owner or admin turns them on', async () => {
+    const id = await newArtifact('Not yet');
+    // Off by default, also for a settings row written before the setting existed.
+    const [org] = await t.db
+      .select({ settings: schema.workspaces.settings })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId));
+    expect(org!.settings).not.toHaveProperty('publicArtifactsEnabled');
+    const settings = await json<{ publicArtifactsEnabled: boolean }>(
+      call(alice, 'GET', '/settings'),
+    );
+    expect(settings.publicArtifactsEnabled).toBe(false);
     expect(
-      (await json<{ code: string }>(share(alice, id, { visibility: 'public', version: 2 }), 400))
-        .code,
-    ).toBe('CONFIRMATION_REQUIRED');
+      (await json<Sharing>(call(alice, 'GET', `/artifacts/${id}/sharing`))).publicAllowed,
+    ).toBe(false);
     expect(
       (
         await json<{ code: string }>(
-          share(alice, id, { visibility: 'public', version: 1, confirmed: true }),
-          409,
+          share(alice, id, { visibility: 'public', confirmed: true }),
+          403,
         )
       ).code,
-    ).toBe('VERSION_CONFLICT');
-    const shared = await json<Sharing>(
-      share(alice, id, { visibility: 'public', version: 2, confirmed: true }),
+    ).toBe('PUBLIC_SHARING_OFF');
+    expect(await visibilityOf(id)).toBe('private');
+    // Sharing with the organization needs no setting.
+    expect((await json<Sharing>(share(alice, id, { visibility: 'org' }))).visibility).toBe('org');
+    // A member may not turn it on.
+    expect((await call(carol, 'PATCH', '/settings', { publicArtifactsEnabled: true })).status).toBe(
+      403,
     );
-    expect(shared).toMatchObject({ visibility: 'public', publicVersion: 2, currentVersion: 2 });
+    expect((await publicLinks(true)).publicArtifactsEnabled).toBe(true);
+    expect(
+      (await json<Sharing>(share(alice, id, { visibility: 'public', confirmed: true }))).visibility,
+    ).toBe('public');
+    await json(share(alice, id, { visibility: 'private' }));
+    await publicLinks(false);
+  });
 
-    // The Bot keeps editing: the link still shows the confirmed version.
-    await edit(id, 'draft three');
+  it('shows the latest version on a public link, with no version to confirm', async () => {
+    await publicLinks(true);
+    const id = await newArtifact('Launch', 'draft one');
+    await edit(id, 'draft two');
+    expect(
+      (await json<{ code: string }>(share(alice, id, { visibility: 'public' }), 400)).code,
+    ).toBe('CONFIRMATION_REQUIRED');
+    // A version is not part of the request any more.
+    expect(
+      (await share(alice, id, { visibility: 'public', version: 2, confirmed: true })).status,
+    ).toBe(400);
+    const shared = await json<Sharing>(share(alice, id, { visibility: 'public', confirmed: true }));
+    expect(shared).toMatchObject({ visibility: 'public', currentVersion: 2 });
+    expect(shared).not.toHaveProperty('publicVersion');
     const anyone = await host(shared.url!);
     expect(anyone.status).toBe(200);
     expect(await anyone.text()).toBe('draft two');
     expect(anyone.headers.get('cache-control')).toBe('public, max-age=60');
-    // Members see what anyone sees: the confirmed version, not the newer one.
+
+    // The Bot keeps editing: the link shows each new version, with nothing to confirm.
+    await edit(id, 'draft three');
+    expect(await (await host(shared.url!)).text()).toBe('draft three');
     const asMember = await json<{ version: { version: number } }>(
       call(carol, 'GET', `/shared-artifacts/${id}`),
     );
-    expect(asMember.version.version).toBe(2);
-    const state = await json<Sharing>(call(alice, 'GET', `/artifacts/${id}/sharing`));
-    expect(state).toMatchObject({ publicVersion: 2, currentVersion: 3 });
-    // Her own list shows it as others see it.
+    expect(asMember.version.version).toBe(3);
     const own = await json<{ items: { id: string; version: { version: number } }[] }>(
       call(alice, 'GET', '/shared-artifacts'),
     );
-    expect(own.items.find((i) => i.id === id)!.version.version).toBe(2);
+    expect(own.items.find((i) => i.id === id)!.version.version).toBe(3);
 
-    // "Update the public version": the same confirmation, for the current version.
-    await json<Sharing>(share(alice, id, { visibility: 'public', version: 3, confirmed: true }));
-    expect(await (await host(shared.url!)).text()).toBe('draft three');
-
-    // Back to the organization forgets the confirmed version.
     const back = await json<Sharing>(share(alice, id, { visibility: 'org' }));
-    expect(back.publicVersion).toBeNull();
+    expect(back.visibility).toBe('org');
     expect((await host(shared.url!)).status).toBe(404);
-    const [row] = await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id));
-    expect(row!.publicVersionId).toBeNull();
-    const audit = await t.db
-      .select({ metadata: schema.auditLog.metadata })
-      .from(schema.auditLog)
-      .where(
-        and(eq(schema.auditLog.action, 'artifact.visibility'), eq(schema.auditLog.targetId, id)),
-      );
-    expect(audit.map((a) => a.metadata)).toEqual([
-      { from: 'private', to: 'public', version: 2 },
-      { from: 'public', to: 'public', fromVersion: 2, version: 3 },
-      { from: 'public', to: 'org', fromVersion: 3 },
+    expect((await auditOf(id)).map((a) => a.metadata)).toEqual([
+      { from: 'private', to: 'public' },
+      { from: 'public', to: 'org' },
     ]);
+    await publicLinks(false);
   });
 
   it('lets an API key narrow what is shared but never widen it', async () => {
@@ -258,12 +307,8 @@ describe('sharing Artifacts (plan 21.11)', () => {
       'PERSON_REQUIRED',
     );
     expect(
-      (
-        await json<{ code: string }>(
-          bearer('PUT', { visibility: 'public', version: 1, confirmed: true }),
-          403,
-        )
-      ).code,
+      (await json<{ code: string }>(bearer('PUT', { visibility: 'public', confirmed: true }), 403))
+        .code,
     ).toBe('PERSON_REQUIRED');
     await json<Sharing>(share(alice, id, { visibility: 'org' }));
     expect((await json<Sharing>(bearer('PUT', { visibility: 'private' }))).visibility).toBe(
@@ -381,47 +426,195 @@ describe('sharing Artifacts (plan 21.11)', () => {
     expect(restored.noLink).toBeNull();
   });
 
-  it('lets owners and admins turn public links off, which stops existing ones', async () => {
-    const id = await newArtifact('Public notes', 'hello world');
-    const shared = await json<Sharing>(
-      share(alice, id, { visibility: 'public', version: 1, confirmed: true }),
+  it('turns every public link into an organization one when public links are turned off', async () => {
+    await publicLinks(true);
+    const first = await newArtifact('Public notes', 'hello world');
+    const second = await carolsArtifact('Carol public');
+    const staysOrg = await newArtifact('Org only');
+    const a = await json<Sharing>(share(alice, first, { visibility: 'public', confirmed: true }));
+    await json<Sharing>(share(carol, second, { visibility: 'public', confirmed: true }));
+    await json<Sharing>(share(alice, staysOrg, { visibility: 'org' }));
+    expect((await host(a.url!)).status).toBe(200);
+    // The settings say how many links turning it off would stop.
+    const before = await json<{ publicArtifacts: number }>(call(alice, 'GET', '/settings'));
+    expect(before.publicArtifacts).toBe(2);
+
+    const off = await publicLinks(false);
+    expect(off).toMatchObject({ publicArtifactsEnabled: false, publicArtifacts: 0 });
+    expect(await visibilityOf(first)).toBe('org');
+    expect(await visibilityOf(second)).toBe('org');
+    expect(await visibilityOf(staysOrg)).toBe('org');
+    expect((await host(a.url!)).status).toBe(404);
+    // Members still see them, as organization Artifacts.
+    const seen = await json<{ visibility: string }>(
+      call(dave, 'GET', `/shared-artifacts/${first}`),
     );
-    expect((await host(shared.url!)).status).toBe(200);
-    // A member may not change it.
-    expect(
-      (await call(carol, 'PATCH', '/settings', { publicArtifactsEnabled: false })).status,
-    ).toBe(403);
-    const off = await json<{ publicArtifactsEnabled: boolean }>(
-      call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false }),
-    );
-    expect(off.publicArtifactsEnabled).toBe(false);
-    expect((await host(shared.url!)).status).toBe(404);
-    expect((await call(carol, 'GET', `/shared-artifacts/${id}`)).status).toBe(404);
-    const other = await newArtifact('Another');
-    expect(
-      (
-        await json<{ code: string }>(
-          share(alice, other, { visibility: 'public', version: 1, confirmed: true }),
-          403,
-        )
-      ).code,
-    ).toBe('PUBLIC_SHARING_OFF');
-    const state = await json<Sharing>(call(alice, 'GET', `/artifacts/${id}/sharing`));
-    expect(state).toMatchObject({ visibility: 'public', publicAllowed: false });
-    // On again: the link works again, at the version confirmed before.
-    await json(call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: true }));
-    expect(await (await host(shared.url!)).text()).toBe('hello world');
-    const audit = await t.db
+    expect(seen.visibility).toBe('org');
+
+    // On again: no old link comes back; each owner makes theirs public again.
+    await publicLinks(true);
+    expect((await host(a.url!)).status).toBe(404);
+    const state = await json<Sharing>(call(alice, 'GET', `/artifacts/${first}/sharing`));
+    expect(state.visibility).toBe('org');
+    await json<Sharing>(share(alice, first, { visibility: 'public', confirmed: true }));
+    expect(await (await host(a.url!)).text()).toBe('hello world');
+
+    // Audited per Artifact, and the switch with how many it stopped.
+    for (const id of [first, second]) {
+      expect((await auditOf(id)).map((row) => [row.actorId, row.metadata])).toContainEqual([
+        aliceId,
+        { from: 'public', to: 'org', reason: 'public_links_off' },
+      ]);
+    }
+    expect((await auditOf(staysOrg)).map((row) => row.metadata)).toEqual([
+      { from: 'private', to: 'org' },
+    ]);
+    const settingsAudit = await t.db
       .select()
       .from(schema.auditLog)
       .where(eq(schema.auditLog.action, 'settings.update'));
-    expect(audit.map((a) => a.metadata)).toEqual(
-      expect.arrayContaining([{ publicArtifactsEnabled: false }, { publicArtifactsEnabled: true }]),
-    );
+    expect(settingsAudit.map((row) => row.metadata)).toContainEqual({
+      publicArtifactsEnabled: false,
+      publicLinksStopped: 2,
+    });
+    await json(share(alice, first, { visibility: 'private' }));
+    await publicLinks(false);
   });
 
-  it("takes a suspended member's access away, and stops serving what a suspended owner shared", async () => {
-    const id = await newArtifact('Team doc', 'team text');
+  it.skipIf(!process.env.DATABASE_URL)(
+    'leaves no public link behind when one is made public while links are turned off (real Postgres)',
+    async () => {
+      await publicLinks(true);
+      const id = await newArtifact('Racing public');
+      // Many attempts to make it public while an admin turns public links off.
+      const results = await Promise.all([
+        ...Array.from({ length: 5 }, () =>
+          share(alice, id, { visibility: 'public', confirmed: true }),
+        ),
+        call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: false }),
+      ]);
+      for (const r of results) expect([200, 403]).toContain(r.status);
+      const settings = await json<{ publicArtifactsEnabled: boolean }>(
+        call(alice, 'GET', '/settings'),
+      );
+      expect(settings.publicArtifactsEnabled).toBe(false);
+      expect(await visibilityOf(id)).not.toBe('public');
+    },
+  );
+
+  it('keeps what a suspended or removed owner shared live, and their private Artifacts hidden', async () => {
+    await publicLinks(true);
+    const orgId = await carolsArtifact('Team doc', 'team text');
+    const pub = await carolsArtifact('Public while away', 'pub');
+    const secret = await carolsArtifact('Private while away', 'secret');
+    const shared = await json<Sharing>(share(carol, orgId, { visibility: 'org' }));
+    const pubShared = await json<Sharing>(
+      share(carol, pub, { visibility: 'public', confirmed: true }),
+    );
+    const carolOwn = await openAs(carol, secret);
+    const daveView = await openAs(dave, orgId);
+    const secretUrl = (await json<Sharing>(call(carol, 'GET', `/artifacts/${secret}/sharing`)))
+      .url!;
+    expect((await host(secretUrl, carolOwn.viewCookie)).status).toBe(200);
+
+    const check = async () => {
+      // A member still opens the organization Artifact; the public link works.
+      expect(await (await host(shared.url!, daveView.viewCookie)).text()).toBe('team text');
+      expect(await (await host(pubShared.url!)).text()).toBe('pub');
+      const list = await json<{ items: { id: string }[] }>(call(dave, 'GET', '/shared-artifacts'));
+      expect(list.items.map((i) => i.id)).toEqual(expect.arrayContaining([orgId, pub]));
+      const one = await json<{ id: string }>(call(dave, 'GET', `/shared-artifacts/${orgId}`));
+      expect(one.id).toBe(orgId);
+      // Her private one is served to nobody, her own cookie included.
+      expect((await host(secretUrl, carolOwn.viewCookie)).status).toBe(404);
+      expect((await host(secretUrl)).status).toBe(404);
+      expect((await call(dave, 'GET', `/shared-artifacts/${secret}`)).status).toBe(404);
+    };
+
+    // Suspended.
+    await t.db
+      .update(schema.workspaceMembers)
+      .set({ suspendedAt: new Date() })
+      .where(eq(schema.workspaceMembers.userId, carolId));
+    await check();
+    // Removed: the membership row is deleted; her Artifacts and her Bot stay.
+    const [membership] = await t.db
+      .delete(schema.workspaceMembers)
+      .where(eq(schema.workspaceMembers.userId, carolId))
+      .returning();
+    try {
+      await check();
+    } finally {
+      await t.db.insert(schema.workspaceMembers).values({ ...membership!, suspendedAt: null });
+    }
+    await json(share(carol, pub, { visibility: 'private' }));
+    await publicLinks(false);
+  });
+
+  it("lets an owner or admin narrow anyone's shared Artifact, but never widen it", async () => {
+    await publicLinks(true);
+    const pub = await carolsArtifact('Admin narrows public');
+    const org = await carolsArtifact('Admin narrows org');
+    const priv = await carolsArtifact('Admin never sees');
+    const pubShared = await json<Sharing>(
+      share(carol, pub, { visibility: 'public', confirmed: true }),
+    );
+    await json<Sharing>(share(carol, org, { visibility: 'org' }));
+    // Carol is suspended, so she cannot stop sharing them herself.
+    await t.db
+      .update(schema.workspaceMembers)
+      .set({ suspendedAt: new Date() })
+      .where(eq(schema.workspaceMembers.userId, carolId));
+    try {
+      // A member who is not the owner cannot change it, and learns nothing.
+      expect((await share(dave, org, { visibility: 'private' })).status).toBe(404);
+      // An admin may not widen someone else's Artifact.
+      const widen = await json<{ code: string }>(
+        share(alice, org, { visibility: 'public', confirmed: true }),
+        403,
+      );
+      expect(widen.code).toBe('OWNER_ONLY');
+      const same = await json<{ code: string }>(share(alice, org, { visibility: 'org' }), 403);
+      expect(same.code).toBe('OWNER_ONLY');
+      // Nor touch one that is private: it is not shared with them.
+      expect((await share(alice, priv, { visibility: 'private' })).status).toBe(404);
+
+      // Narrowing: public to the organization, then to private.
+      const narrowed = await json<Sharing>(share(alice, pub, { visibility: 'org' }));
+      expect(narrowed).toMatchObject({ visibility: 'org', pendingRequest: null });
+      expect((await host(pubShared.url!)).status).toBe(404);
+      await json<Sharing>(share(alice, org, { visibility: 'private' }));
+      expect(await visibilityOf(org)).toBe('private');
+      // An admin's API key may narrow too, as an owner's may.
+      const key = await json<{ key: string }>(
+        call(alice, 'POST', '/api-keys', { name: 'admin script' }),
+        201,
+      );
+      const byKey = await t.app.request(`/api/v1/artifacts/${pub}/sharing`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${key.key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ visibility: 'private' }),
+      });
+      expect(byKey.status).toBe(200);
+      expect(await visibilityOf(pub)).toBe('private');
+      // Once private it is gone from the admin's reach.
+      expect((await share(alice, pub, { visibility: 'private' })).status).toBe(404);
+      expect((await auditOf(pub)).map((row) => [row.actorId, row.metadata])).toEqual([
+        [carolId, { from: 'private', to: 'public' }],
+        [aliceId, { from: 'public', to: 'org', owner: carolId }],
+        [aliceId, { from: 'org', to: 'private', owner: carolId }],
+      ]);
+    } finally {
+      await t.db
+        .update(schema.workspaceMembers)
+        .set({ suspendedAt: null })
+        .where(eq(schema.workspaceMembers.userId, carolId));
+    }
+    await publicLinks(false);
+  });
+
+  it("takes a suspended member's access away at once", async () => {
+    const id = await newArtifact('Members only', 'team text');
     const shared = await json<Sharing>(share(alice, id, { visibility: 'org' }));
     const { viewCookie } = await openAs(dave, id);
     expect((await host(shared.url!, viewCookie)).status).toBe(200);
@@ -429,44 +622,22 @@ describe('sharing Artifacts (plan 21.11)', () => {
       .update(schema.workspaceMembers)
       .set({ suspendedAt: new Date() })
       .where(eq(schema.workspaceMembers.userId, daveId));
-    // The cookie he holds stops working at once; the app refuses him too.
-    expect((await host(shared.url!, viewCookie)).status).toBe(404);
-    expect((await call(dave, 'GET', '/shared-artifacts')).status).toBe(403);
-    await t.db
-      .update(schema.workspaceMembers)
-      .set({ suspendedAt: null })
-      .where(eq(schema.workspaceMembers.userId, daveId));
-
-    // Alice is suspended: neither her organization Artifact nor her public one is served.
-    const pub = await newArtifact('Public while suspended', 'pub');
-    const pubShared = await json<Sharing>(
-      share(alice, pub, { visibility: 'public', version: 1, confirmed: true }),
-    );
-    const carolView = await openAs(carol, id);
-    await t.db
-      .update(schema.workspaceMembers)
-      .set({ suspendedAt: new Date() })
-      .where(eq(schema.workspaceMembers.userId, aliceId));
     try {
-      expect((await host(shared.url!, carolView.viewCookie)).status).toBe(404);
-      expect((await host(pubShared.url!)).status).toBe(404);
-      const list = await json<{ items: { id: string }[] }>(call(carol, 'GET', '/shared-artifacts'));
-      expect(list.items.map((i) => i.id)).not.toContain(id);
-      expect(list.items.map((i) => i.id)).not.toContain(pub);
+      // The cookie he holds stops working at once; the app refuses him too.
+      expect((await host(shared.url!, viewCookie)).status).toBe(404);
+      expect((await call(dave, 'GET', '/shared-artifacts')).status).toBe(403);
     } finally {
       await t.db
         .update(schema.workspaceMembers)
         .set({ suspendedAt: null })
-        .where(eq(schema.workspaceMembers.userId, aliceId));
+        .where(eq(schema.workspaceMembers.userId, daveId));
     }
-    expect((await host(pubShared.url!)).status).toBe(200);
   });
 
   it('refuses public again after the operator took the link down', async () => {
+    await publicLinks(true);
     const id = await newArtifact('Phish', '<p>log in</p>');
-    const shared = await json<Sharing>(
-      share(alice, id, { visibility: 'public', version: 1, confirmed: true }),
-    );
+    const shared = await json<Sharing>(share(alice, id, { visibility: 'public', confirmed: true }));
     await t.db
       .update(schema.artifacts)
       .set({ takenDownAt: new Date() })
@@ -476,7 +647,7 @@ describe('sharing Artifacts (plan 21.11)', () => {
     expect(
       (
         await json<{ code: string }>(
-          share(alice, id, { visibility: 'public', version: 1, confirmed: true }),
+          share(alice, id, { visibility: 'public', confirmed: true }),
           409,
         )
       ).code,
@@ -484,6 +655,7 @@ describe('sharing Artifacts (plan 21.11)', () => {
     expect((await json<Sharing>(call(alice, 'GET', `/artifacts/${id}/sharing`))).takenDown).toBe(
       true,
     );
+    await publicLinks(false);
   });
 
   it("opens an owner's private Artifact on the host with a token for that Artifact only", async () => {

@@ -5,11 +5,12 @@ import { useApi } from '../api/provider';
 import { Button, Label, row } from '../components/ui';
 
 // Who can see an Artifact, on the phone (plan 21.11): the same core routes
-// and rules as the web app. Nothing becomes public before the confirmation,
-// which says who will see it and which version; a newer version waits for
-// "Update the public version"; a Bot's request is answered here too. A
-// server that does not host Artifacts, or predates sharing, answers 404 and
-// the section stays hidden.
+// and rules as the web app. Whoever can see it sees its latest version.
+// Nothing becomes public before the confirmation, which says who will see it
+// and that later edits, a Bot's included, are public at once; public is
+// offered only when the organization turned public links on; a Bot's request
+// is answered here too. A server that does not host Artifacts, or predates
+// sharing, answers 404 and the section stays hidden.
 
 export type ArtifactSharing = components['schemas']['ArtifactSharing'];
 type Visibility = ArtifactSharing['visibility'];
@@ -22,32 +23,25 @@ const LABELS: Record<Visibility, string> = {
 
 const DESCRIPTIONS: Record<Visibility, string> = {
   private: 'Nobody else can see it.',
-  org: 'Every member of your organization can view the latest version. Nobody can change it.',
-  public: 'Anyone with the link can view the version you confirmed, without signing in.',
+  org: 'Every member of your organization can view the latest version. Nobody else can change it.',
+  public: 'Anyone with the link can view the latest version, without signing in.',
 };
+
+/** What making an Artifact public means for later edits, in one sentence (as on the web). */
+export const PUBLIC_EDITS_NOTE =
+  'Every later edit, including one your Bot makes, is public as soon as it is saved, without asking you again.';
 
 export const sharingKey = (id: string) => ['artifacts', id, 'sharing'] as const;
 
-/**
- * Asks before anything becomes public; resolves true only on the person's
- * yes. Says so when the version is not the current one.
- */
-export function confirmPublic(
-  title: string,
-  version: number,
-  current: number | null = version,
-): Promise<boolean> {
-  const older =
-    current !== null && current !== version
-      ? ` This is not the current version: that is version ${current}.`
-      : '';
+/** Asks before anything becomes public; resolves true only on the person's yes. */
+export function confirmPublic(title: string): Promise<boolean> {
   return new Promise((resolve) =>
     Alert.alert(
       'Make this public?',
-      `Anyone with the link will be able to view version ${version} of “${title}”, without signing in. It is not limited to your organization. Later versions stay private until you confirm them.${older}`,
+      `Anyone with the link will be able to view “${title}” without signing in. It is not limited to your organization. ${PUBLIC_EDITS_NOTE}`,
       [
         { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-        { text: `Make version ${version} public`, onPress: () => resolve(true) },
+        { text: 'Make it public', onPress: () => resolve(true) },
       ],
       { cancelable: true, onDismiss: () => resolve(false) },
     ),
@@ -68,7 +62,7 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
     },
   });
   const change = useMutation({
-    mutationFn: (body: { visibility: Visibility; version?: number; confirmed?: true }) =>
+    mutationFn: (body: { visibility: Visibility; confirmed?: true }) =>
       unwrap(api.PUT('/api/v1/artifacts/{id}/sharing', { params: { path: { id } }, body })),
     onSuccess: (next) => queryClient.setQueryData(sharingKey(id), next),
     onError: (error) => Alert.alert('Could not change who can see it', message(error)),
@@ -98,29 +92,29 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
   if (!state) return null;
   const current = state.currentVersion;
   const pending = state.pendingRequest;
-  const stale =
-    state.visibility === 'public' &&
-    state.publicVersion !== null &&
-    current !== null &&
-    state.publicVersion < current;
   const busy = change.isPending || decide.isPending;
+  /** Why public cannot be chosen now, or null when it can. */
+  const publicBlocked = state.takenDown
+    ? 'The service took the public link down. It cannot be made public again.'
+    : !state.publicAllowed
+      ? 'Public links are off for your organization. An owner or admin can turn them on in Settings.'
+      : null;
 
-  async function makePublic(version: number) {
-    if (await confirmPublic(title, version)) {
-      change.mutate({ visibility: 'public', version, confirmed: true });
-    }
+  async function makePublic() {
+    if (await confirmPublic(title)) change.mutate({ visibility: 'public', confirmed: true });
   }
 
   function choose(next: Visibility) {
+    if (next === state!.visibility) return;
     if (next === 'public') {
-      if (current !== null) void makePublic(current);
-    } else if (next !== state!.visibility) {
+      if (current !== null && !publicBlocked) void makePublic();
+    } else {
       change.mutate({ visibility: next });
     }
   }
 
-  async function approve(approvalId: string, visibility: 'org' | 'public', version: number | null) {
-    if (visibility === 'public' && !(await confirmPublic(title, version ?? 0, current))) return;
+  async function approve(approvalId: string, visibility: 'org' | 'public') {
+    if (visibility === 'public' && !(await confirmPublic(title))) return;
     decide.mutate({ approvalId, decision: 'approve' });
   }
 
@@ -141,9 +135,8 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
             disabled={
               busy ||
               (option === 'public' &&
-                (state.takenDown ||
-                  current === null ||
-                  (!state.publicAllowed && state.visibility !== 'public')))
+                state.visibility !== 'public' &&
+                (publicBlocked !== null || current === null))
             }
             onPress={() => choose(option)}
           />
@@ -151,51 +144,24 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
       </View>
       <Label muted size={14}>
         {DESCRIPTIONS[state.visibility]}
-        {state.visibility === 'public' && state.publicVersion !== null
-          ? ` The link shows version ${state.publicVersion}.`
-          : ''}
       </Label>
-      {!state.publicAllowed ? (
-        <Label muted size={14}>
-          Your organization has turned off public links.
+      {publicBlocked ? (
+        <Label muted={!state.takenDown} size={14}>
+          {publicBlocked}
         </Label>
-      ) : null}
-      {state.takenDown ? (
-        <Label size={14}>
-          The service took the public link down. It cannot be made public again.
-        </Label>
-      ) : null}
-      {stale ? (
-        <View style={{ gap: 8 }}>
-          <Label size={14}>
-            Version {current} is newer than the public one. It stays private until you confirm it.
-          </Label>
-          <Button
-            title="Update the public version"
-            variant="secondary"
-            disabled={busy || !state.publicAllowed || state.takenDown}
-            onPress={() => void makePublic(current!)}
-          />
-        </View>
       ) : null}
       {pending ? (
         <View style={{ gap: 8 }}>
           <Label size={14}>
             {pending.visibility === 'public'
-              ? `Your Bot asks to make version ${pending.version ?? '?'} public, so anyone with the link could view it.`
-              : 'Your Bot asks to share this with everyone in your organization.'}
-            {pending.visibility === 'public' &&
-            pending.version !== null &&
-            current !== null &&
-            pending.version !== current
-              ? ` Version ${pending.version} is not the current version. Version ${current} stays private unless you confirm it.`
-              : ''}
+              ? 'Your Bot asks to make this public, so anyone with the link could view it and every later version.'
+              : 'Your Bot asks to share this with everyone in your organization, so members could view it and every later version.'}
           </Label>
           <View style={[row.base, { gap: 8 }]}>
             <Button
               title="Approve"
-              disabled={busy}
-              onPress={() => void approve(pending.approvalId, pending.visibility, pending.version)}
+              disabled={busy || (pending.visibility === 'public' && publicBlocked !== null)}
+              onPress={() => void approve(pending.approvalId, pending.visibility)}
             />
             <Button
               title="Deny"

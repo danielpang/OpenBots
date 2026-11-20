@@ -17,10 +17,11 @@ export function isTextArtifactKind(kind: ArtifactKind): boolean {
 }
 
 // Who may see an Artifact (plan 21.11). `private`, the default, is its owner
-// only; `org` is every active member of its organization, read only, at the
-// latest version; `public` is anyone with the link, at the version a person
-// confirmed. Widening it always needs a person: a Bot only asks
-// (`REQUEST_ARTIFACT_SHARE_TOOL`), and that request never runs unasked.
+// only; `org` is every active member of its organization, read only;
+// `public` is anyone with the link, while the organization has public links
+// on. Everyone who may see it sees its latest version. Widening it always
+// needs a person: a Bot only asks (`REQUEST_ARTIFACT_SHARE_TOOL`), and that
+// request never runs unasked.
 
 export const ARTIFACT_VISIBILITIES = ['private', 'org', 'public'] as const;
 
