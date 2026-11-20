@@ -233,7 +233,10 @@ describe('the local sweep of coding session logs', () => {
   let w: CoderWorld;
 
   beforeAll(async () => {
-    w = await coderWorld('local-log-owner@example.com');
+    // The local driver whatever OPENBOTS_TEST_STORAGE says: this is its sweep.
+    w = await coderWorld('local-log-owner@example.com', {
+      env: { OPENBOTS_STORAGE_DRIVER: 'local' },
+    });
     expect(w.t.storage).toBe('local');
   });
   afterAll(() => w.close());

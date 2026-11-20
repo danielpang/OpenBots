@@ -62,6 +62,19 @@ import type { RunState } from './runs.js';
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '__fixtures__/coders');
 const WORKTREE = `${REPO_PATH}/.worktrees/bot-fix-reconnect`;
 
+/**
+ * The session's whole log, as the API reads it: the file the row names with
+ * the local driver, the stored parts with s3 (OPENBOTS_TEST_STORAGE).
+ */
+async function logOf(
+  w: CoderWorld,
+  row: { id: string; workspaceId: string; logPath: string | null },
+): Promise<string> {
+  if (w.t.storage === 'local') expect(row.logPath).toBe(sessionLogPath(w.t.deps, row.id));
+  else expect(row.logPath).toBeNull();
+  return readSessionLog(w.t.deps, row, SESSION_LOG_MAX * 2);
+}
+
 describe('coder runner', () => {
   let w: CoderWorld;
   let github: Server;
@@ -228,7 +241,7 @@ describe('coder runner', () => {
     });
     expect(row.summary).toContain('backs off');
     expect(row.finishedAt).not.toBeNull();
-    expect(readFileSync(row.logPath!, 'utf8')).toContain('"type":"result"');
+    expect(await logOf(w, row)).toContain('"type":"result"');
 
     const state = await w.widget(sessionId);
     expect(state.status).toBe('settled');
@@ -864,8 +877,10 @@ describe('coder runner', () => {
     await writeFile(file, 'x'.repeat(SESSION_LOG_MAX - 600));
     await start(sessionId);
     await ended(sessionId, 'settled');
-    const { size } = await stat(file);
-    expect(size).toBeLessThanOrEqual(SESSION_LOG_MAX + SESSION_LOG_FULL.length + 1);
+    const whole = await logOf(w, await w.session(sessionId));
+    expect(Buffer.byteLength(whole)).toBeLessThanOrEqual(
+      SESSION_LOG_MAX + SESSION_LOG_FULL.length + 1,
+    );
     const tail = await readSessionLog(
       w.t.deps,
       { id: sessionId, workspaceId: w.workspaceId },
@@ -1334,7 +1349,7 @@ describe('coder runner, across agents and accounts', () => {
     const added = JSON.stringify(after.filter((entry) => entry.seq > before.at(-1)!.seq));
     expect(added).not.toContain('Continued Codex in ');
     expect(added).not.toContain(CODEX_POSTURE);
-    const log = readFileSync(row.logPath!, 'utf8');
+    const log = await logOf(w, row);
     expect(log).toContain(`Continued Codex in ${WORKTREE}`);
     expect(log).toContain(CODEX_POSTURE);
   });
@@ -1565,7 +1580,7 @@ describe('coder runner, across agents and accounts', () => {
     const state = await w.widget(sessionId);
     expect(state.error).toBe(CODEX_SIGN_IN_REFUSED);
     expect(JSON.stringify(state)).not.toContain('401 Unauthorized');
-    expect(readFileSync(row.logPath!, 'utf8')).toContain('401 Unauthorized');
+    expect(await logOf(w, row)).toContain('401 Unauthorized');
     expect(await account('codex')).toMatchObject({
       authKind: 'subscription',
       lastError: 'Codex is not signed in on the computer',
@@ -1668,7 +1683,7 @@ describe('coder runner, across agents and accounts', () => {
     expect(launched.args).toContain('model_provider="openbots"');
     expect(launched.args!.join(' ')).not.toContain(secret);
     expect(row.error).toBe('Incorrect API key provided: [key]');
-    const log = readFileSync(row.logPath!, 'utf8');
+    const log = await logOf(w, row);
     expect(log).toContain('My key is [key]');
     expect(log).toContain('[stderr] using [key] now');
     const state = await w.widget(sessionId);
