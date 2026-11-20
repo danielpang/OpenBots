@@ -32,6 +32,8 @@ On success it exits 0, with the agent answering `GET /healthz` with 200 for the 
 
 It is safe to run again, for an upgrade, to rotate the token, or after a run that failed half way: each step checks what is there first. A second run with an unchanged bundle skips apt, Node, the coding agents and Chromium and takes well under a minute; most of that is restarting the agent. Running it with a new token rotates the token: the old one stops working when the agent restarts at the end of the run.
 
+A new Node major is an upgrade like any other. A Sprite provisioned with a bundle built on Node 22 has a different `provision.version` from a bundle built on Node 24 (the version hashes the bundle, whose `BUILD_INFO` names the Node version, and `provision.sh`), so the next `create` provisions it again: Node 24 is installed beside Node 22, `/opt/openbots/node/current` and `/usr/local/bin/node` switch to it, node-pty is rebuilt if the bundle's binding does not load, and the coding agents are reinstalled only if their lockfile changed. The Node 22 directory stays in `/opt/openbots/node/`, unused, since the previous bundle kept for a rollback needs it.
+
 On failure it exits non-zero and the last line names the step, for example `FAILED in step "install Chromium" (line 412, exit 1)`. Every step logs a `== <step>` line as it starts, so the output reads as progress.
 
 No reboot or new login is needed afterwards. The first run downloads about 1 GB (apt packages, Node, the coding agents, Chromium) and takes several minutes; how long on a Sprite has not been measured.
@@ -46,7 +48,7 @@ bash docker/sprites/build-bundle.sh --source head   # the last commit
 bash docker/sprites/build-bundle.sh --out /some/dir
 ```
 
-Run it on Linux on the Sprites' architecture (x86_64) with Node 22, pnpm and a C toolchain, as the image's build stages have. It follows the Dockerfile's build and prod-deps stages in a scratch copy, so the checkout's `node_modules` and `dist/` are left alone: a full install and `pnpm --filter "@openbots/computer-agent..." run build`, then a fresh production install of the agent and the workspace packages it imports, with node-pty compiled and loaded.
+Run it on Linux on the Sprites' architecture (x86_64) with Node 24, pnpm and a C toolchain, as the image's build stages have. It follows the Dockerfile's build and prod-deps stages in a scratch copy, so the checkout's `node_modules` and `dist/` are left alone: a full install and `pnpm --filter "@openbots/computer-agent..." run build`, then a fresh production install of the agent and the workspace packages it imports, with node-pty compiled and loaded.
 
 It writes, in `docker/sprites/dist/` by default (ignored by git):
 
@@ -74,7 +76,7 @@ Each step corresponds to part of `docker/computer.Dockerfile`:
 1. **Settings.** Checks the four variables and that this is Ubuntu (it says so if it is not 26.04).
 2. **Bundle.** Unpacks it into `/opt/openbots/bundles/<hash>/`, keeping the current bundle and the one before it.
 3. **Packages.** The image's apt packages (`xvfb openbox x11vnc xdotool feh imagemagick tini tzdata`, the three font packages, `ca-certificates curl git less nano procps python3 unzip xz-utils util-linux`), all present under those names on Ubuntu 26.04, plus `gcc libc6-dev make g++` to build runas and, if needed, node-pty. There is no noVNC or websockify package: the agent bridges VNC to the browser itself.
-4. **Node.** The official build of the exact version the bundle was built with (the image copies Node 22 from `node:22-bookworm-slim`), checked against nodejs.org's `SHASUMS256.txt`, in `/opt/openbots/node/v<version>`, linked from `/usr/local/bin/{node,npm,npx}`.
+4. **Node.** The official build of the exact version the bundle was built with (the image copies Node 24 from `node:24-bookworm-slim`), checked against nodejs.org's `SHASUMS256.txt`, in `/opt/openbots/node/v<version>`, linked from `/usr/local/bin/{node,npm,npx}`.
 5. **Users.** The image's users with the same ids: `bot` 1000:1000 (also in `coders`), `cookies` 1900, group `coders` 1800, `coder` 1800:1800, `coder-runner` 1801:1800, and `screen-0` to `screen-89` as 2000 to 2089. The ids are fixed in `runas.c`, `apps/computer-agent/src/users.ts` and `packages/shared/src/coder-runtime.ts`. See "uid 1000" below.
 6. **Directories.** `/home/bot` (the bot user's, from `/etc/skel`) and `/var/lib/openbots` (root's, 0711). The agent lays out everything inside the state directory itself at each start: the screens' directories, the cookie store, the coders' homes and config directories.
 7. **runas.** Compiled from the bundle's source.

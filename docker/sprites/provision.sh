@@ -194,8 +194,8 @@ fi
 build_info() { sed -n "s/^$1=//p" "$SRC/BUILD_INFO"; }
 NODE_VERSION="${OPENBOTS_NODE_VERSION:-$(build_info node_version)}"
 NODE_VERSION="${NODE_VERSION#v}"
-[[ "$NODE_VERSION" =~ ^22\.[0-9]+\.[0-9]+$ ]] ||
-  die "the bundle names Node '$NODE_VERSION'; the image runs Node 22 (node:22-bookworm-slim)"
+[[ "$NODE_VERSION" =~ ^24\.[0-9]+\.[0-9]+$ ]] ||
+  die "the bundle names Node '$NODE_VERSION'; the image runs Node 24 (node:24-bookworm-slim)"
 log "bundle $BUNDLE_ID built with Node $NODE_VERSION on $(build_info arch) from $(build_info source)"
 
 # --- system packages -----------------------------------------------------------
@@ -216,7 +216,7 @@ fi
 
 # --- Node ----------------------------------------------------------------------
 
-# The image copies node from node:22-bookworm-slim. Here the official build
+# The image copies node from node:24-bookworm-slim. Here the official build
 # of the exact version the bundle was built with, so node-pty's binding
 # matches its ABI, checked against nodejs.org's SHASUMS256.txt. It goes under
 # /opt/openbots/node and is linked into /usr/local/bin, where the image has
