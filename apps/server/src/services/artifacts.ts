@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import type {
   ArtifactBody,
@@ -22,12 +23,22 @@ import { publishEvent } from '../infra/index.js';
 import { DomainError, notFound } from '../errors.js';
 import { assertBotOwner } from '../ownership.js';
 import { artifactSharing } from './artifact-sharing.js';
-import { openFile, storeFile, uploadLimit } from './files.js';
+import {
+  discardFile,
+  openFile,
+  prepareFile,
+  recordFile,
+  sniffMime,
+  uploadLimit,
+  type PreparedFile,
+} from './files.js';
 
 // Artifacts (plan 4.8, 12.1; A1, A2, A4). Every write, by a run or by the
 // owner, is a new `artifact_versions` row whose blob is a `files` row (1.4's
-// store; `storage_key` holds the file id). Under a row lock on the Artifact
-// the next version number is taken, the blob stored, the version inserted and
+// store; `storage_key` holds the file id). The blob is stored first, with no
+// transaction open (writeArtifact says why); then, under a row lock on the
+// Artifact, the version it was built on is checked to still be current, the
+// next version number taken, the file and version rows inserted and
 // `current_version_id` advanced, all in one transaction, so concurrent writers
 // get consecutive versions and the pointer never lags. Text kinds (document,
 // code, data) hold text only and store a `+14 −10` line summary against the
@@ -86,27 +97,57 @@ export async function createArtifact(
   author: Author,
 ): Promise<WriteResult> {
   if ('bytes' in input && isTextArtifactKind(input.kind)) throw notText(input.kind);
-  const result = await deps.db.transaction(async (tx) => {
-    const [artifact] = await tx
-      .insert(schema.artifacts)
-      .values({
-        workspaceId: owner.workspaceId,
-        ownerId: owner.id,
-        botId: input.botId ?? null,
-        chatId: input.chatId ?? null,
-        kind: input.kind,
-        title: input.title,
-      })
-      .returning();
-    return addVersion({ ...deps, db: tx }, owner, artifact!, null, input, author);
-  });
+  // The blob first, with no transaction open; then the rows, together.
+  const prepared = await prepareVersion(deps, owner, input, input, '');
+  let committing = false;
+  const result = await deps.db
+    .transaction(async (tx) => {
+      committing = true;
+      const [artifact] = await tx
+        .insert(schema.artifacts)
+        .values({
+          workspaceId: owner.workspaceId,
+          ownerId: owner.id,
+          botId: input.botId ?? null,
+          chatId: input.chatId ?? null,
+          kind: input.kind,
+          title: input.title,
+        })
+        .returning();
+      return commitVersion(tx, artifact!, null, prepared, author);
+    })
+    .catch(async (error: unknown) => {
+      await discardFile(deps, prepared.file, committing ? error : undefined);
+      throw error;
+    });
   await announce(deps, 'artifact.created', result, author);
   return result;
 }
 
+/** Tries of a write whose Artifact moved on between its read and its commit. */
+const WRITE_ATTEMPTS = 5;
+
+const keptChanging = () =>
+  new DomainError(
+    409,
+    'VERSION_CONFLICT',
+    'The Artifact kept changing while this version was being written. Try again.',
+  );
+
 /**
  * A new version from whole content, bytes, or a unified-diff patch against the
  * current text. The owner (a `userId` author) may only edit the text kinds.
+ *
+ * Object storage is slow at worst (minutes, with the S3 driver's retries), so
+ * it is never called with a transaction open or a row locked: the current
+ * version is read, its text fetched and the new blob stored first, unlocked.
+ * Then, under the Artifact's row lock, the version read is checked to still
+ * be current, and only the rows are written. When another write got there
+ * first, the whole write runs again on what it wrote, so a patch applies to
+ * the version that won (or fails as a patch that no longer fits would have),
+ * the diff summary is against the true previous version, and `baseVersion`
+ * fails with VERSION_CONFLICT as it would have at the start. Version numbers
+ * stay consecutive and unique. A blob made for a try that lost is removed.
  */
 export async function writeArtifact(
   deps: ArtifactDeps,
@@ -116,58 +157,99 @@ export async function writeArtifact(
   author: Author,
   options: { baseVersion?: number } = {},
 ): Promise<WriteResult> {
-  const result = await deps.db.transaction(async (tx) => {
-    const [artifact] = await tx
-      .select()
-      .from(schema.artifacts)
-      .where(ownedBy(owner, artifactId))
-      .for('update');
-    if (!artifact) throw notFound('Artifact not found');
-    if ('userId' in author && !isTextArtifactKind(artifact.kind)) throw notEditable(artifact.kind);
-    if ('bytes' in change && isTextArtifactKind(artifact.kind)) throw notText(artifact.kind);
-    const current = await currentVersion(tx, artifact);
-    if (options.baseVersion !== undefined && current?.version !== options.baseVersion) {
-      throw new DomainError(
-        409,
-        'VERSION_CONFLICT',
-        `The Artifact is at version ${current?.version ?? 0}, not ${options.baseVersion}; reload it and edit again`,
-      );
-    }
-    if ('patch' in change && current && !isTextMime(current.mime)) {
-      throw invalidPatch('The current version is a binary file, so a patch cannot apply to it');
-    }
-    const scoped = { ...deps, db: tx };
-    // The previous text is needed for a patch and for the text kinds' diff summary.
-    const before =
-      current && ('patch' in change || isTextArtifactKind(artifact.kind))
-        ? await versionText(scoped, owner, current)
-        : '';
-    let body: ArtifactBody;
-    if ('patch' in change) {
-      try {
-        body = { content: applyUnifiedPatch(before, change.patch) };
-      } catch (error) {
-        if (error instanceof PatchError) throw invalidPatch(error.message);
-        throw error;
+  let prepared: PreparedVersion | undefined;
+  let committing = false;
+  try {
+    for (let attempt = 1; ; attempt++) {
+      const [artifact] = await deps.db
+        .select()
+        .from(schema.artifacts)
+        .where(ownedBy(owner, artifactId));
+      if (!artifact) throw notFound('Artifact not found');
+      if ('userId' in author && !isTextArtifactKind(artifact.kind)) {
+        throw notEditable(artifact.kind);
       }
-    } else {
-      body = change;
+      if ('bytes' in change && isTextArtifactKind(artifact.kind)) throw notText(artifact.kind);
+      const current = await currentVersion(deps.db, artifact);
+      if (artifact.currentVersionId && !current) {
+        // Moved on between the two reads.
+        if (attempt >= WRITE_ATTEMPTS) throw keptChanging();
+        continue;
+      }
+      if (options.baseVersion !== undefined && current?.version !== options.baseVersion) {
+        throw new DomainError(
+          409,
+          'VERSION_CONFLICT',
+          `The Artifact is at version ${current?.version ?? 0}, not ${options.baseVersion}; reload it and edit again`,
+        );
+      }
+      if ('patch' in change && current && !isTextMime(current.mime)) {
+        throw invalidPatch('The current version is a binary file, so a patch cannot apply to it');
+      }
+      // The previous text is needed for a patch and for the text kinds' diff summary.
+      const before =
+        current && ('patch' in change || isTextArtifactKind(artifact.kind))
+          ? await versionText(deps, owner, current)
+          : '';
+      let body: ArtifactBody;
+      if ('patch' in change) {
+        try {
+          body = { content: applyUnifiedPatch(before, change.patch) };
+        } catch (error) {
+          if (error instanceof PatchError) throw invalidPatch(error.message);
+          throw error;
+        }
+      } else {
+        body = change;
+      }
+      const next = await prepareVersion(deps, owner, artifact, body, before, prepared);
+      if (prepared && next.file !== prepared.file) await discardFile(deps, prepared.file);
+      prepared = next;
+      const ready = prepared;
+      const result = await deps.db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select()
+          .from(schema.artifacts)
+          .where(ownedBy(owner, artifactId))
+          .for('update');
+        if (!locked) throw notFound('Artifact not found');
+        if (locked.currentVersionId !== artifact.currentVersionId) return null;
+        committing = true;
+        return commitVersion(tx, locked, current, ready, author);
+      });
+      if (result) {
+        await announce(deps, 'artifact.updated', result, author);
+        return result;
+      }
+      if (attempt >= WRITE_ATTEMPTS) throw keptChanging();
     }
-    return addVersion(scoped, owner, artifact, current, body, author, before);
-  });
-  await announce(deps, 'artifact.updated', result, author);
-  return result;
+  } catch (error) {
+    // A row may have been written only once the commit began.
+    if (prepared) await discardFile(deps, prepared.file, committing ? error : undefined);
+    throw error;
+  }
 }
 
-async function addVersion(
+/** A version's blob, stored and not yet recorded, with what its rows will say. */
+interface PreparedVersion {
+  file: PreparedFile;
+  mime: string;
+  diff: { summary: string; added: number; removed: number } | null;
+}
+
+/**
+ * Stores a version's blob, with no transaction open. `reuse`, a blob an
+ * earlier try of the same write stored, is kept when the bytes and their
+ * record are the same, rather than sent again.
+ */
+async function prepareVersion(
   deps: ArtifactDeps,
   owner: Owner,
-  artifact: ArtifactRow,
-  previous: ArtifactVersionRow | null,
+  artifact: Pick<ArtifactRow, 'kind' | 'title'>,
   body: ArtifactBody,
-  author: Author,
-  before = '',
-): Promise<WriteResult> {
+  before: string,
+  reuse?: PreparedVersion,
+): Promise<PreparedVersion> {
   const text = 'content' in body ? body.content : null;
   // Text gets its type from the title and kind; bytes get the type they show,
   // sniffed by the files store with the title's extension as the claim.
@@ -175,30 +257,51 @@ async function addVersion(
     text !== null
       ? artifactMime(artifact.kind, artifact.title, text)
       : (mimeForName(artifact.title) ?? 'application/octet-stream');
-  const file = await storeFile(deps, owner, {
-    name: artifactFileName(artifact.title, declared),
-    bytes: 'bytes' in body ? body.bytes : new TextEncoder().encode(body.content),
-    declaredMime: declared,
-    purpose: 'artifact',
-  });
-  const mime = text !== null ? declared : file.mime;
+  const bytes = 'bytes' in body ? body.bytes : new TextEncoder().encode(body.content);
   const diff =
     text !== null && isTextArtifactKind(artifact.kind) ? diffSummary(before, text) : null;
-  const [version] = await deps.db
+  const input = {
+    name: artifactFileName(artifact.title, declared),
+    bytes,
+    declaredMime: declared,
+    purpose: 'artifact' as const,
+  };
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const file =
+    reuse &&
+    reuse.file.values.sha256 === sha256 &&
+    reuse.file.values.name === input.name &&
+    reuse.file.values.mime === sniffMime(bytes, declared)
+      ? reuse.file
+      : await prepareFile(deps, owner, input);
+  return { file, mime: text !== null ? declared : file.values.mime, diff };
+}
+
+/** The version's rows, under the Artifact's lock: its file, the version, the pointer. */
+async function commitVersion(
+  tx: Db,
+  artifact: ArtifactRow,
+  previous: ArtifactVersionRow | null,
+  prepared: PreparedVersion,
+  author: Author,
+): Promise<WriteResult> {
+  const file = await recordFile(tx, prepared.file);
+  const { diff } = prepared;
+  const [version] = await tx
     .insert(schema.artifactVersions)
     .values({
       workspaceId: artifact.workspaceId,
       artifactId: artifact.id,
       version: (previous?.version ?? 0) + 1,
       storageKey: file.id,
-      mime,
+      mime: prepared.mime,
       size: file.size,
       summary: diff?.summary ?? null,
       createdByRunId: 'runId' in author ? author.runId : null,
       createdByUserId: 'userId' in author ? author.userId : null,
     })
     .returning();
-  const [updated] = await deps.db
+  const [updated] = await tx
     .update(schema.artifacts)
     .set({ currentVersionId: version!.id, updatedAt: new Date() })
     .where(eq(schema.artifacts.id, artifact.id))

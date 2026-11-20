@@ -13,7 +13,7 @@ import {
 } from '@openbots/agent';
 import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { AppDeps, CurrentUser } from '../context.js';
-import { schema } from '../db/client.js';
+import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
 import { blobStore, isStorageError, type BlobRef } from '../storage/index.js';
 import { organizationSettings } from '../workspace.js';
@@ -31,7 +31,10 @@ import { organizationSettings } from '../workspace.js';
 // The blob is stored before its row is written, so a crash between the two
 // leaves a blob no row names (found later by listing an organization's
 // prefix against `files.storage_key`), never a row without its blob. A row
-// that fails to insert has its blob removed at once.
+// that Postgres refused has its blob removed at once; one whose insert may
+// have committed (a lost reply) keeps it. No storage call is made with a
+// transaction open: a slow store would hold a pooled connection, and any
+// lock taken, for as long as it takes.
 
 type Owner = Pick<CurrentUser, 'id' | 'workspaceId'>;
 type FilesDeps = Pick<AppDeps, 'db' | 'config'>;
@@ -95,6 +98,96 @@ function looksLikeText(bytes: Uint8Array) {
   return !head.includes(0);
 }
 
+/** A blob in the store whose `files` row is not written yet (`prepareFile`). */
+export interface PreparedFile {
+  ref: BlobRef;
+  values: typeof schema.files.$inferInsert;
+}
+
+/**
+ * Checks bytes against the upload limit (and, for an avatar, its type),
+ * then stores their blob under a key made here, never from the name the
+ * user gave. No row is written: `recordFile` does that, and `discardFile`
+ * removes a blob whose row will never be. Called with no transaction open,
+ * since the store may be slow (an S3 request can take minutes to fail).
+ */
+export async function prepareFile(
+  deps: FilesDeps,
+  owner: Owner,
+  input: { name: string; bytes: Uint8Array; declaredMime?: string; purpose: FilePurpose },
+): Promise<PreparedFile> {
+  const limit = await uploadLimit(deps, owner.workspaceId);
+  if (input.bytes.byteLength > limit) throw fileTooLarge(limit);
+  const mime = sniffMime(input.bytes, input.declaredMime);
+  if (input.purpose === 'avatar' && !isAvatarMime(mime)) throw invalidAvatar();
+  const ref: BlobRef = {
+    workspaceId: owner.workspaceId,
+    storageKey: `${owner.workspaceId}/${randomUUID()}`,
+  };
+  const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+  await blobStore(deps.config)
+    .put(ref, input.bytes, { size: input.bytes.byteLength, sha256 })
+    .catch((error: unknown) => {
+      throw storageProblem(error, limit);
+    });
+  return {
+    ref,
+    values: {
+      workspaceId: owner.workspaceId,
+      ownerId: owner.id,
+      name: cleanName(input.name),
+      mime,
+      size: input.bytes.byteLength,
+      storageKey: ref.storageKey,
+      sha256,
+      purpose: input.purpose,
+    },
+  };
+}
+
+/** Writes the row of a prepared blob; `db` may be a transaction. */
+export async function recordFile(db: Db, prepared: PreparedFile): Promise<FileRow> {
+  const [row] = await db.insert(schema.files).values(prepared.values).returning();
+  return row!;
+}
+
+/**
+ * Removes a prepared blob whose row was not written, best effort. Only when
+ * `error` (what the write failed with, if anything) shows the row was not
+ * written: a lost reply to an insert that did commit must not leave a row
+ * whose blob is gone, so then the blob stays as an orphan.
+ */
+export async function discardFile(
+  deps: Pick<FilesDeps, 'config'>,
+  prepared: PreparedFile,
+  error?: unknown,
+): Promise<void> {
+  if (error !== undefined && !rowNotWritten(error)) return;
+  await blobStore(deps.config)
+    .delete(prepared.ref)
+    .catch(() => {});
+}
+
+/**
+ * Whether a failed write certainly wrote nothing: Postgres refused the
+ * statement itself, with a SQLSTATE of class 22 (data exception) or 23
+ * (integrity constraint violation). postgres.js and PGlite both put the
+ * SQLSTATE in `code`, under Drizzle's DrizzleQueryError as its `cause`. A
+ * connection error, a timeout or anything else might have come after the
+ * row committed, so it is not one.
+ */
+export function rowNotWritten(error: unknown): boolean {
+  for (
+    let e = error as { code?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    depth++
+  ) {
+    if (typeof e.code === 'string' && /^2[23][0-9A-Z]{3}$/.test(e.code)) return true;
+    e = e.cause as typeof e;
+  }
+  return false;
+}
+
 /**
  * Stores bytes and records them for their owner, under what they are for. An
  * avatar must sniff as a raster image.
@@ -104,39 +197,11 @@ export async function storeFile(
   owner: Owner,
   input: { name: string; bytes: Uint8Array; declaredMime?: string; purpose: FilePurpose },
 ): Promise<FileRow> {
-  const limit = await uploadLimit(deps, owner.workspaceId);
-  if (input.bytes.byteLength > limit) throw fileTooLarge(limit);
-  const mime = sniffMime(input.bytes, input.declaredMime);
-  if (input.purpose === 'avatar' && !isAvatarMime(mime)) throw invalidAvatar();
-  // Made here, never from the name the user gave.
-  const ref: BlobRef = {
-    workspaceId: owner.workspaceId,
-    storageKey: `${owner.workspaceId}/${randomUUID()}`,
-  };
-  const sha256 = createHash('sha256').update(input.bytes).digest('hex');
-  const store = blobStore(deps.config);
-  await store
-    .put(ref, input.bytes, { size: input.bytes.byteLength, sha256 })
-    .catch((error: unknown) => {
-      throw storageProblem(error, limit);
-    });
+  const prepared = await prepareFile(deps, owner, input);
   try {
-    const [row] = await deps.db
-      .insert(schema.files)
-      .values({
-        workspaceId: owner.workspaceId,
-        ownerId: owner.id,
-        name: cleanName(input.name),
-        mime,
-        size: input.bytes.byteLength,
-        storageKey: ref.storageKey,
-        sha256,
-        purpose: input.purpose,
-      })
-      .returning();
-    return row!;
+    return await recordFile(deps.db, prepared);
   } catch (error) {
-    await store.delete(ref).catch(() => {});
+    await discardFile(deps, prepared, error);
     throw error;
   }
 }

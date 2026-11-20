@@ -143,6 +143,51 @@ describe.each(['local', 's3'] as const)('stored files with the %s driver', (driv
     }
   });
 
+  it('keeps the blob when the insert may have been written but its reply was lost', async () => {
+    const bytes = new TextEncoder().encode('written, then the connection dropped');
+    let inserted: string | undefined;
+    // The row is written, and then the connection drops before the answer
+    // arrives, as postgres.js reports it: no SQLSTATE, a connection code.
+    const lossy = new Proxy(t.db, {
+      get(target, key) {
+        if (key !== 'insert') return Reflect.get(target, key);
+        return (table: typeof schema.files) => ({
+          values: (values: typeof schema.files.$inferInsert) => ({
+            returning: async () => {
+              const [row] = await target.insert(table).values(values).returning();
+              inserted = row!.storageKey;
+              throw Object.assign(new Error('write CONNECTION_CLOSED'), {
+                code: 'CONNECTION_CLOSED',
+              });
+            },
+          }),
+        });
+      },
+    });
+    await expect(
+      storeFile({ config: t.deps.config, db: lossy }, owner, {
+        name: 'lost-reply.txt',
+        bytes,
+        purpose: 'attachment',
+      }),
+    ).rejects.toThrow(/CONNECTION_CLOSED/);
+    expect(inserted).toBeDefined();
+    // The row is there, so its blob must be too.
+    const { stream } = await openFile(
+      t.ownerDeps,
+      owner,
+      (
+        await t.db
+          .select({ id: schema.files.id })
+          .from(schema.files)
+          .where(eq(schema.files.storageKey, inserted!))
+      )[0]!.id,
+    );
+    expect(Buffer.from(await buffer(stream)).toString()).toBe(
+      'written, then the connection dropped',
+    );
+  });
+
   it.runIf(driver === 's3')(
     'answers 503 when the store is down, naming nothing about it',
     async () => {
