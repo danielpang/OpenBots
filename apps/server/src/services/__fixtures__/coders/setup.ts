@@ -334,29 +334,38 @@ export async function coderWorld(
   expect(res.status).toBe(201);
   const bot = (await res.json()) as CoderWorld['bot'];
   // The start queues its repository jobs (computer.ts `queueRepoJobs`): a
-  // reconcile, then, once that is queued, a scan. Each enqueue is recorded
-  // here, so the suite's `process()` knows how many to wait for, none when
-  // the queue refused them.
+  // reconcile, then, once that is queued, a scan, after the start answered.
+  // The first of each is recorded here, whenever it comes (the wrapper stays
+  // in place, passing every later enqueue through), so the suite's
+  // `process()` knows how many to wait for, none when the queue refused them.
   const coders = t.deps.infra.queue<CoderJob>(CODERS_QUEUE);
   const enqueue = coders.enqueue.bind(coders);
   let reconcileQueued: Promise<boolean> | undefined;
+  let scanSeen = false;
   let scanCalled!: (queued: Promise<boolean>) => void;
   const scanQueued = new Promise<Promise<boolean>>((resolve) => (scanCalled = resolve));
   coders.enqueue = (name, data, options) => {
+    const first =
+      (data.kind === 'reconcile' && !reconcileQueued) ||
+      (data.kind === 'scan' && !!reconcileQueued && !scanSeen);
     const queued =
-      refuseRepoJobs && (data.kind === 'reconcile' || data.kind === 'scan')
+      first && refuseRepoJobs
         ? Promise.reject(new Error('the queue is down'))
         : enqueue(name, data, options);
+    if (!first) return queued;
     const ok = queued.then(
       () => true,
       () => false,
     );
-    if (data.kind === 'reconcile' && !reconcileQueued) reconcileQueued = ok;
-    else if (data.kind === 'scan' && reconcileQueued) scanCalled(ok);
+    if (data.kind === 'reconcile') {
+      reconcileQueued = ok;
+    } else {
+      scanSeen = true;
+      scanCalled(ok);
+    }
     return queued;
   };
   expect((await call('POST', '/computer/start')).status).toBe(200);
-  coders.enqueue = enqueue;
   // The git identity writes the start left running end before the test
   // counts or indexes agent calls (computer.ts `afterStart`).
   const [started] = await t.db

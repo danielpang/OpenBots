@@ -156,6 +156,11 @@ export interface CoderRunnerOptions {
   touchMs?: number;
   /** The session's time limit; DEFAULT_SESSION_MINUTES by default. */
   sessionMinutes?: number;
+  /**
+   * Arms the session's time limit: `setTimeout` by default. A test takes
+   * `expire` to reach the limit at the point it means to, not by the clock.
+   */
+  armLimit?: (expire: () => void, ms: number) => ReturnType<typeof setTimeout> | undefined;
   stopGraceMs?: number;
   runWaitMs?: number;
   /** The GitHub REST API base, for the pull request; tests stand in a fake. */
@@ -681,15 +686,19 @@ class SessionRunner {
         // It never started; the exit says why.
       });
     const minutes = this.options.sessionMinutes ?? DEFAULT_SESSION_MINUTES;
-    const limit = setTimeout(() => {
+    const arm = this.options.armLimit ?? ((expire, ms) => setTimeout(expire, ms));
+    const limit = arm(() => {
+      if (this.timedOut) return;
       this.timedOut = true;
       this.publicationAbort.abort();
       for (const resolve of this.waiters.values()) resolve('expired');
       this.wake?.();
       this.stopProcess();
     }, minutes * 60_000);
-    limit.unref?.();
-    this.timers.push(limit);
+    if (limit) {
+      limit.unref?.();
+      this.timers.push(limit);
+    }
 
     const exit = await exited;
     if (partial.trim()) onLine(partial);
