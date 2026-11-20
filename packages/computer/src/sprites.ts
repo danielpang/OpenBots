@@ -4,8 +4,13 @@ import { createAgentClient } from './agent-client.js';
 import { waitForAgent } from './docker.js';
 import {
   createSpritesApi,
+  SPRITES_CALL_MS,
+  SPRITES_CHECKPOINT_CALL_MS,
+  SPRITES_CREATE_CALL_MS,
+  SPRITES_EXEC_CALL_MS,
   SPRITES_EXEC_KILL_MS,
   SPRITES_MAX_WRITE_BYTES,
+  SPRITES_WRITE_CALL_MS,
   type SpriteEgressPolicy,
   type SpriteInfo,
   type SpritesApi,
@@ -162,6 +167,51 @@ const SPRITES_INSIDE_BUDGET_MS = 2 * 60_000;
  * and this together.
  */
 export const SPRITES_RETIRE_INSIDE_MAX_MS = SPRITES_INSIDE_BUDGET_MS + SPRITES_EXEC_KILL_MS;
+/**
+ * What one `create` or one `start` may spend on its calls: it starts none
+ * past it, and limits each to what is left (`create`'s own, which cannot be
+ * shortened, only while it fits).
+ */
+export const SPRITES_PROVISION_BUDGET_MS = 25 * 60_000;
+/**
+ * The longest one `create` or `start` takes: its budget, then the end of its
+ * last command (`SPRITES_EXEC_KILL_MS`), then the removal of its staging
+ * directory, a command of its own limited to `SPRITES_CUT_CALL_MS`.
+ */
+export const SPRITES_PROVISION_MAX_MS =
+  SPRITES_PROVISION_BUDGET_MS + SPRITES_EXEC_KILL_MS + SPRITES_CUT_CALL_MS + SPRITES_EXEC_KILL_MS;
+/** The longest `checkpoint` takes: a read, the checkpoint, and a list to find its id. */
+export const SPRITES_CHECKPOINT_MAX_MS =
+  SPRITES_CALL_MS + SPRITES_CHECKPOINT_CALL_MS + SPRITES_CALL_MS;
+/** The longest `restore` of a checkpoint takes. */
+export const SPRITES_RESTORE_MAX_MS = SPRITES_CHECKPOINT_CALL_MS;
+/** The longest `status` takes: one read. */
+export const SPRITES_STATUS_MAX_MS = SPRITES_CALL_MS;
+
+/** A time budget for one `create` or `start` (`SPRITES_PROVISION_BUDGET_MS`). */
+interface Budget {
+  /** `ms`, or what is left of the budget if less; throws once nothing is left. */
+  limit(ms: number): number;
+  /** `ms` for a call whose own limit cannot be shortened; throws unless it fits in what is left. */
+  need(ms: number): number;
+}
+
+function budget(ms = SPRITES_PROVISION_BUDGET_MS): Budget {
+  const deadline = Date.now() + ms;
+  const outOfTime = () => new Error('The provisioning ran out of time');
+  return {
+    limit(own) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw outOfTime();
+      return Math.min(own, left);
+    },
+    need(own) {
+      if (deadline - Date.now() < own) throw outOfTime();
+      return own;
+    },
+  };
+}
+
 /** How long the agent's removal waits for a provisioning that holds the lock. */
 const SPRITES_LOCK_WAIT_S = 20;
 
@@ -294,26 +344,32 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
   }
 
   /** Uploads one file, in parts when it is larger than one `fs/write` takes. */
-  async function upload(name: string, path: string, data: Uint8Array, mode: number) {
+  async function upload(name: string, path: string, data: Uint8Array, mode: number, b: Budget) {
+    const write = (to: string, bytes: Uint8Array) =>
+      api.writeFile(name, to, bytes, { mode, timeoutMs: b.limit(SPRITES_WRITE_CALL_MS) });
     if (data.byteLength <= SPRITES_MAX_WRITE_BYTES) {
-      await api.writeFile(name, path, data, { mode });
+      await write(path, data);
       return;
     }
     const parts: string[] = [];
     for (let at = 0; at < data.byteLength; at += SPRITES_MAX_WRITE_BYTES) {
       const part = `${path}.part${String(parts.length).padStart(4, '0')}`;
-      await api.writeFile(name, part, data.subarray(at, at + SPRITES_MAX_WRITE_BYTES), { mode });
+      await write(part, data.subarray(at, at + SPRITES_MAX_WRITE_BYTES));
       parts.push(part);
     }
     await run(
       name,
       ['bash', '-c', 'out="$1"; shift; cat "$@" > "$out" && rm -f "$@"', 'join', path, ...parts],
       'Joining the upload',
+      undefined,
+      { timeoutMs: b.limit(SPRITES_EXEC_CALL_MS) },
     );
   }
 
-  async function installedVersion(name: string): Promise<string | null> {
-    const data = await api.readFile(name, PROVISION_VERSION_FILE);
+  async function installedVersion(name: string, b: Budget): Promise<string | null> {
+    const data = await api.readFile(name, PROVISION_VERSION_FILE, {
+      timeoutMs: b.limit(SPRITES_CALL_MS),
+    });
     return data ? new TextDecoder().decode(data).trim() : null;
   }
 
@@ -326,6 +382,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     name: string,
     agentToken: string,
     timezone: string,
+    b: Budget,
     signal?: AbortSignal,
   ) {
     const setup = options.provision;
@@ -341,13 +398,14 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     // Neither file holds a secret (the token goes on stdin), and the API may
     // write them as another user than the one exec runs as: readable by all.
     await run(name, asRoot(prepareStaging(staging)), 'Preparing the provisioning', undefined, {
+      timeoutMs: b.limit(SPRITES_EXEC_CALL_MS),
       ...(signal ? { signal } : {}),
     });
     try {
       signal?.throwIfAborted();
-      await upload(name, scriptPath, script, 0o644);
+      await upload(name, scriptPath, script, 0o644, b);
       signal?.throwIfAborted();
-      await upload(name, bundlePath, bundle, 0o644);
+      await upload(name, bundlePath, bundle, 0o644, b);
       signal?.throwIfAborted();
       const result = await api.exec(
         name,
@@ -365,7 +423,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
             OPENBOTS_PROVISION_VERSION: setup.version,
             TZ: timezone,
           },
-          timeoutMs: provisionTimeoutMs,
+          timeoutMs: b.limit(provisionTimeoutMs),
           maxRunAfterDisconnect: PROVISION_MAX_RUN_AFTER_DISCONNECT,
           ...(signal ? { signal } : {}),
         },
@@ -382,7 +440,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
           `Provisioning the Sprite failed (exit ${result.exitCode}): ${tail(result)}`,
         );
       }
-      const installed = await installedVersion(name);
+      const installed = await installedVersion(name, b);
       if (installed !== setup.version) {
         throw new Error(
           `Provisioning the Sprite recorded version ${installed ?? 'none'}, not ${setup.version}: ${tail(result)}`,
@@ -392,7 +450,10 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       // As root: the API may have written the files as root, in a directory
       // exec made as another user. One left by a failure here goes with the
       // next attempt's sweep of old staging directories.
-      await api.exec(name, asRoot(`rm -rf ${staging}`)).catch(() => undefined);
+      // Limited on its own, past the budget: it runs after a failure too.
+      await api
+        .exec(name, asRoot(`rm -rf ${staging}`), { timeoutMs: SPRITES_CUT_CALL_MS })
+        .catch(() => undefined);
     }
   }
 
@@ -454,24 +515,29 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       // kept the sign-ins: made ready again, files kept. A retired one is
       // put back with `unretire` first, never here by accident.
       const signal = spec.signal;
+      const b = budget();
+      const call = () => ({ timeoutMs: b.limit(SPRITES_CALL_MS) });
       signal?.throwIfAborted();
-      let info = await api.get(name);
+      let info = await api.get(name, call());
       if (isRetired(info)) throw new SpriteRetiredError(name);
       signal?.throwIfAborted();
-      if (!info) info = await api.create(name, { urlAuth });
-      else if (info.urlAuth !== urlAuth) await api.setUrlAuth(name, urlAuth);
+      if (!info) {
+        b.need(SPRITES_CREATE_CALL_MS);
+        info = await api.create(name, { urlAuth });
+      } else if (info.urlAuth !== urlAuth) await api.setUrlAuth(name, urlAuth, call());
       signal?.throwIfAborted();
-      await api.setNetworkPolicy(name, egress);
+      await api.setNetworkPolicy(name, egress, call());
       // A retire that began after the read above (a reset that cancelled
       // this provisioning) labels the Sprite before it cuts anything, so a
       // label here means the two calls above may have landed after its cut:
       // the cut is put back, and the Sprite is refused.
-      if (isRetired(await api.get(name))) {
+      if (isRetired(await api.get(name, call()))) {
+        // Put back whatever the budget says: a cut is never left half undone.
         await api.setUrlAuth(name, 'sprite', cut);
         await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
         throw new SpriteRetiredError(name);
       }
-      await provision(name, spec.agentToken, spec.timezone ?? options.timezone ?? 'UTC', signal);
+      await provision(name, spec.agentToken, spec.timezone ?? options.timezone ?? 'UTC', b, signal);
       return {
         provider: 'sprites',
         containerId: name,
@@ -482,15 +548,19 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     },
     async start(ref, startOptions) {
       const signal = startOptions?.signal;
-      const name = await serving(ref);
+      const b = budget();
+      const name = required(ref);
+      if (isRetired(await api.get(name, { timeoutMs: b.limit(SPRITES_CALL_MS) }))) {
+        throw new SpriteRetiredError(name);
+      }
       // Reading the version wakes a paused Sprite.
       const setup = options.provision;
       signal?.throwIfAborted();
-      if (setup && (await installedVersion(name)) !== setup.version) {
-        await provision(name, ref.agentToken, options.timezone ?? 'UTC', signal);
+      if (setup && (await installedVersion(name, b)) !== setup.version) {
+        await provision(name, ref.agentToken, options.timezone ?? 'UTC', b, signal);
       }
       signal?.throwIfAborted();
-      await waitForAgent(provider.agent(ref), readyTimeoutMs, pollMs);
+      await waitForAgent(provider.agent(ref), b.limit(readyTimeoutMs), pollMs);
     },
     // A Sprite pauses itself once idle, so there is nothing to stop; only our
     // holds go, which would otherwise keep it running for up to an hour.
@@ -599,6 +669,9 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     async retire(ref) {
       const name = required(ref);
       let info = await api.get(name, cut);
+      // Set by the write that checks a read that found nothing: not set twice,
+      // so the calls stay within five (SPRITES_RETIRE_MAX_MS).
+      let urlPrivate = false;
       if (!info) {
         try {
           await api.setUrlAuth(name, 'sprite', cut);
@@ -606,6 +679,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
           if (notFound(error)) return;
           throw error;
         }
+        urlPrivate = true;
         info = await api.get(name, cut);
         if (!info) throw new Error(`The Sprite ${name} could not be read`);
       }
@@ -613,7 +687,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       if (!labels.includes(SPRITES_RETIRED_LABEL)) {
         await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL], cut);
       }
-      if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite', cut);
+      if (!urlPrivate && info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite', cut);
       await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
     },
     // Every part of the cut, read back: the label, the private URL and the

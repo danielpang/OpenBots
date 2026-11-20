@@ -115,10 +115,10 @@ export interface SpritesApi {
     name: string,
     path: string,
     data: Uint8Array,
-    options?: { mode?: number },
+    options?: { mode?: number; timeoutMs?: number },
   ): Promise<void>;
   /** Null when the file does not exist. */
-  readFile(name: string, path: string): Promise<Uint8Array | null>;
+  readFile(name: string, path: string, options?: SpriteCallOptions): Promise<Uint8Array | null>;
   /**
    * Resolves with the new checkpoint's id once it is saved, or null when the
    * API did not name it and no listed checkpoint carries `comment` alone.
@@ -168,12 +168,21 @@ export interface SpritesApiOptions {
   checkpointTimeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
-const CREATE_TIMEOUT_MS = 2 * 60_000;
-const DEFAULT_EXEC_TIMEOUT_MS = 10 * 60_000;
-const WRITE_TIMEOUT_MS = 5 * 60_000;
+/** The default limit of a call but `create`, `exec`, file writes and checkpoints. */
+export const SPRITES_CALL_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = SPRITES_CALL_MS;
+/** `create`'s limit: the SDK's own, which a caller cannot shorten. */
+export const SPRITES_CREATE_CALL_MS = 2 * 60_000;
+const CREATE_TIMEOUT_MS = SPRITES_CREATE_CALL_MS;
+/** An exec's limit when its caller gives none. */
+export const SPRITES_EXEC_CALL_MS = 10 * 60_000;
+const DEFAULT_EXEC_TIMEOUT_MS = SPRITES_EXEC_CALL_MS;
+/** The default limit of a file write. */
+export const SPRITES_WRITE_CALL_MS = 5 * 60_000;
+const WRITE_TIMEOUT_MS = SPRITES_WRITE_CALL_MS;
 /** Checkpoints take 10 to 30 seconds by the docs; restores are similar. */
-const CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
+export const SPRITES_CHECKPOINT_CALL_MS = 10 * 60_000;
+const CHECKPOINT_TIMEOUT_MS = SPRITES_CHECKPOINT_CALL_MS;
 /**
  * Ending a session: the API signals, waits up to 10 s, then kills. An exec
  * that is ended (its time limit, its signal) rejects at most this long after.
@@ -354,7 +363,7 @@ export function createSpritesApi({
       try {
         const response = await files(name, 'write', path, {
           method: 'PUT',
-          ms: writeTimeoutMs,
+          ms: options.timeoutMs ?? writeTimeoutMs,
           body: data,
           params: {
             mkdirParents: 'true',
@@ -369,9 +378,12 @@ export function createSpritesApi({
         throw fail('file write', name, error);
       }
     },
-    async readFile(name, path) {
+    async readFile(name, path, options = {}) {
       try {
-        const response = await files(name, 'read', path, { method: 'GET', ms: timeoutMs });
+        const response = await files(name, 'read', path, {
+          method: 'GET',
+          ms: options.timeoutMs ?? timeoutMs,
+        });
         // 404 is a missing file (the API leaves `code` out there) or Sprite.
         if (response.status === 404) {
           await response.body?.cancel();
