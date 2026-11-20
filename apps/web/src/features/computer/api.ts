@@ -42,6 +42,12 @@ export interface ResetCheck {
   results: RepoRescueResult[];
   unsaved: { fullName: string; branch: string; note: string }[];
   runningSessions: { id: string; botId: string; repoFullName: string }[];
+  /**
+   * With "Also forget sign-ins", the days the old computer is kept in case
+   * support needs to restore it; null or absent (an older server) where it
+   * is deleted at once.
+   */
+  keptDays?: number | null;
 }
 
 /** The server's 409 code when the reset's request id has no finished check. */
