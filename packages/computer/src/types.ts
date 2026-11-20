@@ -176,6 +176,12 @@ export interface ComputerProvider {
    */
   retire?(ref: ComputerRef): Promise<void>;
   /**
+   * What the provider itself says of the machine, from metadata that does
+   * not wake it: `retired` (out of reach as `retire` leaves it), `in_service`,
+   * or `gone`. For a check that must not take the server's record on trust.
+   */
+  retiredState?(ref: ComputerRef): Promise<'retired' | 'in_service' | 'gone'>;
+  /**
    * The rest of a retire, inside the machine (it wakes it): its holds are
    * dropped so it pauses, a hold racing with this one is refused, and its
    * agent is stopped and removed and its agent token deleted. Refused on a

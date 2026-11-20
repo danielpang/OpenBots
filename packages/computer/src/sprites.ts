@@ -130,6 +130,21 @@ export const SPRITES_DENY_ALL: SpriteEgressPolicy = { rules: [{ domain: '*', act
  */
 export const SPRITES_AGENT_TOKEN_FILES = ['/etc/openbots/agent-token', '/var/lib/openbots/token'];
 
+/**
+ * The time limit of each API call that cuts a Sprite's reach or puts it back
+ * (`retire`, `unretire`): short, so the longest either can take is known
+ * (`SPRITES_RETIRE_MAX_MS`, `SPRITES_UNRETIRE_MAX_MS`) and the server's claim
+ * on the record outlasts it. A call past it is ended, not left running.
+ */
+export const SPRITES_CUT_CALL_MS = 15_000;
+/** The longest `retire` takes: five metadata calls at most. */
+export const SPRITES_RETIRE_MAX_MS = 5 * SPRITES_CUT_CALL_MS;
+/**
+ * The longest `unretire` takes: four metadata calls and a command, which may
+ * run on 10 seconds once its connection is gone.
+ */
+export const SPRITES_UNRETIRE_MAX_MS = 5 * SPRITES_CUT_CALL_MS + 10_000;
+
 /** Thrown for a call on a retired Sprite. */
 export class SpriteRetiredError extends Error {
   constructor(name: string) {
@@ -140,6 +155,9 @@ export class SpriteRetiredError extends Error {
 
 const isRetired = (info: SpriteInfo | null) =>
   info?.labels?.includes(SPRITES_RETIRED_LABEL) ?? false;
+
+/** Whether the API answered that there is no such Sprite (404), as opposed to failing. */
+const notFound = (error: unknown) => (error as { status?: unknown } | null)?.status === 404;
 
 /** A domain rule the Sprites network policy accepts: a host, `*.host`, or `*`. */
 export function isEgressDomain(domain: string): boolean {
@@ -359,8 +377,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
    */
   const isOwnName = (key: string) =>
     key.startsWith(`${prefix}-`) && /^[a-z0-9]+$/.test(key.slice(prefix.length + 1));
-  /** Sprites this process retired; `agent` refuses them without a call. */
-  const retiredHere = new Set<string>();
+  const cut = { timeoutMs: SPRITES_CUT_CALL_MS };
   const nameOf = (ref: ComputerRef) =>
     ref.provider === 'sprites' && ref.containerId ? ref.containerId : null;
   const required = (ref: ComputerRef) => {
@@ -390,6 +407,15 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       if (!info) info = await api.create(name, { urlAuth });
       else if (info.urlAuth !== urlAuth) await api.setUrlAuth(name, urlAuth);
       await api.setNetworkPolicy(name, egress);
+      // A retire that began after the read above (a reset that cancelled
+      // this provisioning) labels the Sprite before it cuts anything, so a
+      // label here means the two calls above may have landed after its cut:
+      // the cut is put back, and the Sprite is refused.
+      if (isRetired(await api.get(name))) {
+        await api.setUrlAuth(name, 'sprite', cut);
+        await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
+        throw new SpriteRetiredError(name);
+      }
       await provision(name, spec.agentToken, spec.timezone ?? options.timezone ?? 'UTC');
       return {
         provider: 'sprites',
@@ -463,17 +489,17 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       const info = await api.get(name);
       return info && !isRetired(info) ? 'running' : 'missing';
     },
-    agent: (ref) => {
-      // A Sprite this process retired is refused without a call; the server
-      // also refuses the reference itself (its fence), in every process.
-      const name = nameOf(ref);
-      if (name && retiredHere.has(name)) throw new SpriteRetiredError(name);
-      return createAgentClient({
+    // Whether a machine is retired is not this process's to remember: an
+    // operator's restore in another process puts the same Sprite back. The
+    // server refuses a retired machine's reference itself (its fence, from
+    // the database), and the Sprite refuses the request (its URL is private
+    // and its agent and token are gone).
+    agent: (ref) =>
+      createAgentClient({
         url: ref.agentUrl,
         token: ref.agentToken,
         ...(urlAuth === 'sprite' ? { proxyToken: options.token } : {}),
-      });
-    },
+      }),
     async hold(ref, holdName, seconds) {
       const name = await serving(ref);
       const task = holdTask(holdName);
@@ -503,18 +529,35 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     // nor run anything inside it: the label (from then on a hold, a start or
     // a create is refused), the URL private (no request from outside reaches
     // the agent), and the egress policy that denies everything. Each step is
-    // safe to repeat. A Sprite already gone has nothing to retire.
+    // safe to repeat. A Sprite already gone has nothing to retire, but only
+    // the API's own 404 says it is gone: a read that finds nothing is checked
+    // with a write, and anything else is a failure, never a success. Each
+    // call is limited to SPRITES_CUT_CALL_MS.
     async retire(ref) {
       const name = required(ref);
-      const info = await api.get(name);
-      if (!info) return;
-      retiredHere.add(name);
+      let info = await api.get(name, cut);
+      if (!info) {
+        try {
+          await api.setUrlAuth(name, 'sprite', cut);
+        } catch (error) {
+          if (notFound(error)) return;
+          throw error;
+        }
+        info = await api.get(name, cut);
+        if (!info) throw new Error(`The Sprite ${name} could not be read`);
+      }
       const labels = info.labels ?? [];
       if (!labels.includes(SPRITES_RETIRED_LABEL)) {
-        await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL]);
+        await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL], cut);
       }
-      if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite');
-      await api.setNetworkPolicy(name, SPRITES_DENY_ALL);
+      if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite', cut);
+      await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
+    },
+    async retiredState(ref) {
+      const name = required(ref);
+      const info = await api.get(name, cut);
+      if (!info) return 'gone';
+      return isRetired(info) && info.urlAuth === 'sprite' ? 'retired' : 'in_service';
     },
     // Then, inside it (exec goes through the Sprites API, not the Sprite's
     // own network, so the deny-all policy does not stop it): the marker that
@@ -538,17 +581,24 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     // The label goes last: until then the Sprite is still refused.
     async unretire(ref) {
       const name = required(ref);
-      const info = await api.get(name);
+      const info = await api.get(name, cut);
       if (!info) throw new Error(`The Sprite ${name} is gone`);
-      await api.setUrlAuth(name, urlAuth);
-      await api.setNetworkPolicy(name, egress);
-      await run(name, asRoot(`rm -f -- ${SPRITES_RETIRED_MARKER}`), 'Clearing the retired mark');
-      retiredHere.delete(name);
+      await api.setUrlAuth(name, urlAuth, cut);
+      await api.setNetworkPolicy(name, egress, cut);
+      const cleared = await api.exec(name, asRoot(`rm -f -- ${SPRITES_RETIRED_MARKER}`), {
+        timeoutMs: SPRITES_CUT_CALL_MS,
+      });
+      if (cleared.exitCode !== 0) {
+        throw new Error(
+          `Clearing the retired mark failed (exit ${cleared.exitCode}): ${tail(cleared)}`,
+        );
+      }
       const labels = info.labels ?? [];
       if (labels.includes(SPRITES_RETIRED_LABEL)) {
         await api.setLabels(
           name,
           labels.filter((label) => label !== SPRITES_RETIRED_LABEL),
+          cut,
         );
       }
     },

@@ -28,6 +28,8 @@ import {
   SPRITES_RETIRED_LABEL,
   SPRITES_RETIRED_MARKER,
   SpriteRetiredError,
+  SPRITES_CUT_CALL_MS,
+  SPRITES_RETIRE_MAX_MS,
   spriteName,
   spritesEgressPolicy,
   type SpritesProviderOptions,
@@ -623,6 +625,80 @@ describe('the sprites provider', () => {
       expect(api.sprites.has(NAME)).toBe(false);
     });
 
+    it("counts a Sprite as gone only on the API's own 404, never on a read that found nothing", async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      // A read that answers nothing for a Sprite that is there (a stale cache, a proxy).
+      const get = api.get.bind(api);
+      let blind = 1;
+      api.get = async (name, options) => (blind-- > 0 ? null : get(name, options));
+      await provider.retire!(ref);
+      expect(sprite.labels).toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.urlAuth).toBe('sprite');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+      // A read that keeps answering nothing while the Sprite is there fails the retire.
+      api.get = async () => null;
+      await expect(provider.retire!(ref)).rejects.toThrow(/could not be read/);
+      // Any other failure is a failure.
+      api.get = get;
+      const setUrlAuth = api.setUrlAuth.bind(api);
+      api.get = async () => null;
+      api.setUrlAuth = async () => {
+        throw Object.assign(new Error('Sprites API: URL settings failed (503)'), { status: 503 });
+      };
+      await expect(provider.retire!(ref)).rejects.toThrow(/503/);
+      api.get = get;
+      api.setUrlAuth = setUrlAuth;
+    });
+
+    it('limits each call that cuts or restores reach, so the longest each takes is known', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      api.calls.length = 0;
+      const seen: unknown[] = [];
+      for (const op of ['get', 'setLabels', 'setUrlAuth', 'setNetworkPolicy'] as const) {
+        const inner = api[op].bind(api) as (...args: unknown[]) => Promise<unknown>;
+        (api as unknown as Record<string, unknown>)[op] = (...args: unknown[]) => {
+          seen.push([op, args.at(-1)]);
+          return inner(...args);
+        };
+      }
+      await provider.retire!(ref);
+      await provider.unretire!(ref);
+      expect(seen.length).toBeGreaterThanOrEqual(7);
+      for (const [, options] of seen as [string, unknown][]) {
+        expect(options).toEqual({ timeoutMs: SPRITES_CUT_CALL_MS });
+      }
+      const exec = api.calls.find((c) => c.op === 'exec')!;
+      expect((exec.args[1] as { timeoutMs?: number }).timeoutMs).toBe(SPRITES_CUT_CALL_MS);
+      expect(SPRITES_RETIRE_MAX_MS).toBe(5 * SPRITES_CUT_CALL_MS);
+    });
+
+    it('a provisioning that a retire overtakes puts the cut back and is refused', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      const sprite = api.sprites.get(NAME)!;
+      // The provisioning read the Sprite before the retire; its own calls land after the cut.
+      const setNetworkPolicy = api.setNetworkPolicy.bind(api);
+      let raced = false;
+      api.setNetworkPolicy = async (name, policy, options) => {
+        if (!raced && policy !== SPRITES_DENY_ALL) {
+          raced = true;
+          await provider.retire!(ref);
+        }
+        return setNetworkPolicy(name, policy, options);
+      };
+      await expect(provider.create({ ...spec, agentToken: 'late' })).rejects.toBeInstanceOf(
+        SpriteRetiredError,
+      );
+      expect(raced).toBe(true);
+      expect(sprite.labels).toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.urlAuth).toBe('sprite');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+      expect(api.provisions.map((p) => p.token)).not.toContain('late');
+    });
+
     it('is deleted for good with destroy, home and state', async () => {
       const { api, provider, ref } = await retired();
       await provider.destroy(ref, { computerId: spec.computerId, home: true, state: true });
@@ -646,11 +722,25 @@ describe('the sprites provider', () => {
       expect(sprite.services.has(SPRITES_AGENT_SERVICE)).toBe(true);
     });
 
-    it('refuses an agent client for a Sprite it retired, and makes a named one ready again', async () => {
+    it('a Sprite another process put back is usable here: no process remembers it retired', async () => {
+      // The API process ran the reset; the operator's CLI, another process,
+      // restores the same Sprite. Two providers over one API, as two processes.
       const { api, provider, ref } = await retired();
-      expect(() => provider.agent(ref)).toThrow(SpriteRetiredError);
-      await provider.unretire!(ref);
+      const cli = createSpritesProvider({
+        token: 'org-token',
+        api,
+        readyTimeoutMs: 2000,
+        pollMs: 10,
+      });
+      await cli.unretire!(ref);
+      expect(await provider.status(ref)).toBe('running');
       expect(() => provider.agent(ref)).not.toThrow();
+      expect(await provider.retiredState!(ref)).toBe('in_service');
+      await provider.retire!(ref);
+      // Retired again by the other: it says so from the Sprite's own metadata.
+      expect(await cli.retiredState!(ref)).toBe('retired');
+      expect(await cli.status(ref)).toBe('missing');
+      await cli.unretire!(ref);
       // A restored Sprite is made ready again by its name, recorded as the key.
       const other = { ...spec, computerId: '44444444-4444-4444-8444-444444444444' };
       const back = await provider.create({ ...other, machineKey: NAME });

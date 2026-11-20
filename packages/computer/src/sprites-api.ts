@@ -86,16 +86,25 @@ export interface SpriteExecResult {
 
 export type SpriteCheckpoint = ComputerCheckpoint;
 
+/** A metadata call's own time limit, in place of the adapter's (`SpritesApiOptions.timeoutMs`). */
+export interface SpriteCallOptions {
+  timeoutMs?: number;
+}
+
 export interface SpritesApi {
   create(name: string, options: { urlAuth: SpriteUrlAuth }): Promise<SpriteInfo>;
-  /** Null when there is no such Sprite. */
-  get(name: string): Promise<SpriteInfo | null>;
+  /** Null when there is no such Sprite (the API's 404); any other failure throws. */
+  get(name: string, options?: SpriteCallOptions): Promise<SpriteInfo | null>;
   /** A Sprite already gone is not an error. */
   delete(name: string): Promise<void>;
-  setUrlAuth(name: string, auth: SpriteUrlAuth): Promise<void>;
+  setUrlAuth(name: string, auth: SpriteUrlAuth, options?: SpriteCallOptions): Promise<void>;
   /** Replaces the Sprite's labels (metadata only: it does not wake the Sprite). */
-  setLabels(name: string, labels: string[]): Promise<void>;
-  setNetworkPolicy(name: string, policy: SpriteEgressPolicy): Promise<void>;
+  setLabels(name: string, labels: string[], options?: SpriteCallOptions): Promise<void>;
+  setNetworkPolicy(
+    name: string,
+    policy: SpriteEgressPolicy,
+    options?: SpriteCallOptions,
+  ): Promise<void>;
   /** Runs `argv` (no shell) and waits for it; a non-zero exit is a result, not an error. */
   exec(name: string, argv: string[], options?: SpriteExecOptions): Promise<SpriteExecResult>;
   writeFile(
@@ -179,6 +188,17 @@ export function createSpritesApi({
   // The SDK's own limit covers get, delete and the URL settings; its create
   // has a fixed two minutes. Everything else is limited here.
   const client = new SpritesClient(token, { baseURL: base, timeout: timeoutMs });
+  // A call with a time limit of its own uses a client made with it: the SDK
+  // ends the request at its client's limit.
+  const clients = new Map<number, SpritesClient>([[timeoutMs, client]]);
+  const clientFor = (ms = timeoutMs) => {
+    let found = clients.get(ms);
+    if (!found) {
+      found = new SpritesClient(token, { baseURL: base, timeout: ms });
+      clients.set(ms, found);
+    }
+    return found;
+  };
   const sprite = (name: string) => client.sprite(name);
   const redact = redactor(token);
   /**
@@ -243,9 +263,10 @@ export function createSpritesApi({
       );
       return info(made);
     },
-    async get(name) {
+    async get(name, options = {}) {
+      const ms = options.timeoutMs ?? timeoutMs;
       try {
-        return info(await within(timeoutMs, 'get', client.getSprite(name)));
+        return info(await within(ms, 'get', clientFor(ms).getSprite(name)));
       } catch (error) {
         if (statusOf(error) === 404) return null;
         throw fail('get', name, error);
@@ -259,22 +280,25 @@ export function createSpritesApi({
         throw fail('delete', name, error);
       }
     },
-    async setUrlAuth(name, auth) {
-      await call('URL settings', name, timeoutMs, () => client.updateURLSettings(name, { auth }));
+    async setUrlAuth(name, auth, options = {}) {
+      const ms = options.timeoutMs ?? timeoutMs;
+      await call('URL settings', name, ms, () => clientFor(ms).updateURLSettings(name, { auth }));
     },
-    async setLabels(name, labels) {
-      await call('labels', name, timeoutMs, () => client.updateSprite(name, { labels }));
+    async setLabels(name, labels, options = {}) {
+      const ms = options.timeoutMs ?? timeoutMs;
+      await call('labels', name, ms, () => clientFor(ms).updateSprite(name, { labels }));
     },
     // Raw: see the header. The same endpoint and body the SDK sends.
-    async setNetworkPolicy(name, policy) {
-      await call('network policy', name, timeoutMs, async () => {
+    async setNetworkPolicy(name, policy, options = {}) {
+      const ms = options.timeoutMs ?? timeoutMs;
+      await call('network policy', name, ms, async () => {
         const response = await fetch(
           `${base}/v1/sprites/${encodeURIComponent(name)}/policy/network`,
           {
             method: 'POST',
             headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
             body: JSON.stringify({ rules: policy.rules }),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: AbortSignal.timeout(ms),
           },
         );
         if (!response.ok) await refused(response);
