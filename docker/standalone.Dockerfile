@@ -23,11 +23,11 @@
 # docker/standalone/README.md describes what runs inside and how to use it.
 
 # The full image carries python3, make and g++ for node-pty's native build.
-ARG NODE_IMAGE=node:22-bookworm
-ARG NODE_RUNTIME_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE=node:24-bookworm
+ARG NODE_RUNTIME_IMAGE=node:24-bookworm-slim
 ARG UBUNTU_IMAGE=ubuntu:24.04
 
-# --- base: Node 22 with pnpm from corepack (pinned by packageManager) ---------
+# --- base: Node 24 with pnpm from corepack (pinned by packageManager) ---------
 # On the target platform, for prod-deps (node-pty is compiled for it).
 FROM ${NODE_IMAGE} AS base
 ENV CI=true \

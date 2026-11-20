@@ -184,6 +184,19 @@ describe('policy engine', () => {
     ).toBe('deny');
   });
 
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    'applies the stored settings for a tool named %s',
+    (name) => {
+      // As the database returns the column: JSON.parse makes `__proto__` an own key.
+      const own: unknown = JSON.parse(`{"tools":{"${name}":"deny"}}`);
+      expect(decide(name, builtin, {}, { toolPolicy: own }).decision).toBe('deny');
+      const webhook: unknown = JSON.parse(`{"triggers":{"webhook":{"tools":{"${name}":"deny"}}}}`);
+      expect(decide(name, builtin, {}, { toolPolicy: webhook, source: 'webhook' }).decision).toBe(
+        'deny',
+      );
+    },
+  );
+
   it('ignores a policy it cannot read', () => {
     expect(decide('bash', computer, {}, { toolPolicy: { bash: 'auto' } }).decision).toBe('ask');
     expect(decide('bash', computer, {}, { toolPolicy: 'yes' }).decision).toBe('ask');

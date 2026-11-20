@@ -233,7 +233,7 @@ export function resolveToolPolicy(stored: unknown): ResolvedToolPolicy {
   const raw = stored ?? {};
   const { coder: storedCoder, ...rest } = isRecord(raw) ? raw : { coder: undefined };
   const parsed = ToolPolicySchema.safeParse(isRecord(raw) ? rest : raw);
-  const policy = parsed.success ? parsed.data : {};
+  const policy = parsed.success ? keepProtoSettings(parsed.data, rest) : {};
   return {
     tools: { ...DEFAULT_TOOL_POLICY.tools, ...policy.tools },
     groups: { ...DEFAULT_TOOL_POLICY.groups, ...policy.groups },
@@ -241,6 +241,51 @@ export function resolveToolPolicy(stored: unknown): ResolvedToolPolicy {
     httpAllowlist: policy.httpAllowlist ?? null,
     coder: parsed.success ? readCoderPolicy(storedCoder) : {},
   };
+}
+
+/**
+ * zod's records skip a `__proto__` key without an issue (writing it to the
+ * plain object they build would set its prototype instead), so a setting for
+ * a tool of that name would be lost and the tool would run with less asking
+ * than the owner chose. This puts each one back, as an own property, when
+ * the stored value is a decision.
+ */
+function keepProtoSettings(policy: ToolPolicy, stored: Record<string, unknown>): ToolPolicy {
+  const kept = { ...policy };
+  if (policy.tools) kept.tools = withProtoSetting(policy.tools, stored.tools);
+  const storedTriggers = isRecord(stored.triggers) ? stored.triggers : {};
+  if (policy.triggers) {
+    const triggers: TriggerOverrides = {};
+    for (const trigger of RunTriggerSchema.options) {
+      const override = policy.triggers[trigger];
+      if (!override) continue;
+      const own = Object.hasOwn(storedTriggers, trigger) ? storedTriggers[trigger] : undefined;
+      triggers[trigger] = override.tools
+        ? { ...override, tools: withProtoSetting(override.tools, isRecord(own) ? own.tools : {}) }
+        : override;
+    }
+    kept.triggers = triggers;
+  }
+  return kept;
+}
+
+function withProtoSetting(
+  parsed: Record<string, PolicyDecision>,
+  stored: unknown,
+): Record<string, PolicyDecision> {
+  if (!isRecord(stored) || !Object.hasOwn(stored, '__proto__')) return parsed;
+  const decision = PolicyDecisionSchema.safeParse(
+    Object.getOwnPropertyDescriptor(stored, '__proto__')?.value,
+  );
+  if (!decision.success) return parsed;
+  const tools = { ...parsed };
+  Object.defineProperty(tools, '__proto__', {
+    value: decision.data,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+  return tools;
 }
 
 type TriggerOverrides = NonNullable<ToolPolicy['triggers']>;

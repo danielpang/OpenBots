@@ -25,7 +25,7 @@ Deliberate differences from Grok Bot: the computer is a Docker sandbox (Firecrac
        └─────────┬──────────┘                        │ POST /hooks/...
                  ▼                                   ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│  openbots-server  (Node 22, TypeScript, Hono)                      │
+│  openbots-server  (Node 24, TypeScript, Hono)                      │
 │                                                                   │
 │  REST API · WS gateway · Webhook ingress · Auth (better-auth)     │
 │  Router (who replies) · Agent runtime (run workers) · Scheduler   │
@@ -64,7 +64,7 @@ One server image runs three roles: `api` (HTTP and WebSocket), `worker` (runs, R
 | Area | Choice | Why | Considered |
 | --- | --- | --- | --- |
 | Language | TypeScript everywhere | One type system across server, web, and desktop; the MCP SDK and the AI SDK are first class | Python (second frontend language), Go (weaker MCP and LLM tooling) |
-| Runtime | Node 22 LTS | Stable, broad library support | Bun (native module and sandbox maturity risk) |
+| Runtime | Node 24 LTS | Stable, broad library support | Bun (native module and sandbox maturity risk) |
 | Server | Hono with zod-openapi | Typed routes, generated OpenAPI, clean streaming and WebSocket support | Fastify, NestJS |
 | Monorepo | pnpm workspaces + Turborepo | Cached builds, shared packages | Nx |
 | Database | Postgres 16 + Drizzle ORM, pgvector | Relational fit for Bots, transcripts, Routines, Artifacts; vector search for memory without another service; Drizzle can target SQLite for a later lite mode | Prisma, SQLite only |
@@ -424,7 +424,7 @@ export interface ComputerProvider {
 }
 ```
 
-`docker` (dockerode through a socket proxy or `DOCKER_HOST`) is v1. `remote` points at a control agent on any VM. `sprites` (the hosted service, `OPENBOTS_SPRITES_TOKEN`) makes one Fly Sprite per account, provisions the control agent into it as a Sprite service on port 8080, and reaches it through the Sprite's URL; a Sprite pauses itself when idle and wakes on the next request, so its `stop` only releases holds and a paused Sprite reads `running`. It adds optional provider methods for Tasks API holds, checkpoints and the DNS egress policy, and a `version` (the provisioning's) the server records per row (`packages/computer/src/sprites.ts`). How the server runs a Sprite's lifecycle is in section 9.5. `firecracker`, `e2b`, and `daytona` are future providers (K6).
+`docker` (dockerode through a socket proxy or `DOCKER_HOST`) is v1. `remote` points at a control agent on any VM. `sprites` (the hosted service, `OPENBOTS_SPRITES_TOKEN`) makes one Fly Sprite per account, provisions the control agent into it as a Sprite service on port 8080, and reaches it through the Sprite's URL; a Sprite pauses itself when idle and wakes on the next request, so its `stop` only releases holds and a paused Sprite reads `running`. It adds optional provider methods for Tasks API holds, checkpoints and the DNS egress policy, and a `version` (the provisioning's) the server records per row (`packages/computer/src/sprites.ts`). It calls the Sprites API through the official `@fly/sprites` SDK, behind a narrow interface that tests replace with a fake (`packages/computer/src/sprites-api.ts`). How the server runs a Sprite's lifecycle is in section 9.5. `firecracker`, `e2b`, and `daytona` are future providers (K6).
 
 A `remote` agent is one machine for the whole install, with one `/home/bot` and one cookie store, so it cannot give each account a computer of its own (K1). The first account to use it keeps it and other accounts get `COMPUTER_UNAVAILABLE`, unless the operator sets `OPENBOTS_COMPUTER_AGENT_SHARED=true`, which lets every account share it, files and logins included. Displays are allocated per machine (per agent URL for `remote`), so on a shared agent no two accounts' Bots get the same display.
 

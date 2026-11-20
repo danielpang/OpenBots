@@ -1,4 +1,5 @@
-// A live check of the Sprites API calls the sprites provider makes, against a
+// A live check of the Sprites API calls the sprites provider makes, through
+// the same adapter (src/sprites-api.ts, over the @fly/sprites SDK), against a
 // real Fly org. Not run in CI: it costs a little and needs a token.
 //
 //   SPRITES_TOKEN=... pnpm --filter @openbots/computer sprites-smoke

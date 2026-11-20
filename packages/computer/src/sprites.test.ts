@@ -12,7 +12,7 @@ import {
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createSpritesApi, decodeExec, SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
+import { SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
 import {
   createSpritesProvider,
   isEgressDomain,
@@ -424,63 +424,5 @@ describe('the sprites provider', () => {
       });
       expect((await provider.agent(ref).health()).ok).toBe(true);
     });
-  });
-});
-
-describe('the Sprites REST client', () => {
-  const frames = (...chunks: number[][]) =>
-    new Response(
-      new ReadableStream({
-        start(controller) {
-          for (const chunk of chunks) controller.enqueue(new Uint8Array(chunk));
-          controller.close();
-        },
-      }),
-    );
-  const bytes = (text: string) => [...new TextEncoder().encode(text)];
-
-  it('decodes stdout, stderr and the exit code of an HTTP exec', async () => {
-    expect(
-      await decodeExec(
-        frames([1, ...bytes('hello ')], [2, ...bytes('oops')], [1, ...bytes('world')], [3, 2]),
-      ),
-    ).toEqual({ exitCode: 2, stdout: 'hello world', stderr: 'oops' });
-  });
-
-  it('finds the exit frame merged onto the last read', async () => {
-    expect(await decodeExec(frames([1, ...bytes('ok'), 3, 0]))).toEqual({
-      exitCode: 0,
-      stdout: 'ok',
-      stderr: '',
-    });
-    await expect(decodeExec(frames([1, ...bytes('cut')]))).rejects.toThrow(/without an exit code/);
-  });
-
-  it('sends the org token, the argv as cmd and the stdin flag', async () => {
-    const seen: { url: string; init: RequestInit }[] = [];
-    const api = createSpritesApi({
-      token: 'org-token',
-      fetch: (async (url: URL, init: RequestInit) => {
-        seen.push({ url: String(url), init });
-        if (String(url).includes('/exec')) return frames([1, ...bytes('hi')], [3, 0]);
-        if (String(url).endsWith('/v1/sprites/gone')) return new Response('', { status: 404 });
-        return new Response('{}', { status: 500 });
-      }) as typeof fetch,
-    });
-    expect(await api.exec('s1', ['echo', 'a b'], { stdin: 'x', env: { A: '1' } })).toEqual({
-      exitCode: 0,
-      stdout: 'hi',
-      stderr: '',
-    });
-    const exec = new URL(seen[0]!.url);
-    expect(exec.pathname).toBe('/v1/sprites/s1/exec');
-    expect(exec.searchParams.getAll('cmd')).toEqual(['echo', 'a b']);
-    expect(exec.searchParams.get('stdin')).toBe('true');
-    expect(exec.searchParams.getAll('env')).toEqual(['A=1']);
-    expect((seen[0]!.init.headers as Record<string, string>).authorization).toBe(
-      'Bearer org-token',
-    );
-    expect(await api.get('gone')).toBeNull();
-    await expect(api.setUrlAuth('s1', 'public')).rejects.toThrow(/500/);
   });
 });

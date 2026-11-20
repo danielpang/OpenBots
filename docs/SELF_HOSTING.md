@@ -154,6 +154,9 @@ a Docker container. A self-hosted install does not need it and leaves these empt
 agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
 set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
 the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
+The server calls the Sprites API with Fly's `@fly/sprites` SDK, which adds coarse client headers
+(whether the process has a terminal, its parent's kind, CI) to its requests; set
+`SPRITES_CLIENT_SIGNALS=0` in the server's environment to leave them out.
 
 ### Billing (managed service)
 
@@ -255,6 +258,14 @@ made again from it at its next start, keeping its files and browser logins (the 
 the run's event row say it is updating). A running computer is never replaced under a task: it
 moves after it next stops, at its idle timeout or when you press Stop on its Computer page and
 start it again.
+
+Upgrading to the release that moves to Node 24: the server, the relay and the Bots' computer now
+need Node 24. The official images (server, computer, relay and standalone) already include it, so a
+Docker, compose bundle, Fly or standalone install needs no change. A server or relay run from a
+checkout without Docker needs Node 24 first: run `bash scripts/dev-setup.sh` again (it installs
+Node 24 when the one it finds is another major version), or install Node 24 yourself, then run
+`pnpm install` and `pnpm rebuild` so native modules are built for it. Node 22 is no longer
+accepted by `pnpm install`.
 
 Upgrading from a version without `docker-guard`:
 
@@ -522,11 +533,11 @@ current prices: [Fly.io](https://fly.io/docs/about/pricing/),
 Requirements: Linux or macOS with `curl`, `tar` and `xz`. Nothing else needs to be preinstalled.
 
 ```sh
-bash scripts/dev-setup.sh            # Node 22, pnpm (via corepack), pnpm install
+bash scripts/dev-setup.sh            # Node 24, pnpm (via corepack), pnpm install
 bash scripts/dev-setup.sh --services # also Postgres 16 + pgvector and Redis (Ubuntu, apt)
 ```
 
-The script is idempotent. It reuses a Node 22 on `PATH`, or installs one into a toolchain directory
+The script is idempotent. It reuses a Node 24 on `PATH`, or installs one into a toolchain directory
 (`/workspace/.openbots-toolchain` when it has room, else `~/.local/openbots-toolchain`; set
 `OPENBOTS_TOOLCHAIN_DIR` to choose). It prints the exports to add to your shell and writes them to
 `<toolchain dir>/env.sh`.
