@@ -143,6 +143,23 @@ async function isActiveMember(db: Db, workspaceId: string, userId: string): Prom
   return row !== undefined;
 }
 
+async function versionByNumber(
+  db: Db,
+  artifactId: string,
+  version: number,
+): Promise<VersionRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.artifactVersions)
+    .where(
+      and(
+        eq(schema.artifactVersions.artifactId, artifactId),
+        eq(schema.artifactVersions.version, version),
+      ),
+    );
+  return row ?? null;
+}
+
 async function versionById(db: Db, id: string | null): Promise<VersionRow | null> {
   if (!id) return null;
   const [row] = await db
@@ -333,14 +350,25 @@ export interface VisibilityChange {
   visibility: ArtifactVisibility;
   /** For `public`: the version to publish, by number. */
   version?: number | undefined;
+  /** For `public`, in place of `version`: the version to publish, by id (an approval's). */
+  versionId?: string | undefined;
 }
+
+const RANK: Record<ArtifactVisibility, number> = { private: 0, org: 1, public: 2 };
+
+/** Whether `next` shows the Artifact to anyone `current` does not: only a person may do that. */
+export const widens = (current: ArtifactVisibility, next: ArtifactVisibility) =>
+  next === 'public' || RANK[next] > RANK[current];
 
 /**
  * Changes who may see an Artifact, as `actor` (always a person: the owner,
  * or the owner approving their Bot's request). `public` publishes the named
  * version; with `requireCurrent` it must still be the current one, so a
- * person never confirms a version they did not see. Locked against
- * concurrent writers; audited.
+ * person never confirms a version they did not see. With `caller`, a change
+ * that widens it needs a person behind the request (`assertPerson`), judged
+ * against the row as locked, so a script's narrowing never lands as a
+ * widening of what the owner changed meanwhile. With `approvalId`, the
+ * approval is used up here, once. Locked against concurrent writers; audited.
  */
 export async function setVisibility(
   deps: SharingDeps,
@@ -348,15 +376,35 @@ export async function setVisibility(
   artifactId: string,
   change: VisibilityChange,
   actor: AuditActor & { type: 'user' },
-  options: { requireCurrent?: boolean; approvalId?: string } = {},
+  options: {
+    requireCurrent?: boolean;
+    approvalId?: string;
+    caller?: Parameters<typeof assertPerson>[1];
+  } = {},
 ): Promise<SharingState> {
   requireArtifactHost(deps.config);
   const artifact = await deps.db.transaction(async (tx) => {
     const row = await ownedArtifact(tx, owner, artifactId, true);
-    // An approval shares once. Checked under the Artifact's lock, so two
-    // runs of the same approved call cannot both pass.
-    if (options.approvalId && (await approvalUsed(tx, row.workspaceId, options.approvalId))) {
-      throw notApproved();
+    if (options.caller && widens(row.visibility, change.visibility)) {
+      await assertPerson(tx, options.caller);
+    }
+    // An approval shares once: the approval row records its use, under the
+    // Artifact's lock and in this transaction, so two runs of the same
+    // approved call cannot both pass, and a failed share leaves it unused.
+    if (options.approvalId) {
+      const [claimed] = await tx
+        .update(schema.approvals)
+        .set({ consumedAt: new Date() })
+        .where(
+          and(
+            eq(schema.approvals.id, options.approvalId),
+            eq(schema.approvals.workspaceId, row.workspaceId),
+            eq(schema.approvals.status, 'approved'),
+            isNull(schema.approvals.consumedAt),
+          ),
+        )
+        .returning({ id: schema.approvals.id });
+      if (!claimed) throw notApproved();
     }
     let publicVersion: VersionRow | null = null;
     if (change.visibility === 'public') {
@@ -365,7 +413,7 @@ export async function setVisibility(
         throw publicSharingOff();
       }
       if (row.takenDownAt) throw takenDown();
-      if (change.version === undefined) {
+      if (change.version === undefined && change.versionId === undefined) {
         throw new DomainError(400, 'VERSION_REQUIRED', 'Name the version to make public');
       }
       const [version] = await tx
@@ -374,7 +422,9 @@ export async function setVisibility(
         .where(
           and(
             eq(schema.artifactVersions.artifactId, row.id),
-            eq(schema.artifactVersions.version, change.version),
+            change.versionId !== undefined
+              ? eq(schema.artifactVersions.id, change.versionId)
+              : eq(schema.artifactVersions.version, change.version!),
           ),
         );
       if (!version) throw notFound('Version not found');
@@ -434,20 +484,11 @@ const toShare = (args: unknown): ShareRequest | null => {
   };
 };
 
-/** Whether a share approval was already applied: its audit entry names it. */
-async function approvalUsed(db: Db, workspaceId: string, approvalId: string): Promise<boolean> {
-  const [used] = await db
-    .select({ id: schema.auditLog.id })
-    .from(schema.auditLog)
-    .where(
-      and(
-        eq(schema.auditLog.workspaceId, workspaceId),
-        eq(schema.auditLog.action, 'artifact.visibility'),
-        sql`${schema.auditLog.metadata}->>'approvalId' = ${approvalId}`,
-      ),
-    );
-  return used !== undefined;
-}
+/** The version a `public` approval was given for, by id (`artifactSharing().prepare`). */
+const approvedVersionId = (args: unknown): string | null => {
+  const id = (args as { version_id?: unknown } | null)?.version_id;
+  return typeof id === 'string' && UUID.test(id) ? id : null;
+};
 
 const notApproved = () =>
   new Error(
@@ -460,6 +501,10 @@ const notApproved = () =>
  * used before. The policy engine already makes the call wait for that
  * approval; this is the server's own check, so a path that ran the tool any
  * other way still shares nothing.
+ *
+ * `public` publishes the version the approval names by id, the one the
+ * owner was shown, even when a newer version was saved since: that one
+ * stays private until a person confirms it.
  */
 export async function shareFromApproval(
   deps: SharingDeps,
@@ -477,6 +522,7 @@ export async function shareFromApproval(
         eq(schema.approvals.toolName, REQUEST_ARTIFACT_SHARE_TOOL),
         eq(schema.approvals.status, 'approved'),
         eq(schema.approvals.workspaceId, owner.workspaceId),
+        isNull(schema.approvals.consumedAt),
       ),
     )
     .orderBy(desc(schema.approvals.decidedAt));
@@ -491,11 +537,16 @@ export async function shareFromApproval(
     );
   });
   if (!approval) throw notApproved();
+  const versionId = approvedVersionId(approval.args);
+  // A public approval always names its version by id; one that does not was never shown one.
+  if (request.visibility === 'public' && !versionId) throw notApproved();
   return setVisibility(
     deps,
     owner,
     request.id,
-    { visibility: request.visibility, version: request.version },
+    request.visibility === 'public'
+      ? { visibility: 'public', versionId: versionId! }
+      : { visibility: request.visibility },
     { type: 'user', id: approval.decidedBy! },
     { approvalId: approval.id },
   );
@@ -509,14 +560,36 @@ export function artifactSharing(
 ): ArtifactSharing | undefined {
   if (!deps.config.artifactHost) return undefined;
   return {
-    async describe({ id, visibility, version }) {
+    async prepare({ id, visibility, version }) {
       const artifact = await ownedArtifact(deps.db, owner, id).catch(() => null);
-      if (!artifact) return `Share Artifact ${id}, which you do not have`;
+      if (!artifact) return { summary: `Share Artifact ${id}, which you do not have` };
       const title = `“${artifact.title.slice(0, 120)}”`;
       if (visibility === 'org') {
-        return `Share ${title} with everyone in your organization: members can view its latest version, read only`;
+        return {
+          summary: `Share ${title} with everyone in your organization: members can view its latest version, read only`,
+        };
       }
-      return `Make version ${version ?? '?'} of ${title} public: anyone with the link can view it, without signing in`;
+      // The version is resolved now, so the owner approves one that exists,
+      // and the approval keeps its id: a version saved later under the same
+      // number, or any newer one, is never what gets published on it.
+      const current = await versionById(deps.db, artifact.currentVersionId);
+      const named =
+        version === undefined ? current : await versionByNumber(deps.db, artifact.id, version);
+      if (!named) {
+        throw new Error(
+          version === undefined || !current
+            ? `${title} has no version to make public yet.`
+            : `${title} has no version ${version}; its current version is ${current.version}. Name a version it has.`,
+        );
+      }
+      const notCurrent =
+        named.id === current?.id
+          ? ''
+          : `, which is not its current version (v${current?.version ?? '?'})`;
+      return {
+        summary: `Make version ${named.version} of ${title} public${notCurrent}: anyone with the link can view it, without signing in`,
+        versionId: named.id,
+      };
     },
     async apply(request) {
       const state = await shareFromApproval(deps, run, owner, request);

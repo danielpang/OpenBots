@@ -4,7 +4,7 @@ import type { MessagePart } from '@openbots/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/client.js';
-import { artifactServices, createArtifact } from '../services/artifacts.js';
+import { artifactServices, createArtifact, writeArtifact } from '../services/artifacts.js';
 import { registerRunHooks, RUNS_QUEUE, type RunJob } from '../services/runs.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
 import { createRunWorker, type RunModel } from './runs.js';
@@ -58,7 +58,14 @@ describe('a Bot asking to share an Artifact', () => {
 
   const until = <T>(fn: () => Promise<T> | T) => vi.waitFor(fn, { timeout: 5_000, interval: 10 });
 
-  async function botAsking(name: string, args: Record<string, unknown>) {
+  async function botAsking(
+    name: string,
+    args: Record<string, unknown>,
+    {
+      versions = 1,
+      approval: expectApproval = true,
+    }: { versions?: number; approval?: boolean } = {},
+  ) {
     const res = await call('POST', '/bots', {
       name,
       modelConfig: { provider_id: await t.providerId(), model_id: 'scripted' },
@@ -76,6 +83,7 @@ describe('a Bot asking to share an Artifact', () => {
       { title: `${name} report`, kind: 'document', botId: bot.id, content: 'quarterly numbers' },
       { userId: ownerId },
     );
+    for (let v = 2; v <= versions; v++) await saveVersion(artifact.id, `v${v}`);
     models.set(bot.id, {
       model: scriptedModel([
         [{ tool: 'request_artifact_share', args: { id: artifact.id, ...args }, id: 's1' }],
@@ -85,6 +93,7 @@ describe('a Bot asking to share an Artifact', () => {
       providerOptions: {},
     });
     await call('POST', `/chats/${bot.chatId}/messages`, { text: 'Please share the report' });
+    if (!expectApproval) return { bot, artifactId: artifact.id, approval: null as never };
     const approval = await until(async () => {
       const mine = (
         await t.db
@@ -97,6 +106,19 @@ describe('a Bot asking to share an Artifact', () => {
     });
     return { bot, artifactId: artifact.id, approval };
   }
+
+  const saveVersion = (id: string, content: string) =>
+    writeArtifact(t.ownerDeps, { id: ownerId, workspaceId }, id, { content }, { userId: ownerId });
+
+  const versionsOf = async (id: string) =>
+    Object.fromEntries(
+      (
+        await t.db
+          .select()
+          .from(schema.artifactVersions)
+          .where(eq(schema.artifactVersions.artifactId, id))
+      ).map((v) => [v.version, v.id]),
+    ) as Record<number, string>;
 
   const visibilityOf = async (id: string) =>
     (await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id)))[0]!;
@@ -172,6 +194,91 @@ describe('a Bot asking to share an Artifact', () => {
       actorId: ownerId,
       metadata: { from: 'private', to: 'public', version: 1, approvalId: approval.id },
     });
+  });
+
+  it('refuses a version that does not exist, and asks the owner nothing', async () => {
+    const { bot, artifactId } = await botAsking(
+      'Ahead',
+      { visibility: 'public', version: 5 },
+      { approval: false },
+    );
+    const run = await until(async () => {
+      const [row] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+      expect(row!.status).toBe('completed');
+      return row!;
+    });
+    const asked = (
+      await t.db.select().from(schema.approvals).where(eq(schema.approvals.runId, run.id))
+    ).length;
+    expect(asked).toBe(0);
+    const parts = (
+      await t.db.select().from(schema.messages).where(eq(schema.messages.chatId, bot.chatId))
+    ).flatMap((m) => m.parts as MessagePart[]);
+    const result = parts.find((p) => p.type === 'tool_result') as { result: unknown };
+    expect(JSON.stringify(result.result)).toContain('has no version 5');
+    // Saving version 5 later changes nothing: nothing was ever approved.
+    for (let v = 2; v <= 5; v++) await saveVersion(artifactId, `v${v}`);
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+  });
+
+  it('publishes exactly the version the owner approved, and says when it is not the current one', async () => {
+    const { artifactId, approval } = await botAsking(
+      'Older',
+      { visibility: 'public', version: 1 },
+      { versions: 2 },
+    );
+    const ids = await versionsOf(artifactId);
+    // The approval names the version itself, not only its number.
+    expect(approval.args).toMatchObject({ version: 1, version_id: ids[1] });
+    const [message] = await t.db
+      .select()
+      .from(schema.messages)
+      .where(eq(schema.messages.id, approval.messageId!));
+    const widget = (message!.parts as MessagePart[]).find(
+      (p) => p.type === 'widget' && p.kind === 'approval',
+    ) as { props: { summary: string } };
+    expect(widget.props.summary).toBe(
+      'Make version 1 of “Older report” public, which is not its current version (v2): anyone with the link can view it, without signing in',
+    );
+    // A newer version is saved while the request waits; the owner approves.
+    await saveVersion(artifactId, 'v3');
+    const decided = await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
+    expect(decided.status).toBe(200);
+    await until(async () => expect((await visibilityOf(artifactId)).visibility).toBe('public'));
+    const shared = await visibilityOf(artifactId);
+    expect(shared.publicVersionId).toBe(ids[1]);
+    expect(shared.currentVersionId).toBe((await versionsOf(artifactId))[3]);
+  });
+
+  it('uses an approval once, even after its audit entry is gone', async () => {
+    const { bot, artifactId, approval } = await botAsking('Retained', { visibility: 'org' });
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.botId, bot.id));
+    const share = artifactServices(
+      t.ownerDeps,
+      { id: run!.id, chatId: bot.chatId },
+      { id: bot.id, ownerId, workspaceId },
+    ).share!;
+    await call('POST', `/approvals/${approval.id}/decide`, { decision: 'approve' });
+    await until(async () => expect((await visibilityOf(artifactId)).visibility).toBe('org'));
+    // Audit retention deletes the entry; the approval row still says it was used.
+    await t.db
+      .delete(schema.auditLog)
+      .where(
+        and(
+          eq(schema.auditLog.action, 'artifact.visibility'),
+          eq(schema.auditLog.targetId, artifactId),
+        ),
+      );
+    await call('PUT', `/artifacts/${artifactId}/sharing`, { visibility: 'private' });
+    await expect(share.apply({ id: artifactId, visibility: 'org' })).rejects.toThrow(
+      'has not approved',
+    );
+    expect((await visibilityOf(artifactId)).visibility).toBe('private');
+    const [used] = await t.db
+      .select()
+      .from(schema.approvals)
+      .where(eq(schema.approvals.id, approval.id));
+    expect((used as { consumedAt?: Date | null }).consumedAt).toBeInstanceOf(Date);
   });
 
   it('shares nothing when the owner denies it', async () => {

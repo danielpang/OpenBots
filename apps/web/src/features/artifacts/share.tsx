@@ -125,6 +125,12 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
     current !== null &&
     state.publicVersion < current;
   const error = change.error ?? decide.error ?? open.error;
+  /** A Bot asks to publish a version other than the current one (an older one: newer ones do not exist). */
+  const pendingOlder =
+    pending?.visibility === 'public' &&
+    pending.version !== null &&
+    current !== null &&
+    pending.version !== current;
 
   function choose(next: Visibility) {
     if (next === state.visibility && next !== 'public') return;
@@ -203,6 +209,8 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
             {pending.visibility === 'public'
               ? `Your Bot asks to make version ${pending.version ?? '?'} public, so anyone with the link could view it.`
               : 'Your Bot asks to share this with everyone in your organization.'}
+            {pendingOlder &&
+              ` Version ${pending.version} is not the current version. Version ${current} stays private unless you confirm it.`}
           </p>
           <div className="flex gap-2">
             <Button
@@ -245,6 +253,7 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
       <ConfirmPublic
         title={title}
         version={confirming?.version ?? null}
+        current={current}
         busy={change.isPending || decide.isPending}
         onCancel={() => setConfirming(null)}
         onConfirm={() => {
@@ -264,12 +273,15 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
 function ConfirmPublic({
   title,
   version,
+  current,
   busy,
   onCancel,
   onConfirm,
 }: {
   title: string;
   version: number | null;
+  /** The current version, said when it is not the one being published. */
+  current: number | null;
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
@@ -283,6 +295,9 @@ function ConfirmPublic({
             Anyone with the link will be able to view version {version} of “{title}”, without
             signing in. It is not limited to your organization. Later versions stay private until
             you confirm them. You can stop sharing at any time.
+            {version !== null && current !== null && version !== current
+              ? ` This is not the current version: that is version ${current}.`
+              : ''}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

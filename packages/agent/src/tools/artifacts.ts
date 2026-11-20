@@ -94,8 +94,15 @@ export interface ShareRequest {
 }
 
 export interface ArtifactSharing {
-  /** One line for the approval: which Artifact, which version, and who would see it. */
-  describe(request: ShareRequest): Promise<string>;
+  /**
+   * Before the owner is asked: checks the request against the Artifact, and
+   * throws for a version it does not have, so nobody approves one that
+   * could be saved later. Returns the approval's one line (which Artifact,
+   * which version, who would see it) and, for `public`, the id of the
+   * version named, which the approval keeps: only that version is ever
+   * published on it.
+   */
+  prepare(request: ShareRequest): Promise<{ summary: string; versionId?: string }>;
   apply(request: ShareRequest): Promise<{
     shared: true;
     artifact_id: string;
@@ -182,7 +189,11 @@ export const requestArtifactShare = defineTool({
     .refine((a) => a.visibility !== 'public' || a.version !== undefined, {
       message: 'Name the version to make public',
     }),
-  approvalSummary: async (request, ctx) => sharing(ctx).describe(request),
+  async prepareApproval(request, ctx) {
+    const { summary, versionId } = await sharing(ctx).prepare(request);
+    // The approval stores these arguments; `version_id` binds it to the version itself.
+    return { summary, args: versionId ? { ...request, version_id: versionId } : request };
+  },
   async execute(request, ctx) {
     return sharing(ctx).apply(request);
   },

@@ -141,6 +141,12 @@ export const approvals = pgTable(
     }),
     /** The session request's `CoderActionClass`: push, pr, outside_worktree, install, destructive, other. */
     actionClass: text('action_class'),
+    /**
+     * When an approved `request_artifact_share` was applied (plan 21.11): it
+     * shares once. Set under the Artifact's lock, in the transaction that
+     * shares it; null for every other request.
+     */
+    consumedAt: timestamptz('consumed_at'),
   },
   (t) => [
     check('approvals_run_or_session', sql`${t.runId} is not null or ${t.sessionId} is not null`),

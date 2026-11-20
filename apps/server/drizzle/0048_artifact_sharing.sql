@@ -66,3 +66,8 @@ REVOKE CREATE ON SCHEMA public FROM openbots_system;
 REVOKE ALL ON FUNCTION openbots_artifact_host_workspace(text) FROM PUBLIC;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION openbots_artifact_host_workspace(text) TO openbots_app;
+--> statement-breakpoint
+-- A Bot's share request is used once (services/artifact-sharing.ts): the
+-- approval row records when, under the Artifact's lock. Null for every
+-- other approval, and for rows written before this.
+ALTER TABLE "approvals" ADD COLUMN "consumed_at" timestamp with time zone;

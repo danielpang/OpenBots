@@ -2078,6 +2078,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

@@ -1,5 +1,5 @@
-import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { and, eq, sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '../db/client.js';
 import { createArtifact, writeArtifact } from '../services/artifacts.js';
 import { ORIGIN, createTestApp, type TestApp } from '../test-app.js';
@@ -270,6 +270,55 @@ describe('sharing Artifacts (plan 21.11)', () => {
       'private',
     );
   });
+
+  it.skipIf(!process.env.DATABASE_URL)(
+    "judges an API key's change by the visibility it locked, not one read before (real Postgres)",
+    async () => {
+      const id = await newArtifact('Race');
+      await json<Sharing>(share(alice, id, { visibility: 'org' }));
+      const key = await json<{ key: string }>(
+        call(alice, 'POST', '/api-keys', { name: 'racing script' }),
+        201,
+      );
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      // The owner narrows it to private, in a transaction still holding the row...
+      const owner = t.db.transaction(async (tx) => {
+        await tx
+          .update(schema.artifacts)
+          .set({ visibility: 'private' })
+          .where(eq(schema.artifacts.id, id));
+        locked();
+        await held;
+      });
+      await isLocked;
+      // ...when the script puts `org`, which is no wider than the `org` it can read now.
+      const put = t.app.request(`/api/v1/artifacts/${id}/sharing`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${key.key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ visibility: 'org' }),
+      });
+      // The script's request waits on the owner's lock before the owner commits.
+      await vi.waitFor(
+        async () => {
+          const rows = (await t.db.execute(
+            sql`select count(*)::int as n from pg_stat_activity
+                where datname = current_database() and wait_event_type = 'Lock'`,
+          )) as unknown as { n: number }[];
+          expect(rows[0]!.n).toBeGreaterThan(0);
+        },
+        { timeout: 5_000, interval: 10 },
+      );
+      release();
+      await owner;
+      // Against the row it locked, `org` widens `private`: a person must do that.
+      expect((await json<{ code: string }>(put, 403)).code).toBe('PERSON_REQUIRED');
+      const [row] = await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id));
+      expect(row!.visibility).toBe('private');
+    },
+  );
 
   it('lets owners and admins turn public links off, which stops existing ones', async () => {
     const id = await newArtifact('Public notes', 'hello world');

@@ -226,10 +226,16 @@ describe('request_artifact_share (plan 21.11)', () => {
     const { services } = fakeArtifacts();
     const applied: unknown[] = [];
     services.share = {
-      describe: async ({ id, visibility, version }) =>
-        visibility === 'public'
-          ? `Make version ${version} of ${id} public: anyone with the link can view it`
-          : `Share ${id} with everyone in the organization`,
+      prepare: async ({ id, visibility, version }) => {
+        if (version !== undefined && version > 3)
+          throw new Error(`${id} has no version ${version}`);
+        return visibility === 'public'
+          ? {
+              summary: `Make version ${version} of ${id} public: anyone with the link can view it`,
+              versionId: `${id}-v${version}`,
+            }
+          : { summary: `Share ${id} with everyone in the organization` };
+      },
       apply: async (request) => {
         applied.push(request);
         return { shared: true, artifact_id: request.id, visibility: request.visibility };
@@ -245,20 +251,14 @@ describe('request_artifact_share (plan 21.11)', () => {
     expect(Object.keys(toolsFor(ctx(withSharing().services)))).toContain('request_artifact_share');
   });
 
-  it('waits for the owner even when every setting says auto, and shows what would be shared', async () => {
-    const { services, applied } = withSharing();
+  async function asking(services: ArtifactServices, args: Record<string, unknown>) {
     const c = ctx(services);
     const facts = toolFacts(c);
+    const parts: unknown[] = [];
     const outcome = await executeRun({
       run: { ...run, trigger: 'routine' },
       model: scriptedModel([
-        [
-          {
-            tool: 'request_artifact_share',
-            args: { id: 'art-9', visibility: 'public', version: 2 },
-            id: 's1',
-          },
-        ],
+        [{ tool: 'request_artifact_share', args, id: 's1' }],
         [{ text: 'Asked.' }],
       ]),
       instructions: 'test',
@@ -270,19 +270,52 @@ describe('request_artifact_share (plan 21.11)', () => {
         facts: (n) => facts.get(n),
       }),
       abortSignal: new AbortController().signal,
-      sink: { text: async () => {}, reasoning: async () => {}, part: async () => 0 },
+      sink: {
+        text: async () => {},
+        reasoning: async () => {},
+        part: async (part) => parts.push(part) - 1,
+      },
       setState: async () => {},
       recordStep: async () => {},
       drainSteering: async () => [],
     });
+    return { outcome, parts };
+  }
+
+  it('waits for the owner even when every setting says auto, and shows what would be shared', async () => {
+    const { services, applied } = withSharing();
+    const { outcome } = await asking(services, { id: 'art-9', visibility: 'public', version: 2 });
     expect(outcome.status).toBe('waiting');
     expect(applied).toEqual([]);
-    const wait = (outcome as { wait: { reason: string; widget: { props: unknown } } }).wait;
+    const wait = (
+      outcome as { wait: { reason: string; args: unknown; widget: { props: unknown } } }
+    ).wait;
     expect(wait.reason).toBe('approval');
     expect(wait.widget.props).toMatchObject({
       tool_name: 'request_artifact_share',
       summary: 'Make version 2 of art-9 public: anyone with the link can view it',
     });
+    // The approval keeps the version itself, not only its number.
+    expect(wait.args).toEqual({
+      id: 'art-9',
+      visibility: 'public',
+      version: 2,
+      version_id: 'art-9-v2',
+    });
+  });
+
+  it('asks nothing for a version the Artifact does not have', async () => {
+    const { services, applied } = withSharing();
+    const { outcome, parts } = await asking(services, {
+      id: 'art-9',
+      visibility: 'public',
+      version: 7,
+    });
+    expect(outcome.status).toBe('completed');
+    expect(applied).toEqual([]);
+    expect(parts.some((p) => (p as { type: string }).type === 'widget')).toBe(false);
+    const result = parts.find((p) => (p as { type: string }).type === 'tool_result');
+    expect(JSON.stringify(result)).toContain('art-9 has no version 7');
   });
 
   it('needs a version to make something public', () => {

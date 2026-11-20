@@ -535,7 +535,7 @@ describe('sharing an Artifact always waits for a person (plan 21.11)', () => {
     ).toBe('deny');
   });
 
-  it('posts the approval with the line the tool describes', async () => {
+  it('posts the approval with the line and the arguments the tool prepares', async () => {
     const policy = createPolicy({
       toolPolicy: { groups: { artifacts: 'auto' } },
       facts: () => artifacts,
@@ -550,10 +550,15 @@ describe('sharing an Artifact always waits for a person (plan 21.11)', () => {
       execute: async () => {
         ran = true;
       },
-      describe: async () => 'Make version 3 of “Plan” public: anyone with the link can view it',
+      prepare: async () => ({
+        summary: 'Make version 3 of “Plan” public: anyone with the link can view it',
+        args: { ...args, version_id: 'v3-id' },
+      }),
     }).catch((error: unknown) => error);
     expect(ran).toBe(false);
     expect(thrown).toBeInstanceOf(NeedsApproval);
+    // The approval keeps the arguments the tool pinned down.
+    expect((thrown as NeedsApproval).args).toEqual({ ...args, version_id: 'v3-id' });
     expect((thrown as NeedsApproval).request.widget.props).toMatchObject({
       tool_name: share,
       summary: 'Make version 3 of “Plan” public: anyone with the link can view it',

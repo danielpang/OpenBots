@@ -12,6 +12,7 @@ import {
   listShared,
   openLink,
   openShared,
+  requireArtifactHost,
   setVisibility,
   type SharedArtifact,
   type SharingState,
@@ -217,9 +218,10 @@ export const artifactSharingRoutes = createRouter()
       const { deps, user } = c.var;
       const id = c.req.valid('param').id;
       const body = c.req.valid('json');
-      const current = await getSharing(deps, user, id);
-      const rank = { private: 0, org: 1, public: 2 } as const;
-      if (rank[body.visibility] > rank[current.visibility] || body.visibility === 'public') {
+      // Public always needs a person. Anything else is judged by setVisibility
+      // against the row it locks: whether it widens what is shared now.
+      if (body.visibility === 'public') {
+        requireArtifactHost(deps.config);
         await assertPerson(deps.db, user);
       }
       if (body.visibility === 'public' && (body.confirmed !== true || body.version === undefined)) {
@@ -235,7 +237,7 @@ export const artifactSharingRoutes = createRouter()
         id,
         { visibility: body.visibility, version: body.version },
         { ...userActor(user), type: 'user' },
-        { requireCurrent: true },
+        { requireCurrent: true, caller: user },
       );
       return c.json(toSharing(state), 200);
     },

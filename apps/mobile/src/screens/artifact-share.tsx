@@ -28,12 +28,23 @@ const DESCRIPTIONS: Record<Visibility, string> = {
 
 export const sharingKey = (id: string) => ['artifacts', id, 'sharing'] as const;
 
-/** Asks before anything becomes public; resolves true only on the person's yes. */
-export function confirmPublic(title: string, version: number): Promise<boolean> {
+/**
+ * Asks before anything becomes public; resolves true only on the person's
+ * yes. Says so when the version is not the current one.
+ */
+export function confirmPublic(
+  title: string,
+  version: number,
+  current: number | null = version,
+): Promise<boolean> {
+  const older =
+    current !== null && current !== version
+      ? ` This is not the current version: that is version ${current}.`
+      : '';
   return new Promise((resolve) =>
     Alert.alert(
       'Make this public?',
-      `Anyone with the link will be able to view version ${version} of “${title}”, without signing in. It is not limited to your organization. Later versions stay private until you confirm them.`,
+      `Anyone with the link will be able to view version ${version} of “${title}”, without signing in. It is not limited to your organization. Later versions stay private until you confirm them.${older}`,
       [
         { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
         { text: `Make version ${version} public`, onPress: () => resolve(true) },
@@ -109,7 +120,7 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
   }
 
   async function approve(approvalId: string, visibility: 'org' | 'public', version: number | null) {
-    if (visibility === 'public' && !(await confirmPublic(title, version ?? 0))) return;
+    if (visibility === 'public' && !(await confirmPublic(title, version ?? 0, current))) return;
     decide.mutate({ approvalId, decision: 'approve' });
   }
 
@@ -173,6 +184,12 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
             {pending.visibility === 'public'
               ? `Your Bot asks to make version ${pending.version ?? '?'} public, so anyone with the link could view it.`
               : 'Your Bot asks to share this with everyone in your organization.'}
+            {pending.visibility === 'public' &&
+            pending.version !== null &&
+            current !== null &&
+            pending.version !== current
+              ? ` Version ${pending.version} is not the current version. Version ${current} stays private unless you confirm it.`
+              : ''}
           </Label>
           <View style={[row.base, { gap: 8 }]}>
             <Button

@@ -6,6 +6,7 @@ import {
   type PolicyRun,
   type PolicyTraceStep,
 } from './policy/index.js';
+import type { ApprovalRequest } from './tools/types.js';
 
 // Waiting (plan 5.6) and the gated tool wrapper (plan 5.5). A tool that needs
 // the owner throws a `WaitFor`; the run loop catches it, stops after the
@@ -81,11 +82,13 @@ export interface GatedCall {
   /** Connector name and tool title for the labels. */
   labels?: LabelContext;
   /**
-   * The request's one line when the policy asks, in place of the arguments'
-   * summary: what exactly would happen, as the tool's backend can say it
-   * (`AgentTool.approvalSummary`). Its failure falls back to the arguments.
+   * When the policy asks: what exactly the owner would approve, as the
+   * tool's backend can say it (`AgentTool.prepareApproval`): the one line in
+   * place of the arguments' summary, and the arguments the approval keeps.
+   * Its failure refuses the call, so nobody is asked to approve something
+   * the backend already knows is wrong.
    */
-  describe?: () => Promise<string | undefined>;
+  prepare?: () => Promise<ApprovalRequest | undefined>;
 }
 
 export async function gated({
@@ -96,13 +99,20 @@ export async function gated({
   onStart,
   execute,
   labels,
-  describe,
+  prepare,
 }: GatedCall) {
   const { decision, reason, trace } = asEvaluation(await policy.evaluate(run, toolName, args));
   if (decision === 'deny') return DENIED_RESULT;
   if (decision === 'ask') {
-    const summary = describe ? await describe().catch(() => undefined) : undefined;
-    throw new NeedsApproval(toolName, args, reason || null, trace, labels, summary);
+    const request = prepare ? await prepare() : undefined;
+    throw new NeedsApproval(
+      toolName,
+      request?.args ?? args,
+      reason || null,
+      trace,
+      labels,
+      request?.summary,
+    );
   }
   await onStart(labelFor(toolName, args, undefined, labels));
   return execute();

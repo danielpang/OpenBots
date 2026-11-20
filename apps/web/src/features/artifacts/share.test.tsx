@@ -200,6 +200,26 @@ describe('<ShareControl>', () => {
     });
   });
 
+  it('says when the version a Bot asks to publish is not the current one', async () => {
+    server.sharing = sharing({
+      currentVersion: 3,
+      pendingRequest: {
+        approvalId: APPROVAL,
+        visibility: 'public',
+        version: 1,
+        createdAt: '2026-11-19T10:00:00.000Z',
+      },
+    });
+    render(<ShareControl artifactId={ID} title="Plan" />);
+    await until(() => text().includes('Your Bot asks to make version 1 public'), 'the request');
+    expect(text()).toContain(
+      'Version 1 is not the current version. Version 3 stays private unless you confirm it.',
+    );
+    click('Approve');
+    await until(() => !!button('Make version 1 public'), 'the dialog');
+    expect(text()).toContain('This is not the current version: that is version 3.');
+  });
+
   it('opens the Artifact in the browser with a link the server mints', async () => {
     const tab = { opener: {}, location: { href: '' }, close: vi.fn() };
     const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
