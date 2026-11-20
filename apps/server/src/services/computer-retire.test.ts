@@ -678,13 +678,26 @@ describe('retired computers', () => {
       const m = await member('queue@example.com');
       await m.reset(true);
       const [row] = await retiredOf(m.ownerId);
+      // The worker works only while this test runs: the queue cannot stop
+      // processing, and the later tests run each job themselves. One left
+      // working would run the jobs their sweeps queue in the background,
+      // leasing rows from the real clock while those tests sweep at a later
+      // time of their own, so a row they expect leased reads as due.
+      let working = true;
+      const handler = retiredComputerHandler(t.deps, () => computerProvider(t.deps));
       await t.deps.infra
         .queue<RetiredComputerJob>(RETIRED_COMPUTERS_QUEUE)
-        .process(retiredComputerHandler(t.deps, () => computerProvider(t.deps)));
-      expect(await sweep(new Date(row!.deleteAfter.getTime() + 1))).toBeGreaterThanOrEqual(1);
-      await until(async () =>
-        expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'deleted' }]),
-      );
+        .process(async (queued) => {
+          if (working) await handler(queued);
+        });
+      try {
+        expect(await sweep(new Date(row!.deleteAfter.getTime() + 1))).toBeGreaterThanOrEqual(1);
+        await until(async () =>
+          expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'deleted' }]),
+        );
+      } finally {
+        working = false;
+      }
     });
 
     it('deletes a removed member’s retired computers at the next sweep', async () => {
@@ -694,10 +707,9 @@ describe('retired computers', () => {
       await endMembershipAccess(t.deps, { userId: m.ownerId, workspaceId, removed: true });
       const [row] = await retiredOf(m.ownerId);
       expect(row!.deleteAfter.getTime()).toBeLessThanOrEqual(Date.now());
-      await until(async () => {
-        await sweep();
-        expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'deleted' }]);
-      });
+      expect(await sweep()).toBe(1);
+      await job(row!.id, 'delete');
+      expect(await retiredOf(m.ownerId)).toMatchObject([{ status: 'deleted' }]);
     });
 
     it("purges an organization's retired computers at once, for its deletion", async () => {
