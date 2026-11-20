@@ -22,10 +22,10 @@ import {
 // - A page is served in two parts. `/<id>/` is a small wrapper the host
 //   writes (`wrapperPage`), which frames `/<id>/content` in an iframe
 //   sandboxed to `allow-scripts` alone: the page's scripts run in an opaque
-//   origin, cannot read the host's cookie, storage or any response, have no
-//   network (`connect-src 'none'`), cannot submit a form (`form-action
-//   'none'`, no `allow-forms`), open a window (no `allow-popups`) or move the
-//   tab (no `allow-top-navigation`). The wrapper's `frame-src 'self'` governs
+//   origin, cannot read the host's cookie, storage or any response, cannot
+//   fetch (`connect-src 'none'`), submit a form (`form-action 'none'`, no
+//   `allow-forms`), open a window (no `allow-popups`) or move the tab (no
+//   `allow-top-navigation`). The wrapper's `frame-src 'self'` governs
 //   every navigation of that frame, so the frame cannot be sent to another
 //   site (a script setting `location`, a meta refresh, a plain link): the
 //   browser blocks it. The content refuses to be a page of its own: a
@@ -39,6 +39,13 @@ import {
 //   page that shows the whole address and goes there only on another click.
 //   That page never redirects, takes only http and https, and answers only a
 //   top-level request from this host's own page.
+// - A page's scripts are not cut off from the network. Browsers do not block
+//   WebRTC or DNS lookups from the frame: in Chromium a script there can send
+//   UDP STUN packets to a server it names (`new RTCPeerConnection({iceServers:
+//   [{urls: 'stun:host:port'}]})`), and neither `connect-src`, the sandbox
+//   flags nor the CSP `webrtc` directive stops it (Chromium does not know that
+//   directive; it warns and ignores it, so it is not sent). A scripted
+//   Artifact can leak what it contains to a server its author chose.
 // - No CORS headers, `nosniff`, `no-referrer`, a same-origin
 //   Cross-Origin-Resource-Policy, no framing but the wrapper's own frame,
 //   and `noindex` everywhere.
@@ -198,8 +205,9 @@ export function presentation(kind: ArtifactKind, mime: string): Presentation {
 
 /**
  * A page's content, in the wrapper's frame: its scripts run in an opaque
- * origin, with no network, no frames, no forms and nothing to embed but
- * inline data, and only this host may frame it.
+ * origin, with no fetch, no frames, no forms and nothing to embed but
+ * inline data, and only this host may frame it. They can still reach the
+ * network through WebRTC, which no directive here stops (see the top).
  */
 export const PAGE_CSP = [
   "default-src 'none'",
@@ -253,7 +261,9 @@ export const STATIC_CSP = [
  *   tab by itself.
  *
  * Without a click, nothing happens: a navigation the frame tries on its own
- * stays blocked.
+ * stays blocked. A browser without `navigator.userActivation` cannot say
+ * whether the viewer clicked, so there nothing happens either: links that
+ * leave the page do nothing.
  */
 export const WRAPPER_SCRIPT = `(() => {
   const back = '/' + location.pathname.split('/')[1] + '/';
@@ -265,7 +275,7 @@ export const WRAPPER_SCRIPT = `(() => {
     try { to = new URL(address); } catch { return; }
     if (to.protocol !== 'http:' && to.protocol !== 'https:') return;
     if (to.origin === location.origin) return;
-    if (navigator.userActivation && !navigator.userActivation.isActive) return;
+    if (!navigator.userActivation || !navigator.userActivation.isActive) return;
     leaving = true;
     location.assign(back + 'leave?to=' + encodeURIComponent(to.href));
   };
@@ -285,7 +295,8 @@ export const WRAPPER_SCRIPT = `(() => {
  * whole address (`WRAPPER_SCRIPT`). It runs beside the page's own scripts
  * and is trusted with nothing; without it a click on a link still reaches
  * the leaving page, with the site's address only, and a link that opens a
- * new tab or the whole tab does nothing.
+ * new tab or the whole tab does nothing. It is added only where it would run
+ * as a script (`linkHelperFits`).
  */
 export const LINK_HELPER = `<script>addEventListener('click', (event) => {
   const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
@@ -294,23 +305,45 @@ export const LINK_HELPER = `<script>addEventListener('click', (event) => {
 
 const LINK_HELPER_BYTES = new TextEncoder().encode(`\n${LINK_HELPER}\n`);
 
-/** `body`, then `tail`, as one stream. */
-function withTail(body: ReadableStream<Uint8Array>, tail: Uint8Array): ReadableStream<Uint8Array> {
-  const reader = body.getReader();
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const { done, value } = await reader.read();
-      if (done) {
-        controller.enqueue(tail);
-        controller.close();
-      } else {
-        controller.enqueue(value);
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
+/** The largest page the host reads whole to decide whether the link helper fits; a larger one goes without. */
+export const LINK_HELPER_MAX_PAGE_BYTES = 1024 * 1024;
+
+/** Elements whose content the browser reads as text, not markup, up to their end tag. */
+const TEXT_ELEMENTS = 'script|style|textarea|title|xmp|iframe|noembed|noframes|noscript';
+const CLOSED_TEXT_ELEMENT = new RegExp(
+  `<(${TEXT_ELEMENTS})(?=[\\s/>])[\\s\\S]*?</\\1(?=[\\s/>])`,
+  'g',
+);
+const OPEN_TEXT_ELEMENT = new RegExp(`<(?:${TEXT_ELEMENTS}|plaintext)(?=[\\s/>]|$)`);
+
+/**
+ * Whether `LINK_HELPER`, added after `page`, would run as a script rather
+ * than show as text or go unread: the page is not UTF-16 (whose byte order
+ * mark the browser obeys over the response's charset) and does not end
+ * inside a comment, a tag, `<plaintext>` or an element whose content is text
+ * (`<textarea>`, `<title>`, `<xmp>`, `<script>`, `<style>` and the like). A
+ * rough reading of the markup, not a parser: when unsure it says no, and the
+ * page is served as stored, without the helper.
+ */
+export function linkHelperFits(page: Uint8Array): boolean {
+  if ((page[0] === 0xfe && page[1] === 0xff) || (page[0] === 0xff && page[1] === 0xfe)) {
+    return false;
+  }
+  const markup = new TextDecoder()
+    .decode(page)
+    .toLowerCase()
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(CLOSED_TEXT_ELEMENT, '');
+  if (markup.includes('<!--') || OPEN_TEXT_ELEMENT.test(markup)) return false;
+  return markup.lastIndexOf('<') <= markup.lastIndexOf('>');
+}
+
+/** `page` and then `tail`, as one array. */
+function concat(page: Uint8Array, tail: Uint8Array): Uint8Array {
+  const joined = new Uint8Array(page.byteLength + tail.byteLength);
+  joined.set(page);
+  joined.set(tail, page.byteLength);
+  return joined;
 }
 
 const WRAPPER_STYLE =
@@ -321,9 +354,10 @@ const LEAVE_STYLE = [
   'main{max-width:40rem;margin:4rem auto;padding:0 1rem}',
   'h1{font-size:1.4rem;margin:0 0 1rem}',
   'code{display:block;padding:.75rem;border:1px solid #ccc;border-radius:6px;background:#f6f6f6;word-break:break-all;white-space:pre-wrap;font-size:.95rem}',
-  'p.site{font-weight:600}',
+  // A host name has no spaces to wrap at; break it anywhere rather than run off a phone's screen.
+  'p.site{font-weight:600;overflow-wrap:anywhere;word-break:break-all}',
   '.actions{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1.5rem}',
-  '.actions a{padding:.5rem 1rem;border-radius:6px;border:1px solid #111;color:#111;text-decoration:none}',
+  '.actions a{padding:.5rem 1rem;border-radius:6px;border:1px solid #111;color:#111;text-decoration:none;max-width:100%;box-sizing:border-box;overflow-wrap:anywhere}',
   '.actions a.go{background:#111;color:#fff}',
   '@media (prefers-color-scheme:dark){body{background:#111;color:#eee}code{background:#222;border-color:#444}.actions a{border-color:#eee;color:#eee}.actions a.go{background:#eee;color:#111}}',
 ].join('');
@@ -484,22 +518,29 @@ export async function handleArtifactRequest(
     headers.set('x-frame-options', 'SAMEORIGIN');
     headers.set('vary', 'Cookie, Sec-Fetch-Dest, Sec-Fetch-Site');
   }
-  const tail = part === 'content' && headers.get('content-security-policy') === PAGE_CSP;
+  // A page in the wrapper's frame is read whole, when small enough, to tell
+  // whether the link helper can go at its end.
+  const page =
+    part === 'content' &&
+    headers.get('content-security-policy') === PAGE_CSP &&
+    view.size <= LINK_HELPER_MAX_PAGE_BYTES
+      ? new Uint8Array(await new Response(await view.body()).arrayBuffer())
+      : null;
+  const served = page && linkHelperFits(page) ? concat(page, LINK_HELPER_BYTES) : page;
   headers.set(
     'content-disposition',
     `${shown.disposition}; filename*=UTF-8''${fileName(view.title)}`,
   );
-  headers.set('content-length', String(view.size + (tail ? LINK_HELPER_BYTES.byteLength : 0)));
+  headers.set('content-length', String(served ? served.byteLength : view.size));
   // Only the public version may be kept by a browser or the edge, and only
   // for a minute, so a takedown or a change of visibility lands quickly.
   // The owner's and members' views are never stored anywhere.
   if (view.audience === 'public') headers.set('cache-control', 'public, max-age=60');
   if (request.method === 'HEAD') {
-    view.discard?.();
+    if (!page) view.discard?.();
     return new Response(null, { status: 200, headers });
   }
-  const body = await view.body();
-  return new Response(tail ? withTail(body, LINK_HELPER_BYTES) : body, { status: 200, headers });
+  return new Response(served ?? (await view.body()), { status: 200, headers });
 }
 
 /**
@@ -507,9 +548,11 @@ export async function handleArtifactRequest(
  * (headers a page cannot set): with its scripts only into a frame on this
  * host (the wrapper's), sent to the wrapper when it is opened as a page of
  * its own, and with no script at all otherwise, including from a browser
- * that sends no such headers.
+ * that sends no such headers. The edge Worker keys its cache by the same
+ * three outcomes (`fetchPlace` in apps/artifact-worker, whose test pins it
+ * to this).
  */
-function contentPolicy(request: Request): 'framed' | 'wrapper' | 'scriptless' {
+export function contentPolicy(request: Request): 'framed' | 'wrapper' | 'scriptless' {
   const dest = request.headers.get('sec-fetch-dest');
   const site = request.headers.get('sec-fetch-site');
   if (dest === 'iframe' && site === 'same-origin') return 'framed';

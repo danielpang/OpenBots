@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+// The server's own rule, to pin the Worker's copy of it (`fetchPlace`) to it.
+import { contentPolicy } from '../../server/src/artifact-host/handler.js';
 import {
   cacheableRequest,
   cacheableResponse,
   EDGE_CLIENT_IP_HEADER,
   EDGE_HOST_HEADER,
   EDGE_SECRET_HEADER,
+  fetchPlace,
   handle,
   type EdgeRuntime,
   type Env,
@@ -157,6 +160,39 @@ describe('the artifact edge Worker', () => {
     expect(answers).toEqual({ iframe: 'for iframe', document: 'for document', none: 'for none' });
     // The second framed request came from the cache; the others each asked the server.
     expect(sent).toHaveLength(3);
+  });
+
+  it('keys the cache by what the server tells apart, so made up fetch metadata cannot miss it', async () => {
+    const { rt, settle, sent } = runtime(publicAnswer);
+    const get = async (headers: Record<string, string>) => {
+      await handle(new Request(`https://${HOST}/${ID}/content`, { headers }), env, rt);
+      await settle();
+    };
+    // Each of these gets the page with no script: one answer, asked of the server once.
+    await get({});
+    await get({ 'sec-fetch-dest': 'image', 'sec-fetch-site': 'cross-site' });
+    await get({ 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'none' });
+    await get({ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' });
+    await get({ 'sec-fetch-dest': 'x'.repeat(30), 'sec-fetch-site': 'y'.repeat(30) });
+    expect(sent).toHaveLength(1);
+    // A top-level request is one more, whatever the site says.
+    await get({ 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' });
+    await get({ 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("tells requests apart exactly as the server's handler does", () => {
+    const dests = [null, 'iframe', 'frame', 'document', 'empty', 'image', 'script', 'IFRAME', ''];
+    const sites = [null, 'same-origin', 'same-site', 'cross-site', 'none', 'SAME-ORIGIN', ''];
+    for (const dest of dests) {
+      for (const site of sites) {
+        const headers = new Headers();
+        if (dest !== null) headers.set('sec-fetch-dest', dest);
+        if (site !== null) headers.set('sec-fetch-site', site);
+        const request = new Request(`https://${HOST}/${ID}/content`, { headers });
+        expect(fetchPlace(request), `${dest} ${site}`).toBe(contentPolicy(request));
+      }
+    }
   });
 
   it('never caches the page that asks before leaving an Artifact', async () => {

@@ -3,6 +3,7 @@ import {
   handleArtifactRequest,
   hostLabel,
   LINK_HELPER,
+  LINK_HELPER_MAX_PAGE_BYTES,
   PAGE_CSP,
   parseHostname,
   presentation,
@@ -36,7 +37,7 @@ const keys = {
 interface Fixture {
   kind?: ArtifactKind;
   mime?: string;
-  body?: string;
+  body?: string | Uint8Array;
   visibility?: 'private' | 'org' | 'public';
 }
 
@@ -61,7 +62,8 @@ function fakeDeps(fixtures: Record<string, Fixture>, now = () => Date.now(), lim
         title: 'Report "Q3"',
         version: 1,
         mime: f.mime ?? 'text/plain',
-        size: new TextEncoder().encode(body).byteLength,
+        size:
+          typeof body === 'string' ? new TextEncoder().encode(body).byteLength : body.byteLength,
         body: async () => new Response(body).body!,
       };
     },
@@ -152,6 +154,65 @@ describe('what each kind is served as', () => {
   });
 });
 
+/**
+ * Runs the wrapper's script against a stand-in browser: `activation` is
+ * `navigator.userActivation` (undefined where the browser has none).
+ * Returns what it would send the tab to, and how to deliver events to it.
+ */
+function runWrapperScript(activation: { isActive: boolean } | undefined) {
+  const frame = { contentWindow: {} };
+  const listeners = new Map<string, (event: unknown) => void>();
+  const assigned: string[] = [];
+  const location = {
+    pathname: `/${ID}/`,
+    origin: `https://${HOST}`,
+    assign: (to: string) => assigned.push(to),
+  };
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  new Function('location', 'document', 'navigator', 'addEventListener', WRAPPER_SCRIPT)(
+    location,
+    { querySelector: (selector: string) => (selector === 'iframe' ? frame : null) },
+    activation === undefined ? {} : { userActivation: activation },
+    (type: string, listener: (event: unknown) => void) => listeners.set(type, listener),
+  );
+  return {
+    assigned,
+    message: (link: string) =>
+      listeners.get('message')!({ source: frame.contentWindow, data: { openbotsLink: link } }),
+    blocked: (uri: string) =>
+      listeners.get('securitypolicyviolation')!({
+        effectiveDirective: 'frame-src',
+        blockedURI: uri,
+      }),
+  };
+}
+
+describe("the wrapper's script", () => {
+  const leaveTo = (to: string) => `/${ID}/leave?to=${encodeURIComponent(to)}`;
+
+  it('opens the leaving page right after the viewer clicked', () => {
+    const wrapper = runWrapperScript({ isActive: true });
+    wrapper.message('https://example.com/a?b=1');
+    expect(wrapper.assigned).toEqual([leaveTo('https://example.com/a?b=1')]);
+  });
+
+  it('does nothing when the viewer did not just click', () => {
+    const wrapper = runWrapperScript({ isActive: false });
+    wrapper.message('https://example.com/a');
+    wrapper.blocked('https://example.com');
+    expect(wrapper.assigned).toEqual([]);
+  });
+
+  it('does nothing in a browser that cannot say whether the viewer clicked', () => {
+    // Without user activation to ask, a message or a blocked navigation the
+    // page made on its own would look the same as a click.
+    const wrapper = runWrapperScript(undefined);
+    wrapper.message('https://example.com/a');
+    wrapper.blocked('https://example.com');
+    expect(wrapper.assigned).toEqual([]);
+  });
+});
+
 describe('artifact host responses', () => {
   it('serves an HTML page as a small wrapper that frames it in a sandbox', async () => {
     const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html', body: '<p>hi</p>' } });
@@ -200,7 +261,62 @@ describe('artifact host responses', () => {
     expect(html).toContain('&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
   });
 
-  it("serves the page itself only into the wrapper's frame, sandboxed with no network", async () => {
+  it('adds the link helper only where it would run as a script', async () => {
+    const framed = async (body: string | Uint8Array) => {
+      const res = await serve(
+        fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html', body } }),
+        `/${ID}/content`,
+        { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } },
+      );
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      expect(Number(res.headers.get('content-length'))).toBe(bytes.byteLength);
+      return bytes;
+    };
+    const text = (bytes: Uint8Array) => new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+    // A page that ends as most do gets it.
+    for (const body of [
+      '<p>hi</p>',
+      '<!doctype html><title>x</title><textarea>a</textarea><p>done',
+      '<script>let a = "<title>";</script><p>done</p>',
+      '<!-- note --><p>done</p>',
+      '\uFEFF<p>UTF-8, with its byte order mark</p>',
+    ]) {
+      expect(text(await framed(body)), body).toBe(`${body}\n${LINK_HELPER}\n`);
+    }
+    // One that ends where the browser would show it as text, or not run it,
+    // is served as stored.
+    for (const body of [
+      '<p>notes</p><textarea>unfinished',
+      '<title>unfinished',
+      '<TITLE >unfinished',
+      '<xmp>unfinished',
+      '<plaintext>everything after this is text</plaintext><p>still text',
+      '<style>p{color:red}',
+      '<script>let a = 1;',
+      '<p>hi</p><!-- unfinished',
+      '<p title="unfinished',
+    ]) {
+      expect(text(await framed(body)), body).toBe(body);
+    }
+    // So is a page in UTF-16, which says so with its byte order mark.
+    const utf16 = new Uint8Array([
+      0xff,
+      0xfe,
+      ...[...'<p>hi</p>'].flatMap((c) => [c.charCodeAt(0), 0]),
+    ]);
+    expect(await framed(utf16)).toEqual(utf16);
+    const utf16be = new Uint8Array([
+      0xfe,
+      0xff,
+      ...[...'<p>hi</p>'].flatMap((c) => [0, c.charCodeAt(0)]),
+    ]);
+    expect(await framed(utf16be)).toEqual(utf16be);
+    // And one too large to read whole first.
+    const large = `<p>${'a'.repeat(LINK_HELPER_MAX_PAGE_BYTES)}</p>`;
+    expect(text(await framed(large))).toBe(large);
+  });
+
+  it("serves the page itself only into the wrapper's frame, sandboxed with no fetch", async () => {
     const deps = fakeDeps({ [ID]: { visibility: 'public', mime: 'text/html', body: '<p>hi</p>' } });
     const framed = await serve(deps, `/${ID}/content`, {
       headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' },
@@ -426,11 +542,35 @@ describe('leaving an Artifact page', () => {
   });
 
   it('escapes what it shows', async () => {
+    // The URL parser percent-encodes `"`, `<` and `>`, so this cannot reach the page as markup...
     const html = await (
       await leave(page(), 'https://evil.example/"><script>alert(1)</script>')
     ).text();
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('"><script');
+    // ...but it keeps `&` and `'` as they are. Unescaped, `&lt;` would show
+    // as `<` and the link would lead to an address other than the one given.
+    const to = "https://evil.example/it's?q=&lt;b&gt;&amp;x";
+    expect(new URL(to).href).toBe(to);
+    const shown = await (await leave(page(), to)).text();
+    const escaped = 'https://evil.example/it&#39;s?q=&amp;lt;b&amp;gt;&amp;amp;x';
+    expect(shown).toContain(`<code>${escaped}</code>`);
+    expect(shown).toContain(`href="${escaped}"`);
+    expect(shown).not.toContain('q=&lt;b');
+  });
+
+  it('wraps a long site name instead of running off a narrow screen', async () => {
+    const long = `https://${'a'.repeat(60)}.${'b'.repeat(60)}.example/`;
+    const res = await leave(page(), long);
+    const html = await res.text();
+    const style = /<style>([^<]*)<\/style>/.exec(html)![1]!;
+    // Checked at phone width in Chromium too; here, that the rules are there and allowed.
+    expect(style).toMatch(/p\.site\{[^}]*overflow-wrap:anywhere/);
+    expect(style).toMatch(/\.actions a\{[^}]*overflow-wrap:anywhere/);
+    const hash = Buffer.from(
+      await crypto.subtle.digest('SHA-256', new TextEncoder().encode(style)),
+    ).toString('base64');
+    expect(res.headers.get('content-security-policy')).toContain(`style-src 'sha256-${hash}'`);
   });
 
   it('allows only http and https, with no name or password in the address', async () => {

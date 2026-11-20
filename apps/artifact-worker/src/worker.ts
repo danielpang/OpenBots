@@ -75,16 +75,31 @@ export function cacheableRequest(request: Request): boolean {
 }
 
 /**
- * The cache key: the path, and where the browser puts the answer. The query
- * never changes a public answer, so it is not part of it (and cannot be used
- * to fill the cache with copies); the fetch metadata does, since a page's
- * content is served with its scripts only into the wrapper's frame.
+ * Where the browser puts the answer, told apart only as the server does
+ * (`contentPolicy` in apps/server/src/artifact-host/handler.ts, which a test
+ * pins this copy to): into a frame on the same host (the wrapper's), as a
+ * page of its own, or anything else.
+ */
+export function fetchPlace(request: Request): 'framed' | 'wrapper' | 'scriptless' {
+  const dest = request.headers.get('sec-fetch-dest');
+  const site = request.headers.get('sec-fetch-site');
+  if (dest === 'iframe' && site === 'same-origin') return 'framed';
+  if (dest === 'document') return 'wrapper';
+  return 'scriptless';
+}
+
+/**
+ * The cache key: the path, and where the browser puts the answer
+ * (`fetchPlace`). The query never changes a public answer, so it is not part
+ * of it (and cannot be used to fill the cache with copies); where the answer
+ * goes does, since a page's content is served with its scripts only into the
+ * wrapper's frame. Only the three outcomes the server tells apart are in it,
+ * never the headers as sent, so made up values cannot miss the cache.
  */
 export function cacheKey(request: Request): Request {
   const url = new URL(request.url);
   const key = new URL(`https://${url.hostname.toLowerCase()}${url.pathname}`);
-  key.searchParams.set('dest', request.headers.get('sec-fetch-dest') ?? '');
-  key.searchParams.set('site', request.headers.get('sec-fetch-site') ?? '');
+  key.searchParams.set('as', fetchPlace(request));
   return new Request(key, { method: 'GET' });
 }
 
