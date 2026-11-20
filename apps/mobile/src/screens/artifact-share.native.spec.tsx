@@ -22,6 +22,7 @@ const sharing = (over: Partial<ArtifactSharing> = {}): ArtifactSharing => ({
   publicAllowed: true,
   takenDown: false,
   url: `https://writer-1a2b3c4d--acme-0f0f0f0f.openbots-artifacts.example/${ID}/`,
+  noLink: null,
   sharedAt: null,
   pendingRequest: null,
   ...over,
@@ -180,6 +181,17 @@ describe('Artifact sharing on the phone', () => {
     expect(alert.mock.calls[0]![1]).toContain(
       'This is not the current version: that is version 3.',
     );
+  });
+
+  it('says why it has no link', async () => {
+    state = sharing({ url: null, noLink: 'address_too_long' });
+    setup();
+    expect(
+      await screen.findByText(
+        "This organization's address is too long for a link, so this Artifact cannot be opened in the browser.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Open in browser' })).toBeNull();
   });
 
   it('opens it in the browser with a link the server mints', async () => {

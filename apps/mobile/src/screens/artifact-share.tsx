@@ -206,6 +206,13 @@ export function ArtifactShare({ id, title }: { id: string; title: string }) {
           </View>
         </View>
       ) : null}
+      {state.noLink ? (
+        <Label muted size={14}>
+          {state.noLink === 'address_too_long'
+            ? "This organization's address is too long for a link, so this Artifact cannot be opened in the browser."
+            : 'The Bot that made this Artifact was deleted, so it has no link.'}
+        </Label>
+      ) : null}
       {state.url ? (
         <View style={[row.base, { flexWrap: 'wrap', gap: 8 }]}>
           {state.visibility !== 'private' ? (

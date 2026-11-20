@@ -21,7 +21,9 @@ const server = vi.hoisted(() => {
     sharingOn: true,
     sharing: null as unknown as ArtifactSharing,
     shared: [] as SharedArtifact[],
-    requests: [] as { method: string; path: string; body: unknown }[],
+    /** Items after the first page of the shared list, served when it is asked for by cursor. */
+    sharedNext: [] as SharedArtifact[],
+    requests: [] as { method: string; path: string; body: unknown; query?: string }[],
     handle: (async () => Response.error()) as (request: Request) => Promise<Response>,
   };
   globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) =>
@@ -36,6 +38,7 @@ const sharing = (over: Partial<ArtifactSharing> = {}): ArtifactSharing => ({
   publicAllowed: true,
   takenDown: false,
   url: `https://writer-1a2b3c4d--acme-0f0f0f0f.openbots-artifacts.example/${ID}/`,
+  noLink: null,
   sharedAt: null,
   pendingRequest: null,
   ...over,
@@ -45,11 +48,17 @@ beforeEach(() => {
   server.sharingOn = true;
   server.sharing = sharing();
   server.shared = [];
+  server.sharedNext = [];
   server.requests = [];
   server.handle = async (request) => {
-    const { pathname } = new URL(request.url, 'http://localhost');
+    const { pathname, searchParams } = new URL(request.url, 'http://localhost');
     const body = request.method === 'GET' ? undefined : await request.json().catch(() => undefined);
-    server.requests.push({ method: request.method, path: pathname, body });
+    server.requests.push({
+      method: request.method,
+      path: pathname,
+      body,
+      query: `${searchParams}`,
+    });
     if (pathname === '/api/v1/capabilities') {
       return Response.json({
         oauth: { github: false, google: false },
@@ -74,7 +83,15 @@ beforeEach(() => {
       server.sharing = { ...server.sharing, pendingRequest: null };
       return Response.json({ approval: { id: APPROVAL }, resumedRunId: null });
     }
-    if (pathname === '/api/v1/shared-artifacts') return Response.json({ items: server.shared });
+    if (pathname === '/api/v1/shared-artifacts') {
+      if (searchParams.get('cursor') === 'page-2') {
+        return Response.json({ items: server.sharedNext, nextCursor: null });
+      }
+      return Response.json({
+        items: server.shared,
+        nextCursor: server.sharedNext.length ? 'page-2' : null,
+      });
+    }
     return Response.json({ title: 'Not found' }, { status: 404 });
   };
 });
@@ -220,6 +237,21 @@ describe('<ShareControl>', () => {
     expect(text()).toContain('This is not the current version: that is version 3.');
   });
 
+  it('says why an Artifact has no link', async () => {
+    server.sharing = sharing({ url: null, noLink: 'address_too_long' });
+    render(<ShareControl artifactId={ID} title="Plan" />);
+    await until(() => text().includes('Nobody else can see it.'), 'the state');
+    expect(text()).toContain(
+      "This organization's address is too long for a link, so this Artifact cannot be opened in the browser.",
+    );
+    expect(button('Open in browser')).toBeUndefined();
+    act(() => root!.unmount());
+    server.sharing = sharing({ url: null, noLink: 'bot_deleted' });
+    render(<ShareControl artifactId={ID} title="Plan" />);
+    await until(() => text().includes('Nobody else can see it.'), 'the state again');
+    expect(text()).toContain('The Bot that made this Artifact was deleted, so it has no link.');
+  });
+
   it('opens the Artifact in the browser with a link the server mints', async () => {
     const tab = { opener: {}, location: { href: '' }, close: vi.fn() };
     const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
@@ -255,5 +287,30 @@ describe('<SharedArtifactsPage>', () => {
     expect(text()).toContain('only their owner can change them');
     expect(button('Open Roadmap in the browser')).toBeDefined();
     expect(button('Edit')).toBeUndefined();
+  });
+
+  it('loads more a page at a time', async () => {
+    const item = (n: number): SharedArtifact => ({
+      id: `00000000-0000-4000-8000-0000000000b${n}`,
+      kind: 'document',
+      title: `Doc ${n}`,
+      visibility: 'org',
+      version: { version: 1, mime: 'text/markdown', size: 1, createdAt: '2026-11-19T10:00:00Z' },
+      ownerName: 'Alice',
+      botName: null,
+      mine: false,
+      url: null,
+      updatedAt: '2026-11-19T10:00:00.000Z',
+    });
+    server.shared = [item(1)];
+    server.sharedNext = [item(2)];
+    render(<SharedArtifactsPage />);
+    await until(() => text().includes('Doc 1') && !!button('Load more'), 'the first page');
+    expect(text()).not.toContain('Doc 2');
+    click('Load more');
+    await until(() => text().includes('Doc 2'), 'the second page');
+    expect(button('Load more')).toBeUndefined();
+    const asked = server.requests.filter((r) => r.path === '/api/v1/shared-artifacts');
+    expect(asked.map((r) => new URLSearchParams(r.query).get('cursor'))).toEqual([null, 'page-2']);
   });
 });

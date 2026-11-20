@@ -14,6 +14,7 @@ import {
   openShared,
   requireArtifactHost,
   setVisibility,
+  SHARED_PAGE,
   type SharedArtifact,
   type SharingState,
 } from '../services/artifact-sharing.js';
@@ -62,8 +63,11 @@ const ArtifactSharingSchema = z
       description: 'The service took the public link down; it cannot be made public again',
     }),
     url: z.url().nullable().openapi({
+      description: "The Artifact's address on the artifact host; null when it has none (`noLink`)",
+    }),
+    noLink: z.enum(['bot_deleted', 'address_too_long']).nullable().openapi({
       description:
-        "The Artifact's address on the artifact host; null when the Bot that made it was deleted",
+        "Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link",
     }),
     sharedAt: z.iso.datetime().nullable(),
     pendingRequest: ShareRequestSchema.nullable().openapi({
@@ -127,6 +131,7 @@ function toSharing(state: SharingState): z.infer<typeof ArtifactSharingSchema> {
     publicAllowed: state.publicAllowed,
     takenDown: state.takenDown,
     url: state.url,
+    noLink: state.noLink,
     sharedAt: iso(state.sharedAt),
     pendingRequest: state.pendingRequest
       ? {
@@ -258,7 +263,9 @@ export const artifactSharingRoutes = createRouter()
         },
         ...authProblems,
         404: problemResponse('No such Artifact the caller may see'),
-        409: problemResponse('Its Bot was deleted, so it has no link (`NO_LINK`)'),
+        409: problemResponse(
+          "It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`)",
+        ),
       },
     }),
     async (c) => {
@@ -271,23 +278,55 @@ export const artifactSharingRoutes = createRouter()
       method: 'get',
       path: '/shared-artifacts',
       tags: ['artifacts'],
-      summary: "Artifacts shared with the caller's organization, read only",
+      summary: "Artifacts shared with the caller's organization, read only, a page at a time",
       middleware: [requireUser] as const,
       security: authenticated,
+      request: {
+        query: z.object({
+          cursor: z.uuid().optional().openapi({ description: "The previous page's `nextCursor`" }),
+          limit: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(SHARED_PAGE.max)
+            .optional()
+            .openapi({
+              description: `At most this many; ${SHARED_PAGE.size} by default`,
+            }),
+        }),
+      },
       responses: {
         200: {
           description: 'Shared Artifacts, most recently updated first',
           content: {
-            'application/json': { schema: z.object({ items: z.array(SharedArtifactSchema) }) },
+            'application/json': {
+              schema: z.object({
+                items: z.array(SharedArtifactSchema),
+                nextCursor: z.uuid().nullable().openapi({
+                  description: 'Pass as `cursor` for the next page; null on the last one',
+                }),
+              }),
+            },
           },
         },
+        400: problemResponse('Invalid cursor or limit'),
         ...authProblems,
         404: problemResponse('This install does not host Artifacts'),
       },
     }),
     async (c) => {
-      const rows = await listShared(c.var.deps, c.var.user);
-      return c.json({ items: rows.map((row) => toShared(row, c.var.user.id)) }, 200);
+      const { cursor, limit } = c.req.valid('query');
+      const page = await listShared(c.var.deps, c.var.user, {
+        ...(cursor ? { cursor } : {}),
+        ...(limit ? { limit } : {}),
+      });
+      return c.json(
+        {
+          items: page.items.map((row) => toShared(row, c.var.user.id)),
+          nextCursor: page.nextCursor,
+        },
+        200,
+      );
     },
   )
   .openapi(

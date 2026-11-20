@@ -407,6 +407,12 @@ describe('artifact_sharing backfill (plan 21.11)', () => {
   const ada = ID(83);
   const away = ID(84);
   const longSlug = `${'a'.repeat(40)}-0123abcd`;
+  // As long as a new organization's slug gets, with two Bots that collide.
+  const crowded = ID(85);
+  const crowdedSlug = `${'b'.repeat(40)}-4567cdef`;
+  // Migration 0021 made slugs from the whole name: this one cannot fit a label.
+  const tooLong = ID(86);
+  const tooLongSlug = `${'c'.repeat(70)}-89abcdef`;
   const slugOf: Record<string, string> = {};
 
   beforeAll(async () => {
@@ -417,14 +423,19 @@ describe('artifact_sharing backfill (plan 21.11)', () => {
       INSERT INTO workspaces (id, name, slug) VALUES
         ('${home}', 'Home', 'home-1a2b3c4d'),
         ('${away}', 'Away', 'away-5e6f7a8b'),
-        ('${long}', 'Long', '${longSlug}');
+        ('${long}', 'Long', '${longSlug}'),
+        ('${crowded}', 'Crowded', '${crowdedSlug}'),
+        ('${tooLong}', 'Too long', '${tooLongSlug}');
       INSERT INTO users (id, name, email) VALUES ('${ada}', 'Ada', 'ada@example.com');
       INSERT INTO bots (id, workspace_id, owner_id, handle, name) VALUES
         ('${ID(91)}', '${home}', '${ada}', 'researcher', 'Researcher'),
         ('${ID(92)}', '${away}', '${ada}', 'researcher', 'Researcher'),
         ('${ID(97)}', '${long}', '${ada}', 'researcher', 'Researcher'),
         ('${ID(93)}', '${home}', '${ada}', 'Very_Long--Handle__With   Odd--Bits-and-more-words', 'Odd'),
-        ('${ID(94)}', '${home}', '${ada}', '___', 'Blank');
+        ('${ID(94)}', '${home}', '${ada}', '___', 'Blank'),
+        ('${ID(98)}', '${crowded}', '${ada}', 'writer', 'Writer'),
+        ('${ID(99)}', '${crowded}', '${ada}', 'Writer', 'Writer'),
+        ('${ID(100)}', '${tooLong}', '${ada}', 'writer', 'Writer');
       INSERT INTO artifacts (id, workspace_id, owner_id, bot_id, kind, title) VALUES
         ('${ID(95)}', '${home}', '${ada}', '${ID(91)}', 'document', 'Old');
     `);
@@ -446,12 +457,16 @@ describe('artifact_sharing backfill (plan 21.11)', () => {
       [home]: 'home-1a2b3c4d',
       [away]: 'away-5e6f7a8b',
       [long]: longSlug,
+      [crowded]: crowdedSlug,
+      [tooLong]: tooLongSlug,
     };
     for (const { id, slug, ws } of bots) {
       slugOf[id] = slug;
       expect(slug).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
       expect(slug).not.toContain('--');
-      expect(`${slug}--${orgSlugs[ws]}`.length).toBeLessThanOrEqual(63);
+      expect(slug.length).toBeGreaterThanOrEqual(3);
+      // Every organization whose slug leaves room for one gets a label that fits.
+      if (ws !== tooLong) expect(`${slug}--${orgSlugs[ws]}`.length, id).toBeLessThanOrEqual(63);
     }
     // The first two Researchers would share their handle and their ids' first digits.
     expect(slugOf[ID(91)]).toBe('researcher-000000000091');
@@ -460,6 +475,11 @@ describe('artifact_sharing backfill (plan 21.11)', () => {
     expect(slugOf[ID(97)]).toBe('res-00000000');
     expect(slugOf[ID(93)]).toBe('very-long-handle-with-00000000');
     expect(slugOf[ID(94)]).toBe('bot-00000000');
+    // Two that collide in an organization with a long slug take other digits, still inside the label.
+    expect(slugOf[ID(98)]).toBe('000000000098');
+    expect(slugOf[ID(99)]).toBe('000000000099');
+    // An organization slug too long for any label still gives its Bot a valid slug.
+    expect(slugOf[ID(100)]).toBe('00000000');
   });
 
   it('keeps existing Artifacts private', async () => {

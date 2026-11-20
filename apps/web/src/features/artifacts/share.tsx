@@ -235,6 +235,13 @@ function SharePanel({ artifactId, title }: { artifactId: string; title: string }
           </div>
         </div>
       )}
+      {state.noLink && (
+        <p className="text-xs text-muted-foreground">
+          {state.noLink === 'address_too_long'
+            ? "This organization's address is too long for a link, so this Artifact cannot be opened in the browser."
+            : 'The Bot that made this Artifact was deleted, so it has no link.'}
+        </p>
+      )}
       {state.url && (
         <div className="flex flex-wrap gap-1">
           {state.visibility !== 'private' && (

@@ -6,7 +6,7 @@ import {
   type ArtifactKind,
   type ArtifactVisibility,
 } from '@openbots/shared';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, exists, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { hostLabel, type HostView, type Viewer } from '../artifact-host/handler.js';
 import { newNonce, signClaims, VIEW_TOKEN_SECONDS } from '../artifact-host/tokens.js';
 import type { Config } from '../config.js';
@@ -101,20 +101,51 @@ export function botPublicSlug(
   return part ? `${part}-${suffix}` : suffix;
 }
 
-/** The Artifact's address on the artifact host, or null when its Bot is gone or the label cannot fit. */
+/** Why an Artifact has no address on the artifact host. */
+export type NoLinkReason = 'bot_deleted' | 'address_too_long';
+
+/**
+ * The Artifact's address on the artifact host, or why it has none: its Bot
+ * is gone, or `<bot slug>--<organization slug>` cannot fit a DNS label (an
+ * organization migration 0021 named after its whole name).
+ */
+export function artifactHostLink(
+  config: Pick<Config, 'artifactHost' | 'publicUrl'>,
+  botSlug: string | null,
+  orgSlug: string,
+  artifactId: string,
+): { url: string; noLink: null } | { url: null; noLink: NoLinkReason | null } {
+  if (!config.artifactHost) return { url: null, noLink: null };
+  if (!botSlug) return { url: null, noLink: 'bot_deleted' };
+  const label = hostLabel(botSlug, orgSlug);
+  if (!label) return { url: null, noLink: 'address_too_long' };
+  // The app's scheme: https in production; http only on a development install.
+  const scheme = new URL(config.publicUrl).protocol === 'http:' ? 'http' : 'https';
+  return { url: `${scheme}://${label}.${config.artifactHost.domain}/${artifactId}/`, noLink: null };
+}
+
+/** The Artifact's address on the artifact host, or null when it has none (`artifactHostLink`). */
 export function artifactHostUrl(
   config: Pick<Config, 'artifactHost' | 'publicUrl'>,
   botSlug: string | null,
   orgSlug: string,
   artifactId: string,
 ): string | null {
-  if (!config.artifactHost || !botSlug) return null;
-  const label = hostLabel(botSlug, orgSlug);
-  if (!label) return null;
-  // The app's scheme: https in production; http only on a development install.
-  const scheme = new URL(config.publicUrl).protocol === 'http:' ? 'http' : 'https';
-  return `${scheme}://${label}.${config.artifactHost.domain}/${artifactId}/`;
+  return artifactHostLink(config, botSlug, orgSlug, artifactId).url;
 }
+
+const noLinkError = (reason: NoLinkReason) =>
+  reason === 'address_too_long'
+    ? new DomainError(
+        409,
+        'ADDRESS_TOO_LONG',
+        "This organization's address is too long for a link, so its Artifacts cannot be opened in the browser. You can still download them.",
+      )
+    : new DomainError(
+        409,
+        'NO_LINK',
+        'This Artifact has no link: the Bot that made it was deleted.',
+      );
 
 /** The host's keys, each derived from the master key for its one purpose. */
 export function artifactHostKeys(masterKey: string): { token: Uint8Array; cookie: Uint8Array } {
@@ -297,6 +328,8 @@ export interface SharingState {
   takenDown: boolean;
   /** The address on the artifact host, without any token; null when it has none. */
   url: string | null;
+  /** Why `url` is null. */
+  noLink: NoLinkReason | null;
   sharedAt: Date | null;
   pendingRequest: PendingShareRequest | null;
 }
@@ -326,7 +359,7 @@ async function sharingState(
     publicVersion: artifact.visibility === 'public' ? (pinned?.version ?? null) : null,
     publicAllowed: effectiveSettings(config, workspace).publicArtifactsEnabled,
     takenDown: artifact.takenDownAt !== null,
-    url: artifactHostUrl(config, botSlug, workspace.slug, artifact.id),
+    ...artifactHostLink(config, botSlug, workspace.slug, artifact.id),
     sharedAt: artifact.sharedAt,
     pendingRequest: await pendingRequest(db, owner, artifact.id),
   };
@@ -636,35 +669,133 @@ async function describeShared(
   };
 }
 
+/** How many shared Artifacts a page lists by default, and at most. */
+export const SHARED_PAGE = { size: 50, max: 100 } as const;
+
+export interface SharedPage {
+  items: SharedArtifact[];
+  /** The last Artifact of this page, to pass as `cursor` for the next; null on the last page. */
+  nextCursor: string | null;
+}
+
 /**
  * Artifacts of the caller's organization that are shared beyond their owner
- * and that the caller may see now, most recently updated first: each with
- * only what a member needs to find and open it.
+ * and that the caller may see now, most recently updated first, `limit` at
+ * a time: each with only what a member needs to find and open it. Who sees
+ * what is `viewOf`'s rule, asked in the query itself so a page is full, with
+ * everything a row needs read for the whole page at once.
  */
-export async function listShared(deps: SharingDeps, viewer: Member): Promise<SharedArtifact[]> {
+export async function listShared(
+  deps: SharingDeps,
+  viewer: Member,
+  { cursor, limit = SHARED_PAGE.size }: { cursor?: string; limit?: number } = {},
+): Promise<SharedPage> {
   requireArtifactHost(deps.config);
-  const rows = await deps.db
+  const { db, config } = deps;
+  const a = schema.artifacts;
+  const m = schema.workspaceMembers;
+  const take = Math.min(Math.max(1, limit), SHARED_PAGE.max);
+  const workspace = await getOrganization(db, viewer.workspaceId);
+  const publicServed = effectiveSettings(config, workspace).publicArtifactsEnabled;
+  const viewerActive = await isActiveMember(db, viewer.workspaceId, viewer.id);
+  const rows = await db
     .select()
-    .from(schema.artifacts)
+    .from(a)
     .where(
       and(
-        eq(schema.artifacts.workspaceId, viewer.workspaceId),
-        inArray(schema.artifacts.visibility, ['org', 'public']),
+        eq(a.workspaceId, viewer.workspaceId),
+        inArray(a.visibility, ['org', 'public']),
+        // Nothing of a suspended or removed owner's is shown to anyone.
+        exists(
+          db
+            .select({ id: m.id })
+            .from(m)
+            .where(
+              and(eq(m.workspaceId, a.workspaceId), eq(m.userId, a.ownerId), isNull(m.suspendedAt)),
+            ),
+        ),
+        or(
+          eq(a.ownerId, viewer.id),
+          viewerActive ? eq(a.visibility, 'org') : undefined,
+          publicServed
+            ? and(eq(a.visibility, 'public'), isNull(a.takenDownAt), isNotNull(a.publicVersionId))
+            : undefined,
+        ),
+        // Keyset on (updated_at, id), read from the cursor row (as the attachments list).
+        cursor
+          ? sql`(${a.updatedAt}, ${a.id}) < (select updated_at, id from artifacts where id = ${cursor} and workspace_id = ${viewer.workspaceId})`
+          : undefined,
       ),
     )
-    .orderBy(desc(schema.artifacts.updatedAt));
-  const out: SharedArtifact[] = [];
-  for (const artifact of rows) {
-    const view = await viewOf(deps, artifact, viewer.id);
-    if (!view) continue;
-    // The owner's own public Artifact is listed as others see it: the confirmed version.
-    const pinned =
-      view.audience === 'owner' && artifact.visibility === 'public'
-        ? await versionById(deps.db, artifact.publicVersionId)
-        : null;
-    out.push(await describeShared(deps, artifact, view.audience, pinned ?? view.version));
+    .orderBy(desc(a.updatedAt), desc(a.id))
+    .limit(take + 1);
+  const page = rows.slice(0, take);
+  const nextCursor = rows.length > take ? page[page.length - 1]!.id : null;
+  if (!page.length) return { items: [], nextCursor };
+
+  const audienceOf = (artifact: ArtifactRow): Audience =>
+    artifact.ownerId === viewer.id ? 'owner' : artifact.visibility === 'org' ? 'member' : 'public';
+  // The version each viewer sees; the owner's own public Artifact is listed
+  // as others see it, at the confirmed version.
+  const versionIdOf = (artifact: ArtifactRow) =>
+    artifact.visibility !== 'public'
+      ? artifact.currentVersionId
+      : (artifact.publicVersionId ??
+        (artifact.ownerId === viewer.id ? artifact.currentVersionId : null));
+  const ids = (values: (string | null)[]) => [
+    ...new Set(values.filter((v): v is string => v !== null)),
+  ];
+  const versionIds = ids(page.map(versionIdOf));
+  const botIds = ids(page.map((artifact) => artifact.botId));
+  const ownerIds = ids(page.map((artifact) => artifact.ownerId));
+  const [versions, bots, owners] = await Promise.all([
+    versionIds.length
+      ? db
+          .select()
+          .from(schema.artifactVersions)
+          .where(
+            and(
+              eq(schema.artifactVersions.workspaceId, viewer.workspaceId),
+              inArray(schema.artifactVersions.id, versionIds),
+            ),
+          )
+      : [],
+    botIds.length
+      ? db
+          .select({
+            id: schema.bots.id,
+            publicSlug: schema.bots.publicSlug,
+            name: schema.bots.name,
+          })
+          .from(schema.bots)
+          .where(
+            and(eq(schema.bots.workspaceId, viewer.workspaceId), inArray(schema.bots.id, botIds)),
+          )
+      : [],
+    db
+      .select({ id: schema.users.id, name: schema.users.name })
+      .from(schema.users)
+      .where(inArray(schema.users.id, ownerIds)),
+  ]);
+  const versionOf = new Map(versions.map((v) => [v.id, v]));
+  const botOf = new Map(bots.map((b) => [b.id, b]));
+  const ownerOf = new Map(owners.map((o) => [o.id, o.name]));
+  const items: SharedArtifact[] = [];
+  for (const artifact of page) {
+    const versionId = versionIdOf(artifact);
+    const version = versionId ? versionOf.get(versionId) : undefined;
+    if (!version) continue;
+    const bot = artifact.botId ? botOf.get(artifact.botId) : undefined;
+    items.push({
+      artifact,
+      audience: audienceOf(artifact),
+      version,
+      ownerName: ownerOf.get(artifact.ownerId) ?? '',
+      botName: bot?.name ?? null,
+      url: artifactHostUrl(config, bot?.publicSlug ?? null, workspace.slug, artifact.id),
+    });
   }
-  return out;
+  return { items, nextCursor };
 }
 
 /** One shared Artifact the caller may see; 404 otherwise, the same for every reason. */
@@ -732,14 +863,8 @@ export async function openLink(
   const view = await viewOf(deps, artifact, viewer.id);
   if (!view) throw notFound('Artifact not found');
   const { workspace, botSlug } = await hostNames(deps.db, artifact);
-  const url = artifactHostUrl(deps.config, botSlug, workspace.slug, artifact.id);
-  if (!url) {
-    throw new DomainError(
-      409,
-      'NO_LINK',
-      'This Artifact has no link: the Bot that made it was deleted.',
-    );
-  }
+  const { url, noLink } = artifactHostLink(deps.config, botSlug, workspace.slug, artifact.id);
+  if (!url) throw noLinkError(noLink ?? 'bot_deleted');
   if (view.audience === 'public') return { url, expiresAt: null };
   const expires = now + VIEW_TOKEN_SECONDS * 1000;
   const token = await signClaims(artifactHostKeys(deps.config.masterKey).token, {

@@ -320,6 +320,67 @@ describe('sharing Artifacts (plan 21.11)', () => {
     },
   );
 
+  it('lists shared Artifacts a page at a time, newest first', async () => {
+    const ids: string[] = [];
+    for (const title of ['Page one', 'Page two', 'Page three']) {
+      const id = await newArtifact(title);
+      await json<Sharing>(share(alice, id, { visibility: 'org' }));
+      ids.unshift(id);
+    }
+    type Page = { items: { id: string; title: string }[]; nextCursor: string | null };
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const query: string = cursor ? `?limit=2&cursor=${cursor}` : '?limit=2';
+      const page: Page = await json<Page>(call(carol, 'GET', `/shared-artifacts${query}`));
+      expect(page.items.length).toBeLessThanOrEqual(2);
+      seen.push(...page.items.map((i) => i.id));
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 50);
+    expect(pages).toBeGreaterThan(1);
+    expect(new Set(seen).size).toBe(seen.length);
+    // The three just shared come first, newest first.
+    expect(seen.slice(0, 3)).toEqual(ids);
+    expect((await call(carol, 'GET', '/shared-artifacts?limit=1000')).status).toBe(400);
+  });
+
+  it("says when the organization's address is too long for a link", async () => {
+    const id = await newArtifact('Long address');
+    const [org] = await t.db
+      .select()
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId));
+    // As migration 0021 named an organization: from its whole name.
+    await t.db
+      .update(schema.workspaces)
+      .set({ slug: `${'a-long-organization-name'.repeat(3)}-0123abcd` })
+      .where(eq(schema.workspaces.id, workspaceId));
+    try {
+      const sharing = await json<Sharing & { noLink: string | null }>(
+        call(alice, 'GET', `/artifacts/${id}/sharing`),
+      );
+      expect(sharing.url).toBeNull();
+      expect(sharing.noLink).toBe('address_too_long');
+      const refused = await json<{ code: string; title: string }>(
+        call(alice, 'POST', `/artifacts/${id}/open`),
+        409,
+      );
+      expect(refused.code).toBe('ADDRESS_TOO_LONG');
+      expect(refused.title).toContain("organization's address is too long");
+    } finally {
+      await t.db
+        .update(schema.workspaces)
+        .set({ slug: org!.slug })
+        .where(eq(schema.workspaces.id, workspaceId));
+    }
+    const restored = await json<Sharing & { noLink: string | null }>(
+      call(alice, 'GET', `/artifacts/${id}/sharing`),
+    );
+    expect(restored.noLink).toBeNull();
+  });
+
   it('lets owners and admins turn public links off, which stops existing ones', async () => {
     const id = await newArtifact('Public notes', 'hello world');
     const shared = await json<Sharing>(

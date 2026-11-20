@@ -14,7 +14,10 @@ CREATE INDEX "artifacts_workspace_visibility" ON "artifacts" USING btree ("works
 -- handles are only unique per member). Existing Bots get their handle's
 -- letters and digits and eight hex digits of their id, short enough that
 -- `<slug>--<organization slug>` fits a 63 character DNS label; two Bots
--- that would still collide take twelve other digits of their id instead.
+-- that would still collide take up to twelve other digits of their id
+-- instead, with the handle cut so the label still fits. An organization
+-- whose slug leaves no room (migration 0021 kept whole names) still gets
+-- valid slugs; the app says its address is too long for a link.
 -- bots and workspaces force row-level security on their owner (0023), so the
 -- backfill lifts it for this transaction and puts it back.
 ALTER TABLE "bots" ADD COLUMN "public_slug" text;--> statement-breakpoint
@@ -22,22 +25,23 @@ ALTER TABLE "bots" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "workspaces" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 WITH parts AS (
   SELECT b.id,
-    rtrim(left(
-      coalesce(nullif(trim(both '-' from regexp_replace(lower(b.handle), '[^a-z0-9]+', '-', 'g')), ''), 'bot'),
-      greatest(0, least(31, 61 - length(w.slug)) - 9)
-    ), '-') AS part,
+    coalesce(nullif(trim(both '-' from regexp_replace(lower(b.handle), '[^a-z0-9]+', '-', 'g')), ''), 'bot') AS letters,
+    least(31, 61 - length(w.slug)) AS room,
     replace(b.id::text, '-', '') AS hex
   FROM "bots" b JOIN "workspaces" w ON w.id = b.workspace_id
 ), candidates AS (
-  SELECT id, part, hex,
-    concat_ws('-', nullif(part, ''), substr(hex, 1, 8)) AS slug
+  SELECT id, letters, room, hex,
+    concat_ws('-', nullif(rtrim(left(letters, greatest(0, room - 9)), '-'), ''), substr(hex, 1, 8)) AS slug,
+    least(12, greatest(8, room)) AS digits
   FROM parts
 ), ranked AS (
-  SELECT id, part, hex, slug, count(*) OVER (PARTITION BY slug) AS taken
+  SELECT id, letters, room, hex, slug, digits, count(*) OVER (PARTITION BY slug) AS taken
   FROM candidates
 )
 UPDATE "bots" SET "public_slug" = CASE
-    WHEN ranked.taken > 1 THEN concat_ws('-', nullif(ranked.part, ''), substr(ranked.hex, 21, 12))
+    WHEN ranked.taken > 1 THEN concat_ws('-',
+      nullif(rtrim(left(ranked.letters, greatest(0, ranked.room - ranked.digits - 1)), '-'), ''),
+      substr(ranked.hex, 33 - ranked.digits, ranked.digits))
     ELSE ranked.slug
   END
 FROM ranked WHERE ranked.id = "bots".id;--> statement-breakpoint

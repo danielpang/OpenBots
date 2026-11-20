@@ -5155,7 +5155,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description Its Bot was deleted, so it has no link (`NO_LINK`) */
+        /** @description It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`) */
         409: {
           headers: {
             [name: string]: unknown;
@@ -5179,10 +5179,15 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Artifacts shared with the caller's organization, read only */
+    /** Artifacts shared with the caller's organization, read only, a page at a time */
     get: {
       parameters: {
-        query?: never;
+        query?: {
+          /** @description The previous page's `nextCursor` */
+          cursor?: string;
+          /** @description At most this many; 50 by default */
+          limit?: number;
+        };
         header?: never;
         path?: never;
         cookie?: never;
@@ -5197,7 +5202,21 @@ export interface paths {
           content: {
             'application/json': {
               items: components['schemas']['SharedArtifact'][];
+              /**
+               * Format: uuid
+               * @description Pass as `cursor` for the next page; null on the last one
+               */
+              nextCursor: string | null;
             };
+          };
+        };
+        /** @description Invalid cursor or limit */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
           };
         };
         /** @description Not signed in */
@@ -13595,9 +13614,14 @@ export interface components {
       takenDown: boolean;
       /**
        * Format: uri
-       * @description The Artifact's address on the artifact host; null when the Bot that made it was deleted
+       * @description The Artifact's address on the artifact host; null when it has none (`noLink`)
        */
       url: string | null;
+      /**
+       * @description Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link
+       * @enum {string|null}
+       */
+      noLink: 'bot_deleted' | 'address_too_long' | null;
       /** Format: date-time */
       sharedAt: string | null;
       pendingRequest: components['schemas']['ArtifactShareRequest'];

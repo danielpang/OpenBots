@@ -5080,7 +5080,12 @@
           "url": {
             "type": ["string", "null"],
             "format": "uri",
-            "description": "The Artifact's address on the artifact host; null when the Bot that made it was deleted"
+            "description": "The Artifact's address on the artifact host; null when it has none (`noLink`)"
+          },
+          "noLink": {
+            "type": ["string", "null"],
+            "enum": ["bot_deleted", "address_too_long", null],
+            "description": "Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link"
           },
           "sharedAt": {
             "type": ["string", "null"],
@@ -5097,6 +5102,7 @@
           "publicAllowed",
           "takenDown",
           "url",
+          "noLink",
           "sharedAt",
           "pendingRequest"
         ]
@@ -14667,7 +14673,7 @@
             }
           },
           "409": {
-            "description": "Its Bot was deleted, so it has no link (`NO_LINK`)",
+            "description": "It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14682,13 +14688,38 @@
     "/api/v1/shared-artifacts": {
       "get": {
         "tags": ["artifacts"],
-        "summary": "Artifacts shared with the caller's organization, read only",
+        "summary": "Artifacts shared with the caller's organization, read only, a page at a time",
         "security": [
           {
             "session": []
           },
           {
             "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The previous page's `nextCursor`"
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "At most this many; 50 by default"
+            },
+            "required": false,
+            "description": "At most this many; 50 by default",
+            "name": "limit",
+            "in": "query"
           }
         ],
         "responses": {
@@ -14704,9 +14735,24 @@
                       "items": {
                         "$ref": "#/components/schemas/SharedArtifact"
                       }
+                    },
+                    "nextCursor": {
+                      "type": ["string", "null"],
+                      "format": "uuid",
+                      "description": "Pass as `cursor` for the next page; null on the last one"
                     }
                   },
-                  "required": ["items"]
+                  "required": ["items", "nextCursor"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or limit",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
