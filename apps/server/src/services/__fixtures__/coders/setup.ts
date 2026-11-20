@@ -298,7 +298,14 @@ export interface CoderWorld {
  */
 export async function coderWorld(
   email = 'coder-owner@example.com',
-  { fakeAgent = false }: { fakeAgent?: boolean } = {},
+  {
+    fakeAgent = false,
+    refuseRepoJobs = false,
+  }: {
+    fakeAgent?: boolean;
+    /** The queue refuses the start's repository jobs (a queue that is down). */
+    refuseRepoJobs?: boolean;
+  } = {},
 ): Promise<CoderWorld> {
   const t = await createTestApp({ OPENBOTS_SIGNUP_MODE: 'open' });
   const computer = await useTestComputer(t.ownerDeps);
@@ -326,7 +333,30 @@ export async function coderWorld(
   });
   expect(res.status).toBe(201);
   const bot = (await res.json()) as CoderWorld['bot'];
+  // The start queues its repository jobs (computer.ts `queueRepoJobs`): a
+  // reconcile, then, once that is queued, a scan. Each enqueue is recorded
+  // here, so the suite's `process()` knows how many to wait for, none when
+  // the queue refused them.
+  const coders = t.deps.infra.queue<CoderJob>(CODERS_QUEUE);
+  const enqueue = coders.enqueue.bind(coders);
+  let reconcileQueued: Promise<boolean> | undefined;
+  let scanCalled!: (queued: Promise<boolean>) => void;
+  const scanQueued = new Promise<Promise<boolean>>((resolve) => (scanCalled = resolve));
+  coders.enqueue = (name, data, options) => {
+    const queued =
+      refuseRepoJobs && (data.kind === 'reconcile' || data.kind === 'scan')
+        ? Promise.reject(new Error('the queue is down'))
+        : enqueue(name, data, options);
+    const ok = queued.then(
+      () => true,
+      () => false,
+    );
+    if (data.kind === 'reconcile' && !reconcileQueued) reconcileQueued = ok;
+    else if (data.kind === 'scan' && reconcileQueued) scanCalled(ok);
+    return queued;
+  };
   expect((await call('POST', '/computer/start')).status).toBe(200);
+  coders.enqueue = enqueue;
   // The git identity writes the start left running end before the test
   // counts or indexes agent calls (computer.ts `afterStart`).
   const [started] = await t.db
@@ -339,28 +369,29 @@ export async function coderWorld(
   // processor, on the scripted agent; a test that has meanwhile put its own
   // script in place would answer their commands (a scan's `find` taken for
   // the coding agent's CLI waits for ever). So the suite's `process()` returns
-  // only once both have ended.
-  const coders = t.deps.infra.queue<CoderJob>(CODERS_QUEUE);
+  // only once those that were queued have ended: both, one when the scan's
+  // enqueue failed, none when the reconcile's did (the scan is queued only
+  // after it).
   const register = coders.process.bind(coders);
-  let repoJobs = 2;
+  let ended = 0;
   let repoJobsDone!: () => void;
   const repoJobsEnded = new Promise<void>((resolve) => (repoJobsDone = resolve));
+  const expected = (async () => {
+    if (!reconcileQueued || !(await reconcileQueued)) return 0;
+    return (await await scanQueued) ? 2 : 1;
+  })();
   coders.process = async (handler, options) => {
     await register(async (job) => {
       try {
         return await handler(job);
       } finally {
         const { kind } = job.data;
-        if (
-          (kind === 'reconcile' || kind === 'scan') &&
-          job.data.computerId === started!.id &&
-          --repoJobs === 0
-        ) {
-          repoJobsDone();
+        if ((kind === 'reconcile' || kind === 'scan') && job.data.computerId === started!.id) {
+          if (++ended >= (await expected)) repoJobsDone();
         }
       }
     }, options);
-    await repoJobsEnded;
+    if ((await expected) > ended) await repoJobsEnded;
   };
   const [repo] = await t.db
     .insert(schema.repos)
