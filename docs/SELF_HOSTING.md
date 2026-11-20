@@ -230,6 +230,26 @@ credential.
 the coding agents' session logs, which belong to the machine that runs them. The Artifact host
 keeps serving through the server with either driver (the Cloudflare Worker forwards to it).
 
+**Moving an install that already has files.** Rows written before stay as they are; only where
+their bytes live changes. With the server stopped, or still running on `local` while you copy:
+
+1. Make the bucket and its key, and set the `OPENBOTS_S3_*` settings and
+   `OPENBOTS_STORAGE_DRIVER=s3` in `.env`.
+2. Copy: `docker compose run --rm openbots storage copy` (from a checkout:
+   `pnpm --filter @openbots/server storage copy`). It reads every stored file's record, checks the
+   file on disk against its size and sha256, uploads it, and checks it arrived. `--dry-run` only
+   counts. It prints one line for each file it could not copy (by its id) and a summary, and exits
+   with status 1 if any was missing, did not match its record or failed.
+3. Run it again until it reports nothing left to copy. It skips what is already in the bucket, so it
+   can be stopped and run again at any time, and run once more just before you switch, for files
+   uploaded meanwhile.
+4. `docker compose up -d` with the new settings, and check an old upload and an Artifact open.
+
+It never deletes anything, from the disk or the bucket. Once the server has run on the bucket for a
+while, the old copies under `OPENBOTS_FILES_DIR/orgs/` and its two character directories can be
+removed by hand (keep `connectors/` and `coders/`). To go back to `local`, unset the settings: the
+files on disk are as they were, without anything uploaded since.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
