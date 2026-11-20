@@ -45,6 +45,31 @@ if (redisUrl) {
   });
 }
 
+/**
+ * The registry with its clock moved to ten seconds into a minute. The limits
+ * count in fixed minutes of the registry's clock, so a test that counts across
+ * two relays would otherwise lose its first bytes when the real clock passes
+ * a minute boundary part way through.
+ */
+function earlyInItsMinute(registry: Registry): Registry {
+  let shift: number | undefined;
+  return new Proxy(registry, {
+    get(target, property) {
+      if (property === 'time') {
+        return async () => {
+          const time = await target.time();
+          shift ??= 10_000 - (time % 60_000);
+          return time + shift;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function'
+        ? (value as (...args: unknown[]) => unknown).bind(target)
+        : value;
+    },
+  });
+}
+
 /** A host link through a URL that may be refused, closed or replayed: the linked peer, or why not. */
 async function tryLink(
   url: string,
@@ -87,8 +112,11 @@ async function presence(relay: Relay, host: HostIdentity): Promise<boolean> {
 
 for (const kind of kinds) {
   describe(`relay cluster (${kind.name} registry)`, () => {
-    async function cluster(size: number, extra: Partial<RelayOptions> = {}) {
-      const registry = kind.make();
+    async function cluster(
+      size: number,
+      extra: Partial<RelayOptions> = {},
+      registry: Registry = kind.make(),
+    ) {
       const relays: Relay[] = [];
       for (let i = 0; i < size; i += 1) {
         relays.push(await startRelay({ registry, cluster: CLUSTER, replay: 'fly', ...extra }));
@@ -298,10 +326,11 @@ for (const kind of kinds) {
     });
 
     it('closes the stream 1008 past the host bytes of the minute counted on another relay', async () => {
-      const { relays, proxy } = await cluster(2, {
-        limits: { bytesPerMinute: 1_000 },
-        bytesFlushMs: 20,
-      });
+      const { relays, proxy } = await cluster(
+        2,
+        { limits: { bytesPerMinute: 1_000 }, bytesFlushMs: 20 },
+        earlyInItsMinute(kind.make()),
+      );
       const [a, b] = relays as [Relay, Relay];
       const host = makeHost();
       proxy.landOn(a, a);
