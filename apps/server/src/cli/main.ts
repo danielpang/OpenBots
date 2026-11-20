@@ -1,4 +1,4 @@
-// `openbots pair | devices | relay | artifacts | storage` in the server image (docker/entrypoint.sh),
+// `openbots pair | devices | relay | artifacts | storage | computers` in the server image (docker/entrypoint.sh),
 // or `pnpm --filter @openbots/server pair` and so on. Connects as rotate-key
 // does: the stack's config and database, no HTTP. The commands themselves are
 // in the modules beside this one.
@@ -7,6 +7,7 @@ import { createDb } from '../db/client.js';
 import { scopedDb } from '../db/scope.js';
 import { createInfra } from '../infra/index.js';
 import { runArtifacts } from './artifacts.js';
+import { runComputers } from './computers.js';
 import type { CliContext } from './context.js';
 import { runDevices } from './devices.js';
 import { runPair } from './pair.js';
@@ -19,12 +20,13 @@ const COMMANDS = {
   relay: runRelay,
   artifacts: runArtifacts,
   storage: runStorage,
+  computers: runComputers,
 } as const;
 
 const [name, ...args] = process.argv.slice(2);
 const command = COMMANDS[name as keyof typeof COMMANDS];
 if (!command) {
-  console.error('usage: openbots pair | devices | relay | artifacts | storage');
+  console.error('usage: openbots pair | devices | relay | artifacts | storage | computers');
   process.exit(2);
 }
 

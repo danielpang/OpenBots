@@ -46,6 +46,13 @@ export interface ComputerSpec {
   /** Hosts that skip `egressProxy` (`NO_PROXY`); defaults to `DEFAULT_NO_PROXY`. */
   noProxy?: string;
   timezone?: string;
+  /**
+   * What names the machine where the provider names it (Sprites), instead of
+   * `computerId`. A full reset that keeps the old machine for a while
+   * (`retire`) gives the computer a new key, so its next machine is a new one
+   * and the old one is left alone. Absent on computers never reset that way.
+   */
+  machineKey?: string;
 }
 
 /** What skips the egress proxy unless `noProxy` says otherwise: the computer itself. */
@@ -73,7 +80,10 @@ export interface DestroyOptions {
   state?: boolean;
 }
 
-/** What the provider sees; the server's own status adds `creating`, `starting`, `stopping`, `error`. */
+/**
+ * What the provider sees; the server's own status adds `creating`, `starting`, `stopping`, `error`.
+ * A retired machine reads `missing`: it serves nothing until it is put back.
+ */
 export type MachineStatus = 'running' | 'stopped' | 'missing';
 
 /**
@@ -150,6 +160,24 @@ export interface ComputerProvider {
   listCheckpoints?(ref: ComputerRef): Promise<ComputerCheckpoint[]>;
   /** Replaces what the machine may reach. Sprites only. */
   applyEgressPolicy?(ref: ComputerRef, policy: EgressPolicy): Promise<void>;
+  /**
+   * Takes a machine a full reset replaces out of service but keeps it, disk
+   * and checkpoints included, so an operator can bring it back (`unretire`)
+   * until the server deletes it with `destroy` (home and state). Afterwards
+   * nothing can talk to it: its agent is stopped and removed and its agent
+   * token deleted, its URL is private, its holds are gone so it pauses, it
+   * may reach nothing, and every call on it but `status`, `listCheckpoints`,
+   * `restore`, `unretire` and `destroy` is refused without waking it. Safe
+   * to call again. A provider that has it keeps a machine through a full
+   * reset; one without it (Docker) removes it as before. Sprites only.
+   */
+  retire?(ref: ComputerRef): Promise<void>;
+  /**
+   * Puts a retired machine back in service as far as the provider goes: its
+   * URL and egress policy as configured. Its agent comes back with the next
+   * `create` for the same `machineKey`, which provisions it with a new token.
+   */
+  unretire?(ref: ComputerRef): Promise<void>;
 }
 
 // The computer's paths and the coding agents' users, paths and environment

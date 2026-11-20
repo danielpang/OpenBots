@@ -93,7 +93,7 @@ export function botPublicSlug(
   suffix = randomBytes(4).toString('hex'),
 ): string {
   const budget = Math.min(31, 61 - orgSlug.length);
-  // The same rule as the backfill in drizzle/0048, for Bots made before it.
+  // The same rule as the backfill in drizzle/0049, for Bots made before it.
   const letters =
     handle
       .toLowerCase()
@@ -949,7 +949,7 @@ export async function openLink(
 /**
  * What the artifact host may serve for one request (artifact-host/handler.ts
  * `resolve`): the organization comes from the Bot's public slug alone
- * (`openbots_artifact_host_workspace`, drizzle/0048), and everything else is
+ * (`openbots_artifact_host_workspace`, drizzle/0049), and everything else is
  * read in that organization's scope. The organization slug must match too,
  * and a viewer from a token or cookie counts only in the organization they
  * were signed into.

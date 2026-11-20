@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nextSeq, schema } from '../db/client.js';
 import { createArtifact } from '../services/artifacts.js';
 import type { FilePurpose } from '../services/files.js';
+import { endMembershipAccess } from '../membership.js';
 import { insertRun } from '../services/runs.js';
 import { createTestApp, type TestApp } from '../test-app.js';
 import { ensureWorkspace } from '../workspace.js';
@@ -480,5 +481,32 @@ describe('ownership', () => {
     const fromPhone = await share(paired.key);
     expect(fromPhone.status).toBe(200);
     expect(((await fromPhone.json()) as { visibility: string }).visibility).toBe('public');
+  });
+
+  // Retired computers have no route: support reaches them with
+  // `openbots computers` (services/computer-retire.test.ts). A member's
+  // removal makes only their own due for deletion.
+  it("makes only the removed member's retired computers due, never another's", async () => {
+    const retired = (ownerId: string, ref: string) =>
+      t.db
+        .insert(schema.retiredComputers)
+        .values({
+          workspaceId,
+          ownerId,
+          provider: 'sprites',
+          providerRef: ref,
+          status: 'retired',
+          retiredAt: new Date(),
+          deleteAfter: new Date(Date.now() + 7 * 24 * 60 * 60_000),
+        })
+        .returning()
+        .then(([row]) => row!);
+    const alices = await retired(aliceId, 'ob-ownership-alice');
+    const bobs = await retired(bobId, 'ob-ownership-bob');
+    await endMembershipAccess(t.deps, { userId: bobId, workspaceId, removed: true });
+    const rows = await t.db.select().from(schema.retiredComputers);
+    const after = new Map(rows.map((r) => [r.id, r.deleteAfter.getTime()]));
+    expect(after.get(bobs.id)!).toBeLessThanOrEqual(Date.now());
+    expect(after.get(alices.id)).toBe(alices.deleteAfter.getTime());
   });
 });

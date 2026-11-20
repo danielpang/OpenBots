@@ -30,6 +30,7 @@ const SECTION_4_TABLES = [
   'billing_periods',
   'billing_usage',
   'billing_member_limits',
+  'retired_computers',
   // Coding agents (I6).
   'coder_accounts',
   'repos',

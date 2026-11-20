@@ -1,6 +1,6 @@
 {
-  "id": "5fce9633-a744-44f7-8fdb-bd5ade091615",
-  "prevId": "2a3e6bf2-2a23-41b7-92d0-59ab02db808f",
+  "id": "2a3e6bf2-2a23-41b7-92d0-59ab02db808f",
+  "prevId": "17d02689-38b0-4efd-8e4f-bf848f1f36af",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1068,13 +1068,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "public_slug": {
-          "name": "public_slug",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "('b' || substr(md5(gen_random_uuid()::text), 1, 11))"
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1144,13 +1137,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "bots_public_slug_unique": {
-          "name": "bots_public_slug_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "public_slug"
-          ]
-        },
         "bots_handle_per_owner": {
           "name": "bots_handle_per_owner",
           "nullsNotDistinct": false,
@@ -1162,12 +1148,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "bots_public_slug_format": {
-          "name": "bots_public_slug_format",
-          "value": "\"bots\".\"public_slug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND length(\"bots\".\"public_slug\") BETWEEN 3 AND 40"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.chat_members": {
@@ -2076,12 +2057,6 @@
         "action_class": {
           "name": "action_class",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "consumed_at": {
-          "name": "consumed_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         }
@@ -3410,6 +3385,248 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.retired_computers": {
+      "name": "retired_computers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "computer_id": {
+          "name": "computer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "computer_provider",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_ref": {
+          "name": "provider_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine_key": {
+          "name": "machine_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_url": {
+          "name": "agent_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checkpoint_id": {
+          "name": "checkpoint_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "retired_at": {
+          "name": "retired_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "delete_after": {
+          "name": "delete_after",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_attempt_at": {
+          "name": "last_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "restored_at": {
+          "name": "restored_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "retired_computers_owner": {
+          "name": "retired_computers_owner",
+          "columns": [
+            {
+              "expression": "workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "retired_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "retired_computers_due": {
+          "name": "retired_computers_due",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "delete_after",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "retired_computers_live_ref": {
+          "name": "retired_computers_live_ref",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_ref",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status in ('retiring', 'retired', 'deleting', 'restoring')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "retired_computers_workspace_id_workspaces_id_fk": {
+          "name": "retired_computers_workspace_id_workspaces_id_fk",
+          "tableFrom": "retired_computers",
+          "tableTo": "workspaces",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "retired_computers_owner_id_users_id_fk": {
+          "name": "retired_computers_owner_id_users_id_fk",
+          "tableFrom": "retired_computers",
+          "tableTo": "users",
+          "columnsFrom": [
+            "owner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "retired_computers_computer_id_computers_id_fk": {
+          "name": "retired_computers_computer_id_computers_id_fk",
+          "tableFrom": "retired_computers",
+          "tableTo": "computers",
+          "columnsFrom": [
+            "computer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -6448,32 +6665,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "visibility": {
-          "name": "visibility",
-          "type": "artifact_visibility",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'private'"
-        },
-        "shared_by": {
-          "name": "shared_by",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "shared_at": {
-          "name": "shared_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "taken_down_at": {
-          "name": "taken_down_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6489,29 +6680,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "artifacts_workspace_visibility": {
-          "name": "artifacts_workspace_visibility",
-          "columns": [
-            {
-              "expression": "workspace_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "visibility",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "artifacts_workspace_id_workspaces_id_fk": {
           "name": "artifacts_workspace_id_workspaces_id_fk",
@@ -6576,19 +6745,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "artifacts_shared_by_users_id_fk": {
-          "name": "artifacts_shared_by_users_id_fk",
-          "tableFrom": "artifacts",
-          "tableTo": "users",
-          "columnsFrom": [
-            "shared_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
@@ -8415,15 +8571,6 @@
         "data",
         "design",
         "file"
-      ]
-    },
-    "public.artifact_visibility": {
-      "name": "artifact_visibility",
-      "schema": "public",
-      "values": [
-        "private",
-        "org",
-        "public"
       ]
     },
     "public.file_purpose": {

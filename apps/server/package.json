@@ -35,6 +35,7 @@
     "relay": "tsx --conditions=@openbots/source src/cli/main.ts relay",
     "artifacts": "tsx --conditions=@openbots/source src/cli/main.ts artifacts",
     "storage": "tsx --conditions=@openbots/source src/cli/main.ts storage",
+    "computers": "tsx --conditions=@openbots/source src/cli/main.ts computers",
     "soak": "tsx --conditions=@openbots/source src/soak/main.ts"
   },
   "dependencies": {

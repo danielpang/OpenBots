@@ -122,6 +122,7 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
           Also forget sign-ins: the coding agents' logins and the browser logins the Bots share
         </label>
       )}
+      {done && resetSignIns && <ForgetNotice days={done.keptDays ?? null} />}
       <ErrorText error={checkError} />
       {stale ? (
         <p className="text-sm text-destructive">
@@ -148,6 +149,20 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
         </Button>
       </DialogFooter>
     </div>
+  );
+}
+
+/**
+ * What happens to the old computer when the sign-ins go too. Where the
+ * server keeps it a while, it says so; it never names who runs it.
+ */
+function ForgetNotice({ days }: { days: number | null }) {
+  return (
+    <p className="text-xs text-muted-foreground" data-reset-kept={days ?? 'none'}>
+      {days
+        ? `The old computer is kept for ${days} ${days === 1 ? 'day' : 'days'} in case support needs to restore it. After that it is deleted for good.`
+        : 'The old computer and its sign-ins are deleted for good. This cannot be undone.'}
+    </p>
   );
 }
 
