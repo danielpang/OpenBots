@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buffer } from 'node:stream/consumers';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../config.js';
 import { schema } from '../db/client.js';
@@ -186,5 +187,49 @@ describe('the storage copy command', () => {
       const { stream } = await t.inOrganization(() => openFile(deps, owner, f.id), f.workspaceId);
       expect(new Uint8Array(await buffer(stream))).toEqual(f.bytes);
     }
+  });
+
+  it('points at s3:ListBucket when a lookup is refused with 403, as AWS answers for a missing key', async () => {
+    const [, , , , e] = stored;
+    s3.objects.delete(objectKey(e!));
+    // AWS, to a key that may not list the bucket, says 403 AccessDenied for "no such key".
+    s3.fail(1, { status: 403, code: 'AccessDenied' }, 'HEAD');
+    expect(await runStorage(['copy'], ctx())).toBe(1);
+    const refused = lines.filter((l) => l.includes('HTTP 403'));
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toContain('s3:ListBucket');
+    expect(refused[0]).not.toContain(s3.bucket);
+    expect(refused[0]).not.toContain('prod/orgs');
+    // The next run, with the lookup answered, copies it.
+    expect(await runStorage(['copy'], ctx())).toBe(1);
+    expect(s3.objects.has(objectKey(e!))).toBe(true);
+  });
+
+  it('pages through the rows, including one added while it runs', async () => {
+    s3.objects.clear();
+    s3.requests.length = 0;
+    // The first upload stalls; meanwhile a file is uploaded in its organization
+    // whose id sorts after every other, so it is on a page not read yet.
+    const put = s3.hold('PUT');
+    const run = runStorage(['copy'], ctx(), { pageSize: 2 });
+    await put.reached;
+    const held = s3.requests.find((q) => q.method === 'PUT')!.key;
+    const workspaceId = held.split('/')[2]!;
+    const owner = owners.find((o) => o.workspaceId === workspaceId)!;
+    const bytes = new TextEncoder().encode('uploaded during the copy');
+    const row = await t.inOrganization(
+      () => storeFile(t.deps, owner, { name: 'late.txt', bytes, purpose: 'attachment' }),
+      workspaceId,
+    );
+    const lastId = 'ffffffff-ffff-4fff-bfff-ffffffffffff';
+    await t.db.update(schema.files).set({ id: lastId }).where(eq(schema.files.id, row.id));
+    put.release();
+    // Two missing or mismatched from the test above; every other row, the late one too.
+    expect(await run).toBe(1);
+    expect(lines.at(-1)).toMatch(
+      /^Copied 6 of 8 files in 2 organizations; 0 already in the object store, 1 missing .*, 1 not matching their record, 0 failed/,
+    );
+    expect(s3.objects.get(`prod/orgs/${row.storageKey}`)).toEqual(Buffer.from(bytes));
+    await t.db.delete(schema.files).where(eq(schema.files.id, lastId));
   });
 });

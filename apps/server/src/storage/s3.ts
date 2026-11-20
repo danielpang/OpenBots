@@ -31,6 +31,10 @@ import {
 //   bucket, the endpoint, the key or a credential.
 // - Content type and length are recorded on the row, not trusted from the
 //   object: every object is sent as application/octet-stream.
+// - A ranged read must come back as a 206 from the offset asked for; a
+//   whole object (a store or proxy that ignored Range) is refused, not read.
+// - Redirects are not followed: a 3xx is refused, as a sign of the wrong
+//   region or endpoint.
 
 export interface S3StorageConfig {
   driver: 's3';
@@ -168,6 +172,14 @@ export class S3BlobStore implements BlobStore {
       return Readable.from([]);
     }
     if (!res.ok) throw await refused(res);
+    if (range && !partFrom(res, range.offset)) {
+      // A store or proxy that ignored Range: its body is not the bytes asked for.
+      await discard(res);
+      throw new StorageError(
+        'unavailable',
+        `Object storage answered a ranged read with other bytes (HTTP ${res.status})`,
+      );
+    }
     if (!res.body) return Readable.from([]);
     return Readable.from(chunks(res.body, this.idleMs, abort), { objectMode: false });
   }
@@ -227,9 +239,19 @@ export class S3BlobStore implements BlobStore {
           headers: signed.headers,
           body,
           signal: controller.signal,
+          // A redirect is refused below: followed, it would read another
+          // origin's body as the blob, or send the signature on.
+          redirect: 'manual',
           ...(body && request.body?.kind === 'stream' ? { duplex: 'half' } : {}),
         } as RequestInit);
         clearTimeout(timer);
+        if (res.status >= 300 && res.status < 400) {
+          await discard(res);
+          throw new StorageError(
+            'rejected',
+            `Object storage answered with a redirect (HTTP ${res.status}); check that OPENBOTS_S3_REGION and OPENBOTS_S3_ENDPOINT name the bucket's own region and endpoint`,
+          );
+        }
         if (res.status >= 500 || res.status === 429) {
           last = await refused(res);
           await discard(res);
@@ -292,6 +314,13 @@ async function* chunks(
   }
 }
 
+/** Whether a ranged read's answer is a 206 whose Content-Range starts at `offset`. */
+function partFrom(res: Response, offset: number): boolean {
+  if (res.status !== 206) return false;
+  const start = /^bytes (\d+)-\d+\/(?:\d+|\*)$/.exec(res.headers.get('content-range') ?? '');
+  return !!start && Number(start[1]) === offset;
+}
+
 /** Reads and drops a response's body, so its connection is free again. */
 async function discard(res: Response) {
   await res.body?.cancel().catch(() => {});
@@ -317,7 +346,7 @@ async function refused(res: Response): Promise<StorageError> {
   ) {
     return new StorageError('integrity', `Object storage refused the body (${what})`);
   }
-  return new StorageError('rejected', `Object storage refused the request (${what})`);
+  return new StorageError('rejected', `Object storage refused the request (${what})`, res.status);
 }
 
 /** An errno such as ECONNREFUSED from a fetch failure, never its message (it names the host). */

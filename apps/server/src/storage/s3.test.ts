@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { createServer, type AddressInfo } from 'node:net';
 import { buffer } from 'node:stream/consumers';
+import { AwsV4Signer } from 'aws4fetch';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isStorageError, StorageError, type BlobRef } from './index.js';
 import { MAX_SINGLE_PUT, S3BlobStore, type S3Options, type S3StorageConfig } from './s3.js';
@@ -212,5 +214,131 @@ describe('the S3 blob store', () => {
     expect(isStorageError(error, 'integrity')).toBe(true);
     expect((error as Error).message).toContain('XAmzContentSHA256Mismatch');
     expect(s3.requests).toHaveLength(1);
+  });
+
+  it('refuses the whole object in answer to a ranged read', async () => {
+    const r = ref();
+    const ten = new TextEncoder().encode('0123456789');
+    await store().put(r, ten, { size: 10, sha256: sha(ten) });
+    // A store (or a proxy on the way) that ignores Range answers 200 and everything.
+    const ignoring: typeof fetch = (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.delete('range');
+      return fetch(input, { ...init, headers });
+    };
+    const error = await store({}, { fetch: ignoring })
+      .get(r, { offset: 5, length: 3 })
+      .then(buffer)
+      .catch((e: unknown) => e);
+    expect(isStorageError(error, 'unavailable')).toBe(true);
+    expectNothingSecret(error, r.storageKey);
+    // A 206 for other bytes than the ones asked for is refused too.
+    const elsewhere: typeof fetch = async () =>
+      new Response('012', { status: 206, headers: { 'content-range': 'bytes 0-2/10' } });
+    const shifted = await store({}, { fetch: elsewhere })
+      .get(r, { offset: 5, length: 3 })
+      .catch((e: unknown) => e);
+    expect(isStorageError(shifted, 'unavailable')).toBe(true);
+    // The real answer, a 206 from the offset asked for, is read.
+    expect((await buffer(await store().get(r, { offset: 5, length: 3 }))).toString()).toBe('567');
+  });
+
+  it('follows no redirect, and says where to look without naming the bucket or key', async () => {
+    const r = ref();
+    let reached = 0;
+    const elsewhere = createHttpServer((_req, res) => {
+      reached++;
+      res.writeHead(200, { 'content-length': '5' });
+      res.end('other');
+    });
+    await new Promise<void>((resolve) => elsewhere.listen(0, '127.0.0.1', resolve));
+    const target = `http://localhost:${(elsewhere.address() as AddressInfo).port}/x`;
+    const redirector = createHttpServer((_req, res) => {
+      res.writeHead(307, { location: target });
+      res.end();
+    });
+    await new Promise<void>((resolve) => redirector.listen(0, '127.0.0.1', resolve));
+    const endpoint = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+    try {
+      for (const call of [
+        (s: S3BlobStore) => s.get(r).then(buffer),
+        (s: S3BlobStore) => s.head(r),
+        (s: S3BlobStore) => s.put(r, bytes, { size: bytes.byteLength, sha256: sha(bytes) }),
+        (s: S3BlobStore) => s.delete(r),
+      ]) {
+        const error = await call(store({ endpoint })).catch((e: unknown) => e);
+        expect(isStorageError(error, 'rejected')).toBe(true);
+        expect((error as Error).message).toMatch(/redirect \(HTTP 307\).*OPENBOTS_S3_REGION/);
+        expectNothingSecret(error, r.storageKey);
+        expect((error as Error).message).not.toContain(endpoint);
+      }
+      expect(reached).toBe(0);
+    } finally {
+      elsewhere.close();
+      redirector.close();
+    }
+  });
+
+  it('reaches the bucket by its hostname, as AWS addresses it', async () => {
+    // <bucket>.<host> does not resolve here: send it to the stand-in with that Host.
+    const port = new URL(s3.endpoint).port;
+    const byHostname: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.hostname).toBe(`${s3.bucket}.storage.test`);
+      const headers = {
+        ...Object.fromEntries(new Headers(init?.headers).entries()),
+        host: url.host,
+      };
+      const body = init?.body ? Buffer.from(init.body as Uint8Array) : undefined;
+      return new Promise<Response>((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port, path: url.pathname, method: init?.method, headers },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => {
+              const empty = init?.method === 'HEAD' || res.statusCode === 204;
+              resolve(
+                new Response(empty ? null : Buffer.concat(chunks), {
+                  status: res.statusCode!,
+                  headers: res.headers as Record<string, string>,
+                }),
+              );
+            });
+          },
+        );
+        req.on('error', reject);
+        req.end(body);
+      });
+    };
+    const hosted = store(
+      { endpoint: `http://storage.test:${port}`, pathStyle: false },
+      { fetch: byHostname },
+    );
+    const r = ref();
+    await hosted.put(r, bytes, { size: bytes.byteLength, sha256: sha(bytes) });
+    const put = s3.requests.find((q) => q.method === 'PUT')!;
+    expect(put.headers.host).toBe(`${s3.bucket}.storage.test:${port}`);
+    expect(put.key).toBe(`orgs/${workspaceId}/${r.storageKey.split('/')[1]}`);
+    expect(await hosted.head(r)).toEqual({ size: bytes.byteLength });
+    expect((await buffer(await store().get(r))).toString()).toBe('object body');
+  });
+
+  it('is refused by the stand-in for an unsigned payload, even signed correctly otherwise', async () => {
+    const url = `${s3.endpoint}/${s3.bucket}/orgs/${workspaceId}/unsigned`;
+    const signed = await new AwsV4Signer({
+      method: 'PUT',
+      url,
+      headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' },
+      body: bytes,
+      accessKeyId: s3.accessKeyId,
+      secretAccessKey: s3.secretAccessKey,
+      service: 's3',
+      region: s3.region,
+    }).sign();
+    const res = await fetch(signed.url, { method: 'PUT', headers: signed.headers, body: bytes });
+    expect(await res.text()).toContain('<Code>InvalidRequest</Code>');
+    expect(res.status).toBe(400);
+    expect(s3.objects.has(`orgs/${workspaceId}/unsigned`)).toBe(false);
   });
 });

@@ -80,6 +80,8 @@ export class StorageError extends Error {
   constructor(
     readonly kind: StorageErrorKind,
     message: string,
+    /** The store's HTTP status, when it answered with one. */
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'StorageError';

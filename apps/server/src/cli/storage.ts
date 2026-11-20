@@ -3,7 +3,13 @@ import { createReadStream } from 'node:fs';
 import { and, asc, eq, gt } from 'drizzle-orm';
 import { schema } from '../db/client.js';
 import { forEachWorkspace } from '../db/scope.js';
-import { blobStore, isStorageError, type BlobRef, type BlobStore } from '../storage/index.js';
+import {
+  blobStore,
+  isStorageError,
+  StorageError,
+  type BlobRef,
+  type BlobStore,
+} from '../storage/index.js';
 import { LocalBlobStore } from '../storage/local.js';
 import type { CliContext, CliResult } from './context.js';
 
@@ -17,8 +23,11 @@ import type { CliContext, CliResult } from './context.js';
 // sha256), sent with that sha256 for the store to check, and looked up
 // again afterwards. One already in the store at the right size is skipped,
 // so the command can be stopped and run again, and run again after a
-// later sync while the old server is still up. It never deletes anything,
-// from either side. Lines name files by their id only.
+// later sync while the old server is still up. It reads the rows a page at
+// a time by id, so a file uploaded while it runs is copied when its id
+// sorts after the page being read, and otherwise by the next run (which is
+// why the move to s3 ends with a run while the server is stopped). It never
+// deletes anything, from either side. Lines name files by their id only.
 
 export const STORAGE_USAGE = 'usage: openbots storage copy [--dry-run]';
 
@@ -34,7 +43,18 @@ interface Counts {
   failed: number;
 }
 
-export async function runStorage(args: string[], ctx: CliContext): CliResult {
+/**
+ * AWS answers 403, not 404, for a key that is not there when the access key
+ * may not list the bucket: what the copy's first lookup of every file sees.
+ */
+export const LIST_BUCKET_HINT =
+  'object storage refused to look the file up (HTTP 403). On AWS, a missing object answers 403 unless the access key may list the bucket: give it s3:ListBucket on the bucket as well as object read, write and delete (docs/SELF_HOSTING.md)';
+
+export async function runStorage(
+  args: string[],
+  ctx: CliContext,
+  { pageSize = PAGE }: { pageSize?: number } = {},
+): CliResult {
   const { config, write } = ctx;
   const [command, ...flags] = args;
   if (command !== 'copy' || flags.some((flag) => flag !== '--dry-run')) {
@@ -80,7 +100,7 @@ export async function runStorage(args: string[], ctx: CliContext): CliResult {
           ),
         )
         .orderBy(asc(schema.files.id))
-        .limit(PAGE);
+        .limit(pageSize);
       for (const row of rows) {
         counts.files++;
         const outcome = await copyOne(source, target, row, dryRun).catch((error: unknown) => {
@@ -96,7 +116,7 @@ export async function runStorage(args: string[], ctx: CliContext): CliResult {
           write(outcome);
         }
       }
-      if (rows.length < PAGE) break;
+      if (rows.length < pageSize) break;
       after = rows[rows.length - 1]!.id;
     }
   });
@@ -122,7 +142,12 @@ async function copyOne(
   row: Row,
   dryRun: boolean,
 ): Promise<string> {
-  const there = await target.head(row);
+  const there = await target.head(row).catch((error: unknown) => {
+    if (isStorageError(error, 'rejected') && error.status === 403) {
+      throw new StorageError('rejected', LIST_BUCKET_HINT, 403);
+    }
+    throw error;
+  });
   if (there && there.size === row.size) return 'present';
   const here = await source.head(row);
   if (!here) return `missing: file ${row.id} is not on local disk`;
