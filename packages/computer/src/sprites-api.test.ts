@@ -517,6 +517,27 @@ describe('the Sprites SDK adapter', () => {
       expect(JSON.parse(fake.seen[0]!.body.toString())).toEqual(policy);
     });
 
+    it('reads the policy back, none as null', async () => {
+      const { fake, client } = await setup();
+      const answers = [
+        { status: 200, body: { rules: [{ domain: '*', action: 'deny' }] } },
+        { status: 404, body: { error: 'no policy' } },
+      ];
+      fake.route = (seen, res) => {
+        if (seen.url.pathname !== '/v1/sprites/s1/policy/network') return false;
+        const answer = answers.shift()!;
+        json(res, answer.status, answer.body);
+      };
+      expect(await client.getNetworkPolicy('s1')).toEqual({
+        rules: [{ domain: '*', action: 'deny' }],
+      });
+      expect(await client.getNetworkPolicy('s1')).toBeNull();
+      expect(fake.seen.map((s) => [s.method, s.authorization])).toEqual([
+        ['GET', `Bearer ${TOKEN}`],
+        ['GET', `Bearer ${TOKEN}`],
+      ]);
+    });
+
     it('reports a refused policy with its status', async () => {
       const { fake, client } = await setup();
       fake.route = (_, res) => json(res, 400, { error: 'invalid rule' });
