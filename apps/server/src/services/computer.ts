@@ -39,6 +39,7 @@ import {
   lt,
   ne,
   not,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -63,7 +64,7 @@ import {
   type UseReason,
 } from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
-import { computerBusy, retainsOnReset, retireMachine } from './computer-retire.js';
+import { computerBusy, computerChanged, retainsOnReset, retireMachine } from './computer-retire.js';
 import { fenceComputer, isFenced } from './computer-fence.js';
 import { beginStartWork, endStartWork } from './computer-start-work.js';
 
@@ -911,11 +912,14 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   await afterStart(deps, owner, row, job.by, began);
 }
 
-/** What a provisioning job's writes require of the row: its attempt and its machine key. */
+/** What a provisioning job's writes require of the row: its attempt (or none) and its machine key. */
 function jobGuard(row: ComputerRow, job: ProvisionJob): SQL {
   const attemptOf = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
   return and(
-    job.attempt ? sql`${attemptOf} = ${job.attempt}` : undefined,
+    // Its own attempt, or none: a queue whose answer was lost gives the
+    // attempt back (`queueProvision`), and the job's work still stands for
+    // the same machine unless another start claimed the row meanwhile.
+    job.attempt ? sql`(${attemptOf} = ${job.attempt} or ${attemptOf} is null)` : undefined,
     row.machineKey === null
       ? isNull(schema.computers.machineKey)
       : eq(schema.computers.machineKey, row.machineKey),
@@ -1248,7 +1252,31 @@ export async function destroyComputer(
   // `stopMachine` ends the coding sessions; with nothing to stop, they end here.
   const stops = !!row.agentUrl && row.status !== 'stopped';
   if (stops) {
-    row = await stopComputer(deps, row, by).catch(async (error: unknown) => {
+    // Claimed for the stop, so a second reset at once is refused here
+    // rather than stopping the machine under the first one.
+    const [claimed] = await deps.db
+      .update(schema.computers)
+      .set({ status: 'stopping' })
+      .where(
+        and(
+          eq(schema.computers.id, row.id),
+          notInArray(schema.computers.status, [...BUSY]),
+          row.containerId === null
+            ? isNull(schema.computers.containerId)
+            : eq(schema.computers.containerId, row.containerId),
+        ),
+      )
+      .returning();
+    if (!claimed) {
+      const [now] = await deps.db
+        .select({ status: schema.computers.status })
+        .from(schema.computers)
+        .where(eq(schema.computers.id, row.id));
+      throw now && BUSY.has(now.status) ? computerBusy(now.status) : computerChanged();
+    }
+    endStartWork(row.id);
+    await publishStatus(deps, claimed, 'stopping');
+    row = await stopMachine(deps, claimed, by).catch(async (error: unknown) => {
       deps.logger.warn({ err: error, computerId: row.id }, 'stop before reset failed');
       const [now] = await deps.db
         .select()
