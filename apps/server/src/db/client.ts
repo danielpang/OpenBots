@@ -19,10 +19,71 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
  */
 export type SessionLock = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
 
-/** Connections a process holds advisory locks on: one per lock held or waited for. */
+/** Connections a process holds advisory locks on: one per key held or waited for. */
 const LOCK_CONNECTIONS = 8;
+/**
+ * The longest a lock is waited for, in this process and in the database
+ * together: then it fails (`SessionLockTimeout`), and the job that wanted it
+ * fails cleanly for the queue to retry, instead of holding a connection.
+ */
+export const SESSION_LOCK_WAIT_MS = 60_000;
 
-export function createDb(url: string, options: postgres.Options<Record<string, never>> = {}) {
+/** A session lock not had within its wait. */
+export class SessionLockTimeout extends Error {
+  constructor(key: string) {
+    super(`Another operation held the lock ${key} for too long; try again`);
+    this.name = 'SessionLockTimeout';
+  }
+}
+
+/**
+ * Whether a database URL goes through a transaction-mode pooler (Neon's
+ * `-pooler` host, PgBouncer's usual port or flag), where a session advisory
+ * lock lands on whichever server connection the pooler hands out: its
+ * unlock can miss it, and the lock then leaks.
+ */
+export function looksPooled(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      /-pooler(\.|$)/.test(parsed.hostname) ||
+      parsed.port === '6543' ||
+      parsed.searchParams.get('pgbouncer') === 'true'
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface CreateDbOptions {
+  /**
+   * A direct (not pooled) URL to the same database for session-level
+   * features, the advisory locks; `url` by default (DATABASE_DIRECT_URL).
+   */
+  sessionUrl?: string;
+  /** `SESSION_LOCK_WAIT_MS` unless a test sets it. */
+  lockWaitMs?: number;
+}
+
+/** Rejects with `SessionLockTimeout` once `deadline` passes, unless `promise` settles first. */
+function within<T>(promise: Promise<T>, deadline: number, key: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new SessionLockTimeout(key)),
+        Math.max(0, deadline - Date.now()),
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+export function createDb(
+  url: string,
+  options: postgres.Options<Record<string, never>> = {},
+  { sessionUrl = url, lockWaitMs = SESSION_LOCK_WAIT_MS }: CreateDbOptions = {},
+) {
   const client = postgres(url, { onnotice: () => {}, ...options });
   const db = drizzle(client, { schema });
   // Advisory locks are held on connections of their own, never the pool's
@@ -30,21 +91,67 @@ export function createDb(url: string, options: postgres.Options<Record<string, n
   // a waiter holds, and the lock is taken outside any transaction, so it
   // never waits on a row lock. A process that dies drops its connections,
   // and with them its locks.
+  //
+  // In front of the database, one queue per key in this process: of its
+  // operations on one key, one holds a connection (and the lock) and the
+  // rest wait here, so a slow holder with many waiters takes one
+  // connection, never the pool every other key needs. Every wait is bounded.
+  const refused = looksPooled(sessionUrl)
+    ? 'The database URL goes through a connection pooler, where session locks leak; set DATABASE_DIRECT_URL to a direct connection to the same database'
+    : null;
   let locks: postgres.Sql | undefined;
+  const queues = new Map<string, Promise<void>>();
   const withSessionLock: SessionLock = async (key, fn) => {
-    locks ??= postgres(url, { onnotice: () => {}, ...options, max: LOCK_CONNECTIONS });
-    const held = await locks.reserve();
+    if (refused) throw new Error(refused);
+    const deadline = Date.now() + lockWaitMs;
+    const before = queues.get(key) ?? Promise.resolve();
+    let done!: () => void;
+    const mine = new Promise<void>((resolve) => (done = resolve));
+    // The next one here waits for this one and every one before it.
+    const tail = before.then(() => mine);
+    queues.set(key, tail);
     try {
-      await held`select pg_advisory_lock(hashtextextended(${key}, 0))`;
-      try {
-        return await fn();
-      } finally {
-        await held`select pg_advisory_unlock(hashtextextended(${key}, 0))`.catch(() =>
-          held`select pg_advisory_unlock_all()`.catch(() => undefined),
+      await within(before, deadline, key);
+      locks ??= postgres(sessionUrl, { onnotice: () => {}, ...options, max: LOCK_CONNECTIONS });
+      const reserving = locks.reserve();
+      const held = await within(reserving, deadline, key).catch((error: unknown) => {
+        // Taken after all, once nobody waits for it: given straight back.
+        void reserving.then(
+          (late) => late.release(),
+          () => undefined,
         );
+        throw error;
+      });
+      let healthy = true;
+      try {
+        const wait = Math.max(1, deadline - Date.now());
+        await held`select set_config('lock_timeout', ${`${wait}ms`}, false)`;
+        try {
+          await held`select pg_advisory_lock(hashtextextended(${key}, 0))`;
+        } catch (error) {
+          if ((error as { code?: string }).code === '55P03') throw new SessionLockTimeout(key);
+          throw error;
+        }
+        await held`select set_config('lock_timeout', '0', false)`;
+        try {
+          return await fn();
+        } finally {
+          // An unlock that did not release the lock (it ran on a session that
+          // did not hold it): the connection goes, and the lock with it.
+          const [row] = await held<{ ok: boolean }[]>`
+            select pg_advisory_unlock(hashtextextended(${key}, 0)) as ok
+          `.catch(() => [{ ok: false }]);
+          if (row?.ok !== true) healthy = false;
+        }
+      } finally {
+        if (!healthy) {
+          await held`select pg_terminate_backend(pg_backend_pid())`.catch(() => undefined);
+        }
+        held.release();
       }
     } finally {
-      held.release();
+      done();
+      if (queues.get(key) === tail) queues.delete(key);
     }
   };
   return Object.assign(db, {
@@ -53,6 +160,8 @@ export function createDb(url: string, options: postgres.Options<Record<string, n
       await locks?.end();
     },
     withSessionLock,
+    /** Why the session locks are refused here, or null. */
+    sessionLockProblem: refused,
   });
 }
 

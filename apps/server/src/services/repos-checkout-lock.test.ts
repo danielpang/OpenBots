@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { schema } from '../db/client.js';
+import { createDb, schema } from '../db/client.js';
 import { rowsOf } from '../db/scope.js';
 import { coderWorld, defaultGit, gitArgs, type CoderWorld } from './__fixtures__/coders/setup.js';
 import { computerProvider } from './computer.js';
@@ -47,6 +47,21 @@ describe.runIf(process.env.DATABASE_URL)('checkout lock across processes', () =>
     const otherComputer = await import('./computer.js');
     otherComputer.setComputerProvider(w.t.ownerDeps, provider);
     const other = await import('./repos-checkout.js');
+    // And its own connections to the database, as another process has: each
+    // process queues its own operations on a key in front of the database
+    // (db/client.ts), so only another pool's lock waits in Postgres.
+    const [{ name }] = rowsOf<{ name: string }>(
+      await w.t.db.execute(sql`select current_database() as name`),
+    ) as [{ name: string }];
+    const url = new URL(process.env.DATABASE_URL!);
+    url.pathname = `/${name}`;
+    const pool = createDb(url.toString());
+    const otherDeps = {
+      ...w.t.deps,
+      db: Object.assign(Object.create(w.t.deps.db) as typeof w.t.deps.db, {
+        withSessionLock: pool.withSessionLock,
+      }),
+    };
     // The disk: the path is empty until a clone finishes; a second clone there fails.
     let cloned = false;
     w.coder.git = (args) => {
@@ -82,7 +97,7 @@ describe.runIf(process.env.DATABASE_URL)('checkout lock across processes', () =>
       await inside;
       // The session's checkout, in the other process, while the clone runs.
       const session = w.t.inOrganization(() =>
-        other.ensureCheckout(w.t.deps, w.repoId, computerId, 'update'),
+        other.ensureCheckout(otherDeps, w.repoId, computerId, 'update'),
       );
       // It waits on the lock, which the reconcile holds in Postgres (or, with
       // no lock across processes, it clones meanwhile and finishes first).
@@ -106,6 +121,7 @@ describe.runIf(process.env.DATABASE_URL)('checkout lock across processes', () =>
       w.coder.coder = coder;
       w.coder.git = defaultGit;
       go();
+      await pool.close();
     }
     const clones = w.coder.gitCalls().filter((args) => args[0] === 'clone');
     expect(clones).toHaveLength(1);

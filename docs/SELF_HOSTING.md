@@ -63,6 +63,11 @@ In `.env`:
    does not start without it.
 3. Set `OPENBOTS_DB_APP_PASSWORD=` to the second password. The server uses it for a database role
    held to row-level security between organizations.
+   If `DATABASE_URL` goes through a connection pooler (a hosted database's pooled host, such as
+   one with `-pooler` in its name, or PgBouncer), also set `DATABASE_DIRECT_URL=` to a direct
+   connection to the same database. The server holds the locks that keep two operations on one
+   repository checkout apart on that connection, since a pooler can lose them. It refuses those
+   locks, and says so at start, when the only URL looks pooled. Left empty, `DATABASE_URL` is used.
 4. From a fork, set `OPENBOTS_IMAGE_PREFIX=ghcr.io/<owner in lower case>/openbots`.
 5. Optional: add a model provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...), or add
    providers later in Settings > Models.
