@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -7,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -16,6 +18,7 @@ import { SPRITES_MAX_WRITE_BYTES } from './sprites-api.js';
 import {
   createSpritesProvider,
   isEgressDomain,
+  PROVISION_LOCKED_EXIT,
   PROVISION_STAGING_DIR,
   PROVISION_VERSION_FILE,
   prepareStaging,
@@ -73,6 +76,16 @@ function setup(options: Partial<SpritesProviderOptions> = {}) {
 
 const execs = (api: FakeSpritesApi) =>
   api.calls.filter((c) => c.op === 'exec').map((c) => (c.args[0] as string[]).join(' '));
+
+/** The staging directories the uploads went to, in order. */
+const stagings = (api: FakeSpritesApi) => [
+  ...new Set(
+    api.calls
+      .filter((c) => c.op === 'writeFile')
+      .map((c) => (c.args[0] as string).replace(/\/[^/]+$/, '')),
+  ),
+];
+const STAGING = new RegExp(`^${PROVISION_STAGING_DIR}-[0-9a-f]{16}$`);
 
 describe('Sprite names and egress', () => {
   it('derives the name from the computer id, lower case, without dashes', () => {
@@ -143,15 +156,19 @@ describe('the sprites provider', () => {
     expect(JSON.stringify((run.args[1] as { env: unknown }).env)).not.toContain(
       'secret-agent-token',
     );
+    const [staging] = stagings(api);
+    expect(staging).toMatch(STAGING);
     expect(run.args[0]).toEqual([
       'bash',
       '-c',
       expect.stringContaining('exec bash "$0" "$1"'),
-      `${PROVISION_STAGING_DIR}/provision.sh`,
-      `${PROVISION_STAGING_DIR}/agent-bundle.tgz`,
+      `${staging}/provision.sh`,
+      `${staging}/agent-bundle.tgz`,
     ]);
+    // It may not run on unobserved once our connection to it is gone.
+    expect(run.args[1]).toMatchObject({ maxRunAfterDisconnect: '1s' });
     // The staging directory goes once the script succeeded.
-    expect(execs(api).at(-1)).toContain(`rm -rf ${PROVISION_STAGING_DIR}`);
+    expect(execs(api).at(-1)).toContain(`rm -rf ${staging}`);
     expect([...sprite.files.keys()]).toEqual([PROVISION_VERSION_FILE]);
   });
 
@@ -159,7 +176,13 @@ describe('the sprites provider', () => {
     const { api, provider } = setup();
     await provider.create(spec);
     const first = api.calls.find((c) => c.op === 'exec')!.args[0] as string[];
-    expect(first).toEqual(['bash', '-c', expect.any(String), 'as-root', prepareStaging()]);
+    expect(first).toEqual([
+      'bash',
+      '-c',
+      expect.any(String),
+      'as-root',
+      prepareStaging(stagings(api)[0]!),
+    ]);
 
     // Run for real on a stand-in path: a directory the Bot made (with its own
     // script in it) and a link it planted both give way to a new directory.
@@ -200,11 +223,83 @@ describe('the sprites provider', () => {
     await provider.create(spec);
     expect(seen).toBe(big.byteLength);
     const writes = api.calls.filter((c) => c.op === 'writeFile').map((c) => c.args[0]);
+    const [staging] = stagings(api);
     expect(writes).toEqual([
-      `${PROVISION_STAGING_DIR}/provision.sh`,
-      `${PROVISION_STAGING_DIR}/agent-bundle.tgz.part0000`,
-      `${PROVISION_STAGING_DIR}/agent-bundle.tgz.part0001`,
+      `${staging}/provision.sh`,
+      `${staging}/agent-bundle.tgz.part0000`,
+      `${staging}/agent-bundle.tgz.part0001`,
     ]);
+  });
+
+  it('stages each attempt apart, so a late upload from an earlier one cannot replace its files', async () => {
+    const { api, provider } = setup();
+    let attempt = 0;
+    const ran: string[] = [];
+    api.provisionScript = (sprite, run) => {
+      attempt += 1;
+      ran.push(new TextDecoder().decode(sprite.files.get(run.script)));
+      if (attempt === 1) {
+        // The first attempt times out; its upload of an older script lands
+        // only now, after the second attempt staged its own.
+        return { exitCode: 1, stdout: '', stderr: 'timed out' };
+      }
+      sprite.files.set(PROVISION_VERSION_FILE, new TextEncoder().encode('7'));
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    api.execHook = (sprite, argv) => {
+      // Before the second attempt's script runs, a straggler from the first.
+      if (attempt === 1 && argv.join(' ').includes('read -r')) {
+        const [first] = stagings(api);
+        sprite.files.set(`${first}/provision.sh`, new TextEncoder().encode('echo stale'));
+      }
+      return undefined;
+    };
+    await expect(provider.create(spec)).rejects.toThrow(/exit 1/);
+    await provider.create(spec);
+    const [first, second] = stagings(api);
+    expect(first).toMatch(STAGING);
+    expect(second).toMatch(STAGING);
+    expect(second).not.toBe(first);
+    expect(ran).toEqual([new TextDecoder().decode(SCRIPT), new TextDecoder().decode(SCRIPT)]);
+    // Each attempt removes its own directory, the failed one too.
+    expect(execs(api).filter((e) => e.includes(`rm -rf ${first}`))).toHaveLength(1);
+    expect(execs(api).filter((e) => e.includes(`rm -rf ${second}`))).toHaveLength(1);
+  });
+
+  it('reports another provisioning that holds the lock as a failure, not as done', async () => {
+    const { api, provider } = setup();
+    api.provisionScript = (sprite) => {
+      // Even with a version on the disk from the run that holds the lock.
+      sprite.files.set(PROVISION_VERSION_FILE, new TextEncoder().encode('7'));
+      return {
+        exitCode: PROVISION_LOCKED_EXIT,
+        stdout: '',
+        stderr: 'another provisioning is still running',
+      };
+    };
+    await expect(provider.create(spec)).rejects.toThrow(/Another provisioning of the Sprite/);
+  });
+
+  it('sweeps staging directories left over an hour ago, and only those', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sweep-'));
+    const asSudo = { ...process.env, SUDO_USER: userInfo().username };
+    try {
+      const old = join(root, 'openbots-provision-00000000000000aa');
+      const recent = join(root, 'openbots-provision-00000000000000bb');
+      const other = join(root, 'something-else');
+      for (const dir of [old, recent, other]) mkdirSync(dir);
+      const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+      utimesSync(old, twoHoursAgo, twoHoursAgo);
+      utimesSync(other, twoHoursAgo, twoHoursAgo);
+      const mine = join(root, 'openbots-provision-00000000000000cc');
+      execFileSync('bash', ['-c', prepareStaging(mine)], { env: asSudo });
+      expect(existsSync(old)).toBe(false);
+      expect(existsSync(recent)).toBe(true);
+      expect(existsSync(other)).toBe(true);
+      expect(existsSync(mine)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('reports a failed provisioning with the script output', async () => {
@@ -387,7 +482,8 @@ describe('the sprites provider', () => {
     const ref = await provider.create(spec);
     const files = () => api.sprites.get(NAME)!.files;
     files().set('/home/bot/a', new Uint8Array([1]));
-    const id = await provider.checkpoint!(ref, 'before upgrade');
+    const id = (await provider.checkpoint!(ref, 'before upgrade'))!;
+    expect(id).toEqual(expect.any(String));
     files().delete('/home/bot/a');
     expect(await provider.listCheckpoints!(ref)).toEqual([
       { id, createdAt: expect.any(String), comment: 'before upgrade' },

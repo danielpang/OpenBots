@@ -13,7 +13,10 @@
 # OPENBOTS_PROVISION_VERSION to /opt/openbots/provision.version and exits 0.
 #
 # It is safe to run again: for an upgrade (a new bundle), to rotate the token,
-# or after a run that failed half way. Each step checks what is already there.
+# or after a run that failed half way. Each step checks what is already there,
+# and a run that fails leaves the agent that ran before it runnable. One run
+# at a time: a second one waits for the first's lock, and exits 75 if it is
+# still held after PROVISION_LOCK_WAIT seconds (default 300).
 # PROVISION_DRY_RUN=1 prints what it would change and changes nothing.
 #
 # docker/sprites/README.md describes the contract, the service it registers
@@ -50,6 +53,9 @@ readonly AGENT_ENV="$CONF_DIR/agent.env"
 readonly LAUNCHER=/usr/local/lib/openbots/sprite-agent
 readonly SERVICE=openbots-agent
 readonly VERSION_FILE="$OPT/provision.version"
+# Exit code when another provisioning holds the lock (EX_TEMPFAIL);
+# PROVISION_LOCKED_EXIT in packages/computer/src/sprites.ts.
+readonly LOCKED_EXIT=75
 
 # The image's packages (docker/computer.Dockerfile, runtime stage), which all
 # exist under these names on Ubuntu 26.04 (checked against the ubuntu:26.04
@@ -163,6 +169,42 @@ esac
 log "bundle $BUNDLE, port $PORT, version $PROVISION_VERSION, TZ $ZONE"
 if dry; then log "dry run: nothing is changed"; fi
 
+# --- one run at a time --------------------------------------------------------------
+
+step 'take the provisioning lock'
+# A second run beside this one (a retry while a timed out run is still being
+# ended, two starts at once) would remove this one's half made directories,
+# register the service again and store another token. It waits instead: the
+# provider bounds a run it lost touch with (max_run_after_disconnect, then it
+# kills the session), and a re-run takes under a minute. Past the wait it
+# exits LOCKED_EXIT having changed nothing, which the provider reports as a
+# failure. The lock is root's and 0600, so a Bot cannot take it; it is held
+# by this process and the children that keep descriptor 9, and released when
+# they end. Long lived children (the service sprite-env starts) do not get it.
+LOCK_FILE="${PROVISION_LOCK_FILE:-$OPT/provision.lock}"
+LOCK_WAIT="${PROVISION_LOCK_WAIT:-300}"
+[[ "$LOCK_WAIT" =~ ^[0-9]{1,5}$ ]] || die "PROVISION_LOCK_WAIT must be whole seconds, got '$LOCK_WAIT'"
+if dry && [ -z "${PROVISION_LOCK_FILE:-}" ]; then
+  log "[dry-run] take $LOCK_FILE, waiting up to $LOCK_WAIT s for another run"
+else
+  if [ -z "${PROVISION_LOCK_FILE:-}" ]; then install -d -m 0755 -o root -g root "$OPT"; fi
+  (
+    umask 077
+    : >>"$LOCK_FILE"
+  )
+  chmod 0600 "$LOCK_FILE"
+  exec 9>>"$LOCK_FILE"
+  if ! flock -n 9; then
+    log "another provisioning holds $LOCK_FILE; waiting up to $LOCK_WAIT s for it to end"
+    if ! flock -w "$LOCK_WAIT" 9; then
+      printf '[provision] another provisioning still holds %s after %s s. Nothing was changed; run again once it has ended.\n' \
+        "$LOCK_FILE" "$LOCK_WAIT" >&2
+      exit "$LOCKED_EXIT"
+    fi
+  fi
+  log "holding $LOCK_FILE"
+fi
+
 # --- the bundle ----------------------------------------------------------------
 
 step 'unpack the agent bundle'
@@ -208,6 +250,9 @@ done
 export DEBIAN_FRONTEND=noninteractive
 if [ "${#missing[@]}" -gt 0 ]; then
   log "installing: ${missing[*]}"
+  # A run ended mid install (its session killed) can leave dpkg half done,
+  # which apt refuses to work on until this finishes it. A no-op otherwise.
+  act dpkg --configure -a
   act apt-get -o DPkg::Lock::Timeout=300 update -q
   act apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends "${missing[@]}"
 else
@@ -219,9 +264,11 @@ fi
 # The image copies node from node:24-bookworm-slim. Here the official build
 # of the exact version the bundle was built with, so node-pty's binding
 # matches its ABI, checked against nodejs.org's SHASUMS256.txt. It goes under
-# /opt/openbots/node and is linked into /usr/local/bin, where the image has
-# it and where the launchers below find it; that replaces any node a Sprite
-# ships in /usr/local/bin.
+# /opt/openbots/node/v<version>, beside the versions earlier bundles use: the
+# agent's launcher runs the version its bundle names, so the bundle kept for
+# a rollback still finds its own. This run uses it from here on; it becomes
+# node/current and /usr/local/bin/node (where the image has it and the coding
+# agents' launchers find it) only when /app switches to this bundle, below.
 step "install Node $NODE_VERSION"
 NODE_DIR="$NODE_ROOT/v$NODE_VERSION"
 NODE_BIN="$NODE_DIR/bin/node"
@@ -244,9 +291,7 @@ else
   rm -rf "$tmp" "$NODE_DIR"
   mv "$NODE_DIR.partial" "$NODE_DIR"
 fi
-act ln -sfn "$NODE_DIR" "$NODE_ROOT/current"
-for bin in node npm npx; do act ln -sfn "$NODE_ROOT/current/bin/$bin" "/usr/local/bin/$bin"; done
-export PATH="$NODE_ROOT/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="$NODE_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # --- users and groups ----------------------------------------------------------
 
@@ -539,6 +584,24 @@ set -euo pipefail
 if [ "$(id -u)" -ne 0 ]; then exec sudo -n "$0" "$@"; fi
 # shellcheck disable=SC1091
 . /etc/openbots/agent.env
+readonly APP=/app NODE_ROOT=/opt/openbots/node
+
+# The Node the bundle at /app was built with, from its BUILD_INFO: its
+# node-pty binding is built for that version, and provision.sh keeps every
+# version a kept bundle names. So /app pointed back at the previous bundle (a
+# rollback) runs that bundle's Node, and a provisioning that failed before
+# switching /app leaves the old bundle on its own Node. A bundle that names
+# none, or one not installed, runs node/current.
+# --- node: begin
+app="$(readlink -f "$APP")"
+want="$(sed -n 's/^node_version=v\{0,1\}//p' "${app%/*}/BUILD_INFO" 2>/dev/null | head -n 1 || true)"
+node="$NODE_ROOT/current/bin/node"
+if [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -x "$NODE_ROOT/v$want/bin/node" ]; then
+  node="$NODE_ROOT/v$want/bin/node"
+else
+  echo "sprite-agent: no Node ${want:-named} for $app; running $node" >&2
+fi
+# --- node: end
 
 # A container starts empty; a service restarted after a crash finds what the
 # last agent started (Xvfb, Chromium, the Bots' shells) still running. They
@@ -577,7 +640,7 @@ mv -f /var/lib/openbots/token.new /var/lib/openbots/token
 # program (sudo) gives anything the agent starts more than that. tini reaps
 # what the Bots leave behind, as the image's entrypoint.
 exec env -i \
-  PATH=/opt/openbots/node/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PATH="${node%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   LANG=C.UTF-8 \
   NODE_ENV=production \
   HOME=/home/bot \
@@ -587,12 +650,14 @@ exec env -i \
   OPENBOTS_STATE_DIR=/var/lib/openbots \
   OPENBOTS_AGENT_PORT="$OPENBOTS_AGENT_PORT" \
   /usr/bin/setpriv --no-new-privs --inh-caps=-all --bounding-set=-all,+chown,+setuid,+setgid -- \
-  /usr/bin/tini -s -- /opt/openbots/node/current/bin/node /app/apps/computer-agent/dist/main.js
+  /usr/bin/tini -s -- "$node" /app/apps/computer-agent/dist/main.js
 LAUNCHER
 
 step 'switch /app to the bundle'
 # /app is a link to the unpacked bundle, so an upgrade switches in one step
-# and the old one stays until the next upgrade, in case of a rollback.
+# and the old one stays until the next upgrade, in case of a rollback. Every
+# step that can fail for want of something (a download, a build, Chromium)
+# is above: up to here the agent that ran before is still the one that runs.
 if [ -e "$APP_LINK" ] && [ ! -L "$APP_LINK" ]; then
   aside="$APP_LINK.pre-openbots.$(date -u +%Y%m%d%H%M%S)"
   log "moving the existing $APP_LINK aside to $aside"
@@ -600,6 +665,12 @@ if [ -e "$APP_LINK" ] && [ ! -L "$APP_LINK" ]; then
 fi
 act ln -sfn "$BUNDLE_DIR/openbots-agent-bundle/app" "$APP_LINK.new"
 act mv -Tf "$APP_LINK.new" "$APP_LINK"
+# Then this bundle's Node as the system's, also in one step. Not before /app:
+# until then the previous bundle is the agent, and a launcher from before
+# provision.sh chose each bundle's Node runs node/current.
+act ln -sfn "$NODE_DIR" "$NODE_ROOT/current.new"
+act mv -Tf "$NODE_ROOT/current.new" "$NODE_ROOT/current"
+for bin in node npm npx; do act ln -sfn "$NODE_ROOT/current/bin/$bin" "/usr/local/bin/$bin"; done
 if ! dry; then
   [ -f "$APP_LINK/apps/computer-agent/dist/main.js" ] || die "the bundle has no apps/computer-agent/dist/main.js"
   # SUBSCRIPTION_BRIDGE in packages/shared names this path.
@@ -630,13 +701,14 @@ if dry; then
   log "[dry-run] sprite-env services create $SERVICE --cmd $LAUNCHER --dir $HOME_DIR --http-port $PORT --no-stream"
 else
   command -v sprite-env >/dev/null || die "sprite-env is not on PATH; is this a Sprite?"
-  if sprite-env services get "$SERVICE" >/dev/null 2>&1; then
-    sprite-env services stop "$SERVICE" >/dev/null 2>&1 || true
-    sprite-env services delete "$SERVICE" >/dev/null
+  # 9>&-: what sprite-env starts must not hold the lock.
+  if sprite-env services get "$SERVICE" >/dev/null 2>&1 9>&-; then
+    sprite-env services stop "$SERVICE" >/dev/null 2>&1 9>&- || true
+    sprite-env services delete "$SERVICE" >/dev/null 9>&-
   fi
   # Only one service may own the HTTP port (409 otherwise).
   if ! sprite-env services create "$SERVICE" --cmd "$LAUNCHER" --dir "$HOME_DIR" \
-    --http-port "$PORT" --no-stream; then
+    --http-port "$PORT" --no-stream 9>&-; then
     die "could not create the service; another service may own the HTTP port: sprite-env services list"
   fi
 fi
