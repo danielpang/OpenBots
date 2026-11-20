@@ -1,15 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { AwsV4Signer } from 'aws4fetch';
+import { verifySigV4 } from './test-sigv4.js';
 
 // An S3-compatible store in this process, for tests and for running the
 // server against the s3 driver without a network (storage/s3.ts). It speaks
-// path-style PUT, GET (with Range), HEAD and DELETE for one bucket, and
-// checks what a real store checks: the SigV4 signature (recomputed with the
-// same key, so a request altered on the way fails), the declared length, the
-// signed sha256 and Content-MD5. `fail` makes the next requests answer an
-// error or drop the connection; `requests` records what was asked.
+// PUT, GET (with Range), HEAD and DELETE for one bucket, addressed by path
+// (`<endpoint>/<bucket>/<key>`) or by bucket hostname (a Host of
+// `<bucket>.<anything>`), and checks what a real store checks: the SigV4
+// signature, verified by test-sigv4.ts (written from the specification and
+// checked against AWS's own examples, sharing no code with the client's
+// signer), with host, x-amz-content-sha256 and x-amz-date signed and the
+// payload's sha256 signed (never UNSIGNED-PAYLOAD); the declared length; the
+// sha256 itself; and Content-MD5. `fail` makes the next requests answer an
+// error or drop the connection, `hold` stalls one until released, and
+// `requests` records what was asked.
 
 export interface TestS3 {
   /** The base URL, http://127.0.0.1:<port>. */
@@ -34,6 +39,12 @@ export interface TestS3 {
     how: { status: number; code?: string } | 'reset' | { hang: number },
     method?: string,
   ): void;
+  /**
+   * Holds the next request (of `method`, when given) until `release` is
+   * called: `reached` settles when it has arrived. A stalled store, without
+   * guessing how long a test needs.
+   */
+  hold(method?: string): { reached: Promise<void>; release(): void };
   close(): Promise<void>;
 }
 
@@ -54,6 +65,7 @@ export async function startTestS3(
     how: { status: number; code?: string } | 'reset' | { hang: number };
     method?: string;
   }[] = [];
+  const holds: { method?: string; arrived: () => void; released: Promise<void> }[] = [];
 
   const answer = (res: ServerResponse, status: number, code?: string) => {
     const body = code ? xmlError(code) : '';
@@ -61,46 +73,26 @@ export async function startTestS3(
     res.end(body);
   };
 
-  const verified = async (req: IncomingMessage, host: string): Promise<string | null> => {
-    const auth = req.headers.authorization ?? '';
-    const match =
-      /^AWS4-HMAC-SHA256 Credential=([^/]+)\/(\d{8})\/([^/]+)\/s3\/aws4_request, SignedHeaders=([a-z0-9;-]+), Signature=[0-9a-f]{64}$/.exec(
-        auth,
-      );
-    if (!match) return 'AccessDenied';
-    const [, key, , signedRegion, signed] = match as unknown as string[];
-    if (key !== accessKeyId) return 'InvalidAccessKeyId';
-    if (signedRegion !== region) return 'AuthorizationHeaderMalformed';
-    const headers: Record<string, string> = {};
-    for (const name of signed!.split(';')) {
-      if (name === 'host') continue;
-      const value = req.headers[name];
-      if (typeof value !== 'string') return 'SignatureDoesNotMatch';
-      headers[name] = value;
-    }
-    const expected = await new AwsV4Signer({
-      method: req.method!,
-      url: `http://${host}${req.url}`,
-      headers,
-      accessKeyId,
-      secretAccessKey,
-      service: 's3',
-      region,
-      datetime: req.headers['x-amz-date'] as string,
-    }).authHeader();
-    return expected === auth ? null : 'SignatureDoesNotMatch';
-  };
-
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://store');
-    const [, first, ...rest] = url.pathname.split('/');
-    const key = rest.join('/');
+    // By bucket hostname (<bucket>.<host>/<key>) or by path (<host>/<bucket>/<key>).
+    const host = (req.headers.host ?? '').split(':')[0]!;
+    const byHost = host.startsWith(`${bucket}.`);
+    const segments = url.pathname.split('/').slice(1).map(decodeURIComponent);
+    const first = byHost ? bucket : segments[0];
+    const key = (byHost ? segments : segments.slice(1)).join('/');
     const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, String(v)]));
     requests.push({ method: req.method ?? '', key, headers });
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks);
 
+    const held = holds.findIndex((h) => !h.method || h.method === req.method);
+    if (held >= 0) {
+      const [hold] = holds.splice(held, 1);
+      hold!.arrived();
+      await hold!.released;
+    }
     const failure = failures.find((f) => f.count > 0 && (!f.method || f.method === req.method));
     if (failure) {
       failure.count--;
@@ -112,8 +104,11 @@ export async function startTestS3(
       }
     }
     if (first !== bucket || !key) return answer(res, 404, 'NoSuchBucket');
-    const denied = await verified(req, req.headers.host ?? '');
-    if (denied) return answer(res, 403, denied);
+    const denied = verifySigV4(
+      { method: req.method ?? '', url: req.url ?? '/', headers: req.headers },
+      { accessKeyId, secretAccessKey, region },
+    );
+    if (denied) return answer(res, denied === 'InvalidRequest' ? 400 : 403, denied);
 
     switch (req.method) {
       case 'PUT': {
@@ -121,8 +116,10 @@ export async function startTestS3(
         if (!Number.isFinite(length) || length !== body.byteLength) {
           return answer(res, 400, 'IncompleteBody');
         }
-        const sha = req.headers['x-amz-content-sha256'];
-        if (sha !== 'UNSIGNED-PAYLOAD' && sha !== createHash('sha256').update(body).digest('hex')) {
+        // Signed, never UNSIGNED-PAYLOAD (verifySigV4 refused that already).
+        if (
+          req.headers['x-amz-content-sha256'] !== createHash('sha256').update(body).digest('hex')
+        ) {
           return answer(res, 400, 'XAmzContentSHA256Mismatch');
         }
         const md5 = req.headers['content-md5'];
@@ -140,15 +137,19 @@ export async function startTestS3(
         const range = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range ?? '');
         let part = object;
         let status = 200;
+        const extra: Record<string, string> = {};
         if (range) {
           const start = Number(range[1]);
           if (start >= object.byteLength) return answer(res, 416, 'InvalidRange');
-          part = object.subarray(start, Math.min(Number(range[2]) + 1, object.byteLength));
+          const end = Math.min(Number(range[2]), object.byteLength - 1);
+          part = object.subarray(start, end + 1);
           status = 206;
+          extra['content-range'] = `bytes ${start}-${end}/${object.byteLength}`;
         }
         res.writeHead(status, {
           'content-type': 'application/octet-stream',
           'content-length': part.byteLength,
+          ...extra,
         });
         return void res.end(req.method === 'GET' ? part : undefined);
       }
@@ -189,6 +190,14 @@ export async function startTestS3(
     }),
     fail(count, how, method) {
       failures.push({ count, how, ...(method ? { method } : {}) });
+    },
+    hold(method) {
+      let arrived!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => (arrived = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      holds.push({ arrived, released, ...(method ? { method } : {}) });
+      return { reached, release };
     },
     close: () =>
       new Promise<void>((resolve) => {
