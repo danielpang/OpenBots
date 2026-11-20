@@ -162,6 +162,16 @@ process has a terminal, its parent process's kind), `Fly-Client-CI`, and `Fly-Cl
 them off unless `SPRITES_CLIENT_SIGNALS` is set (to 1 to send them). The User-Agent still names the
 SDK and its version (`sprites-js/0.2.4`). These go only to the Sprites API host.
 
+A reset that also forgets the sign-ins does not delete the member's Sprite at once. The old Sprite
+is kept for 7 days, out of service, in case support needs to restore it, then deleted for good by
+the worker. For those 7 days it still holds the old sign-ins (the coding agents' and the browser
+logins) and the old home, and only an operator can reach it: its agent and agent token are removed,
+its URL is private, it may reach no host, and it costs only its storage. An operator lists a
+member's retired computers with `openbots computers retired --member <email> --org <organization
+id>` and restores one with `openbots computers restore <id> --org <organization id>`, which keeps
+the member's current computer for 7 days in turn. A self-hosted install with one organization can
+leave out `--org`. Docker computers are deleted at once, as before.
+
 ### Billing (managed service)
 
 The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
@@ -287,7 +297,7 @@ Back up first (below). Migrations run when the new server starts.
   version (or `latest`) first.
 - Built from source: `git pull && docker compose up -d --build`.
 
-Upgrading to the release with shared Artifacts (migration `0048_artifact_sharing`): the migration
+Upgrading to the release with shared Artifacts (migration `0049_artifact_sharing`): the migration
 gives every existing Bot its address on the artifact domain, and while it does it locks the
 organizations (`workspaces`) and `bots` tables, so every request that reads or changes a Bot or an
 organization waits until it ends. That takes moments on most installs. On a very large one, upgrade in a

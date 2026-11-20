@@ -1,6 +1,8 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import type { AppDeps } from './context.js';
 import { schema, type Db } from './db/client.js';
+import { inWorkspace } from './db/scope.js';
+import { expireRetiredComputers } from './services/computer-retire.js';
 
 // What the core does when someone's access to one organization ends (plan
 // 21.6): an owner or admin suspended or removed them, or they left. The
@@ -8,7 +10,10 @@ import { schema, type Db } from './db/client.js';
 // Their sessions stay, since they may belong to other organizations; a
 // session working in this one stops being active there, and every API
 // instance closes their realtime, terminal and screen sockets for it. Their
-// other organizations are untouched.
+// other organizations are untouched. A member removed (not suspended) has
+// their retired computers there (old machines a reset kept seven days, with
+// the old sign-ins on them) made due now, so the retired-computers job
+// deletes them at its next sweep rather than days later.
 
 /**
  * Whether a Bot's owner still works in its organization: a member, not
@@ -45,6 +50,9 @@ export async function endMembershipAccess(
   ended: MembershipEnded & { removed: boolean },
 ): Promise<void> {
   if (ended.removed) {
+    await inWorkspace(ended.workspaceId, () =>
+      expireRetiredComputers(deps.db, { workspaceId: ended.workspaceId, ownerId: ended.userId }),
+    );
     await deps.db
       .update(schema.sessions)
       .set({ activeOrganizationId: null })

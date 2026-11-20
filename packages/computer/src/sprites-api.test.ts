@@ -399,6 +399,27 @@ describe('the Sprites SDK adapter', () => {
       expect(fake.seen[0]!.authorization).toBe(`Bearer ${TOKEN}`);
     });
 
+    it("sets the labels with the Sprite's own update and reads them back", async () => {
+      const { fake, client } = await setup();
+      fake.route = (seen, res) => {
+        if (seen.method === 'PUT' && seen.url.pathname === '/v1/sprites/ob-1') {
+          json(res, 200, { name: 'ob-1', status: 'cold', labels: ['openbots-retired'] });
+          return;
+        }
+        if (seen.method === 'GET' && seen.url.pathname === '/v1/sprites/ob-1') {
+          json(res, 200, { name: 'ob-1', status: 'cold', labels: ['openbots-retired'] });
+          return;
+        }
+        return false;
+      };
+      await client.setLabels('ob-1', ['openbots-retired']);
+      expect(JSON.parse(fake.seen[0]!.body.toString())).toEqual({ labels: ['openbots-retired'] });
+      expect(fake.seen[0]!.authorization).toBe(`Bearer ${TOKEN}`);
+      expect(await client.get('ob-1')).toMatchObject({ labels: ['openbots-retired'] });
+      fake.route = (_seen, res) => json(res, 500, { message: 'no' });
+      await expect(client.setLabels('ob-1', [])).rejects.toThrow(/labels failed \(500\)/);
+    });
+
     it('reads a missing Sprite as null and deleting one already gone as done', async () => {
       const { client } = await setup();
       expect(await client.get('gone')).toBeNull();

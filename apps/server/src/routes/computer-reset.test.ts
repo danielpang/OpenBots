@@ -187,10 +187,14 @@ describe('computer reset', () => {
 
   it('removes the sign-ins too when asked', async () => {
     await w.setAccount('claude', { authKind: 'subscription', accountLabel: 'dana@example.com' });
-    const { requestId } = await prepared();
+    const { requestId, status } = await prepared();
+    // The dialog says the old computer is not kept.
+    expect(status).toMatchObject({ keptDays: null });
     const res = await reset({ requestId, confirm: true, resetSignIns: true });
     expect(res.status, await res.clone().text()).toBe(202);
     expect(w.computer.docker.volumes).toEqual(new Set());
+    // Docker cannot keep a machine: deleted at once, nothing kept for support.
+    expect(await w.t.db.select().from(schema.retiredComputers)).toEqual([]);
     const [account] = await w.t.db
       .select()
       .from(schema.coderAccounts)

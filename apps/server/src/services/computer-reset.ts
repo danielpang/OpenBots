@@ -13,12 +13,14 @@ import {
   assertResettable,
   checkpointBeforeReset,
   computerAvailable,
+  computerProvider,
   computerUnavailable,
   destroyComputer,
   getComputer,
   type ComputerRow,
 } from './computer.js';
 import { COMPUTER_REFUSED_STATUS } from './computer-admission.js';
+import { retainedDays } from './computer-retire.js';
 import {
   finishedRescue,
   RESCUE_CHANNEL,
@@ -37,8 +39,10 @@ import {
 // home volume (the state volume, with the cookie store and the coding agents'
 // sign-ins, only on request), marks every checkout `missing`, clears the
 // sessions' worktree paths and records `computer.reset`, with the id of the
-// checkpoint taken first where the provider keeps one (a Sprite reset that
-// keeps the sign-ins), so an operator can restore a mistaken reset. The next start makes
+// checkpoint taken first where the provider keeps one, so an operator can
+// restore a mistaken reset. On a provider that can retire a machine (Sprites)
+// a reset that forgets the sign-ins keeps the old machine for seven days
+// rather than deleting it (computer-retire.ts). The next start makes
 // a fresh computer, and its reconcile clones the `keep_cloned` repositories
 // again. When the managed build would not start a stopped computer for the
 // rescue (computer-admission.ts), nothing was checked: the status says so
@@ -214,6 +218,7 @@ export async function resetStatus(deps: AppDeps, owner: Owner, requestId: string
       status: s.status as CodingSessionStatus,
     })),
     expiresAt: new Date(record.at + RESET_PREPARE_TTL_MS).toISOString(),
+    keptDays: retainedDays(computerProvider(deps)),
   };
 }
 
@@ -277,7 +282,12 @@ export async function resetComputer(
   prepared.delete(requestId);
   const by = userActor(owner);
   const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns });
-  const reset = await destroyComputer(deps, row, { signIns: resetSignIns }, by);
+  const reset = await destroyComputer(
+    deps,
+    row,
+    { signIns: resetSignIns, checkpointId: checkpoint },
+    by,
+  );
   await deps.db.transaction(async (tx) => {
     const checkouts = await tx
       .update(schema.repoCheckouts)
