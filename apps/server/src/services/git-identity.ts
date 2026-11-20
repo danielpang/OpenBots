@@ -33,7 +33,7 @@ export interface GitIdentityInput {
   email: string | null;
 }
 
-/** Where the identity reached on the computer after a save. */
+/** Where the identity reached on the computer after a save (`off`: not running, or stopped meanwhile). */
 export type ComputerApplied = 'applied' | 'off' | 'failed';
 
 /** The local mode owner's address, and anything like it: no one on GitHub. */
@@ -161,12 +161,17 @@ export async function applyGitIdentityOnComputer(
   deps: AppDeps,
   owner: Owner,
   known?: GitIdentity,
+  signal?: AbortSignal,
 ): Promise<ComputerApplied> {
   if (!computerAvailable(deps)) return 'off';
+  // Asked again before each write: a computer stopped meanwhile, here or in
+  // another process, is not called, since a call would wake a paused Sprite.
+  const running = async () =>
+    !signal?.aborted && (await getComputer(deps, owner))?.status === 'running' && !signal?.aborted;
   const computer = await getComputer(deps, owner);
-  if (computer?.status !== 'running') return 'off';
+  if (computer?.status !== 'running' || signal?.aborted) return 'off';
   const identity = known ?? (await getGitIdentity(deps, owner));
-  return writeGitIdentity(deps, agentFor(deps, computer), identity);
+  return writeGitIdentity(deps, agentFor(deps, computer), identity, running);
 }
 
 /** The `git config --global` writes for one identity, as `bot` and then `coder`. */
@@ -174,6 +179,8 @@ export async function writeGitIdentity(
   deps: Pick<AppDeps, 'logger'>,
   agent: ComputerAgentClient,
   identity: GitIdentity,
+  /** Asked before each write; false ends the writes as `off`. */
+  running: () => Promise<boolean> = async () => true,
 ): Promise<ComputerApplied> {
   const email = effectiveEmail(identity);
   const name = effectiveName(identity, email)
@@ -186,6 +193,7 @@ export async function writeGitIdentity(
   try {
     for (const user of COMPUTER_USERS) {
       for (const [key, value] of settings) {
+        if (!(await running())) return 'off';
         const run = await runAsCoder(agent, 'git', ['config', '--global', key, value], { user });
         if (run.code !== 0) {
           deps.logger.warn(
