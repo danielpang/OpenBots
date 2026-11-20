@@ -3,8 +3,9 @@
 # for a Sprite, with the stub sprite-env next to this file, and checks what it
 # leaves behind: the users and ids, the files and their modes, the service
 # definition, a running agent that takes the token, a screen with Chromium,
-# the privileges of the Bots' commands, the version marker, and that a second
-# run with a new token works and rotates it. Needs Docker and network access
+# the privileges of the Bots' commands, the version marker, that a second
+# run with a new token works and rotates it, and that a third waits for one
+# holding the provisioning lock. Needs Docker and network access
 # (apt, nodejs.org, npm, Playwright's CDN); it takes several minutes.
 #
 #   bash docker/sprites/test/provision.test.sh
@@ -155,9 +156,13 @@ check 'the version marker is written' "[ \"\$(cat /opt/openbots/provision.versio
 echo "== the service"
 check 'one service, with the HTTP port and the launcher' "grep -q 'services create openbots-agent --cmd /usr/local/lib/openbots/sprite-agent --dir /home/bot --http-port $PORT' /var/lib/sprite-env-stub/calls.log"
 check 'the service definition holds no token' "! grep -rq -- '$token_a' /var/lib/sprite-env-stub"
-check 'the agent runs with no_new_privs' 'pid=$(pgrep -f "^/opt/openbots/node/current/bin/node /app/apps/computer-agent/dist/main.js") && grep -q "^NoNewPrivs:[[:space:]]*1" /proc/$pid/status'
-check 'the agent keeps only CHOWN, SETUID and SETGID' 'pid=$(pgrep -f "^/opt/openbots/node/current/bin/node /app/apps/computer-agent/dist/main.js") && grep -q "^CapBnd:[[:space:]]*00000000000000c1" /proc/$pid/status'
-check 'the agent runs as bot (effective uid)' 'pid=$(pgrep -f "^/opt/openbots/node/current/bin/node /app/apps/computer-agent/dist/main.js") && [ "$(awk "/^Uid:/{print \$3}" /proc/$pid/status)" = 1000 ]'
+check 'the agent runs with no_new_privs' 'pid=$(pgrep -f "^/opt/openbots/node/v[0-9.]*/bin/node /app/apps/computer-agent/dist/main.js") && grep -q "^NoNewPrivs:[[:space:]]*1" /proc/$pid/status'
+check 'the agent keeps only CHOWN, SETUID and SETGID' 'pid=$(pgrep -f "^/opt/openbots/node/v[0-9.]*/bin/node /app/apps/computer-agent/dist/main.js") && grep -q "^CapBnd:[[:space:]]*00000000000000c1" /proc/$pid/status'
+check 'the agent runs the Node its bundle names' 'v=$(sed -n "s/^node_version=//p" "$(readlink -f /app)/../BUILD_INFO") && pgrep -f "^/opt/openbots/node/$v/bin/node /app/apps/computer-agent/dist/main.js"'
+check 'node/current is that Node too' '[ "$(readlink -f /opt/openbots/node/current)" = "/opt/openbots/node/$(sed -n "s/^node_version=//p" "$(readlink -f /app)/../BUILD_INFO")" ]'
+check 'the agent does not hold the provisioning lock' 'flock -n /opt/openbots/provision.lock true'
+check 'the provisioning lock is root'"'"'s, 0600' '[ "$(stat -c %u:%a /opt/openbots/provision.lock)" = 0:600 ]'
+check 'the agent runs as bot (effective uid)' 'pid=$(pgrep -f "^/opt/openbots/node/v[0-9.]*/bin/node /app/apps/computer-agent/dist/main.js") && [ "$(awk "/^Uid:/{print \$3}" /proc/$pid/status)" = 1000 ]'
 
 echo "== the agent"
 [ "$(call "$token_a" GET /healthz)" = 200 ] && pass 'healthz takes the token' || fail 'healthz takes the token'
@@ -185,6 +190,16 @@ grep -q '/opt/openbots/coders is up to date' "$LOGS/run2.log" && pass 'the codin
 [ "$(call "$token_a" GET /healthz)" = 401 ] && pass 'the old token no longer works' || fail 'the old token no longer works'
 check 'no screen user is left running from the old agent' '! pgrep -u screen-0'
 check 'the version marker is still written' "[ \"\$(cat /opt/openbots/provision.version)\" = '$VERSION' ]"
+
+echo "== a run waits for one that holds the lock"
+docker exec -d "$NAME" flock -o /opt/openbots/provision.lock sleep 8
+sleep 1
+if provision "$token_b" "$LOGS/run3.log"; then pass 'provision.sh runs once the lock is free'; else
+  fail 'provision.sh runs once the lock is free'
+  tail -n 30 "$LOGS/run3.log"
+fi
+grep -q 'another provisioning holds' "$LOGS/run3.log" && pass 'it waited for the lock' || fail 'it waited for the lock'
+[ "$(call "$token_b" GET /healthz)" = 200 ] && pass 'the agent answers after it' || fail 'the agent answers after it'
 
 echo "== dry run changes nothing"
 before="$(in_box 'ls -la --time-style=full-iso /etc/openbots /opt/openbots /usr/local/bin; md5sum /etc/passwd /etc/openbots/agent-token' | md5sum)"

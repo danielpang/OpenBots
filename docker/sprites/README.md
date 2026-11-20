@@ -4,12 +4,13 @@ On the hosted service each user's computer runs on a [Fly Sprite](https://docs.f
 
 This is not the personal-use setup in [deploy/sprites](../../deploy/sprites/README.md), which runs the whole standalone image on a Sprite. Here a Sprite is only the computer; the server runs elsewhere and talks to the computer's control agent over the Sprite's URL.
 
-| File                     | What it is                                                                                               |
-| ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `provision.sh`           | Turns a stock Sprite into a computer, idempotently. Runs inside the Sprite as root.                      |
-| `build-bundle.sh`        | Builds `dist/agent-bundle.tgz`, copies `provision.sh` beside it and writes `dist/VERSION`.               |
-| `test/provision.test.sh` | Runs `provision.sh` twice in an `ubuntu:26.04` container with a stub `sprite-env` and checks the result. |
-| `test/sprite-env`        | That stub: enough of `sprite-env services` to start the agent the way the runtime would.                 |
+| File                             | What it is                                                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `provision.sh`                   | Turns a stock Sprite into a computer, idempotently. Runs inside the Sprite as root.                            |
+| `build-bundle.sh`                | Builds `dist/agent-bundle.tgz`, copies `provision.sh` beside it and writes `dist/VERSION`.                     |
+| `test/provision.test.sh`         | Runs `provision.sh` three times in an `ubuntu:26.04` container with a stub `sprite-env` and checks the result. |
+| `test/provision-dry-run.test.sh` | Checks the lock, the order of the plan and the launcher's choice of Node, without Docker or root.              |
+| `test/sprite-env`                | That stub: enough of `sprite-env services` to start the agent the way the runtime would.                       |
 
 ## The contract with the provider
 
@@ -30,9 +31,13 @@ with this environment:
 
 On success it exits 0, with the agent answering `GET /healthz` with 200 for the new token on that port, and `/opt/openbots/provision.version` holding `OPENBOTS_PROVISION_VERSION`. The provider can compare that file with its own `VERSION` to decide whether a Sprite needs provisioning again.
 
-It is safe to run again, for an upgrade, to rotate the token, or after a run that failed half way: each step checks what is there first. A second run with an unchanged bundle skips apt, Node, the coding agents and Chromium and takes well under a minute; most of that is restarting the agent. Running it with a new token rotates the token: the old one stops working when the agent restarts at the end of the run.
+It is safe to run again, for an upgrade, to rotate the token, or after a run that failed half way: each step checks what is there first. A run that fails leaves the agent that ran before it runnable: everything that can fail for want of something (a download, a build, Chromium) comes before `/app` switches to the new bundle. A second run with an unchanged bundle skips apt, Node, the coding agents and Chromium and takes well under a minute; most of that is restarting the agent. Running it with a new token rotates the token: the old one stops working when the agent restarts at the end of the run.
 
-A new Node major is an upgrade like any other. A Sprite provisioned with a bundle built on Node 22 has a different `provision.version` from a bundle built on Node 24 (the version hashes the bundle, whose `BUILD_INFO` names the Node version, and `provision.sh`), so the next `create` provisions it again: Node 24 is installed beside Node 22, `/opt/openbots/node/current` and `/usr/local/bin/node` switch to it, node-pty is rebuilt if the bundle's binding does not load, and the coding agents are reinstalled only if their lockfile changed. The Node 22 directory stays in `/opt/openbots/node/`, unused, since the previous bundle kept for a rollback needs it.
+One run at a time: `provision.sh` holds `/opt/openbots/provision.lock` (root's, mode 0600) for its whole run. A second run waits for it, up to `PROVISION_LOCK_WAIT` seconds (300 by default), and then runs, so the run started last is the one whose token is stored. If the lock is still held after the wait it exits 75 without changing anything, and the provider reports that as a failure. Waiting rather than giving up at once suits the case the lock is for: a retry while the provider is still ending a run it lost touch with, which the provider bounds (the exec's `max_run_after_disconnect` is 1 second, and on its time limit it kills the session).
+
+The agent runs on the Node its bundle was built with: the launcher reads `node_version` from the `BUILD_INFO` beside `/app` and runs `/opt/openbots/node/v<version>/bin/node`, falling back to `/opt/openbots/node/current` for a bundle that names none that is installed. `provision.sh` keeps every Node version it installs.
+
+A new Node major is an upgrade like any other. A Sprite provisioned with a bundle built on Node 22 has a different `provision.version` from a bundle built on Node 24 (the version hashes the bundle, whose `BUILD_INFO` names the Node version, and `provision.sh`), so the next `create` provisions it again: Node 24 is installed beside Node 22, node-pty is rebuilt if the bundle's binding does not load, the coding agents are reinstalled only if their lockfile changed, and then `/app` switches to the new bundle and `/opt/openbots/node/current` and `/usr/local/bin/node` to Node 24, one right after the other. Until `/app` switches, the agent that runs is the old bundle on Node 22, so an upgrade that fails part way leaves it working. The Node 22 directory stays in `/opt/openbots/node/`, which the previous bundle kept for a rollback runs on.
 
 On failure it exits non-zero and the last line names the step, for example `FAILED in step "install Chromium" (line 412, exit 1)`. Every step logs a `== <step>` line as it starts, so the output reads as progress.
 
@@ -158,9 +163,10 @@ PROVISION_DRY_RUN=1 OPENBOTS_AGENT_TOKEN=dry-run-token-000000 OPENBOTS_AGENT_POR
   OPENBOTS_PROVISION_VERSION="$(cat docker/sprites/dist/VERSION)" \
   bash docker/sprites/provision.sh docker/sprites/dist/agent-bundle.tgz
 bash docker/sprites/test/provision.test.sh   # needs Docker and network; several minutes
+bash docker/sprites/test/provision-dry-run.test.sh   # no Docker or root; seconds
 ```
 
-CI runs the first three. The container test gives a `sprite` user uid 1000 first, then checks the ids, files and modes, that the token is in no output and in no service definition, the agent's no-new-privileges and capability set, a command running as bot without sudo, a screen with Chromium and a screenshot, a second run with a new token (the old one refused, apt and the coding agents skipped), a dry run that changes nothing, and a bad token refused naming the step. Behind a proxy set `HTTPS_PROXY` and `TEST_CA_BUNDLE`; `IMAGE` picks another image and `KEEP=1` leaves the container running.
+CI runs the first three (and shellcheck covers the tests). The dry run test needs no build: it runs `provision.sh` against a small stand-in bundle and checks that a run waits for the lock and one still locked out exits 75 having changed nothing, that `node/current` switches only right after `/app`, and that the launcher picks the Node a bundle names (and `node/current` for one that names none installed). The container test gives a `sprite` user uid 1000 first, then checks the ids, files and modes, that the token is in no output and in no service definition, the agent's no-new-privileges and capability set, a command running as bot without sudo, a screen with Chromium and a screenshot, a second run with a new token (the old one refused, apt and the coding agents skipped), the agent on its bundle's Node and not holding the provisioning lock, a third run that waits for a held lock, a dry run that changes nothing, and a bad token refused naming the step. Behind a proxy set `HTTPS_PROXY` and `TEST_CA_BUNDLE`; `IMAGE` picks another image and `KEEP=1` leaves the container running.
 
 On a real Sprite, with the [sprite CLI](https://docs.fly.io/sprites/cli/commands.md):
 
@@ -197,4 +203,5 @@ Not done:
 
 - No memory, CPU or pids limits.
 - The bundle must be built on x86_64 Linux with a glibc no newer than the Sprite's; node-pty is rebuilt on the Sprite when its binding does not load, but that path has only been reasoned about, not run.
-- Bundles other than the current and the previous one are deleted; there is no rollback command, but pointing `/app` at the previous one in `/opt/openbots/bundles/` and restarting the service is one.
+- Bundles other than the current and the previous one are deleted; there is no rollback command, but pointing `/app` at the previous one in `/opt/openbots/bundles/` and restarting the service is one: the launcher runs the Node that bundle's `BUILD_INFO` names, which is still installed. As root on the Sprite, with `<id>` from `/opt/openbots/bundles/.previous`: `ln -sfn /opt/openbots/bundles/<id>/openbots-agent-bundle/app /app.new && mv -Tf /app.new /app && sprite-env services restart openbots-agent`. A Sprite whose launcher was written by a `provision.sh` from before the launcher chose the bundle's Node runs `node/current` instead; there, point `/opt/openbots/node/current` at the previous bundle's Node as well. `/usr/local/bin/node` can stay: the coding agents and the git credential helper run on either. `provision.version` still names the newer bundle, so the provider leaves the rollback in place until its configured version changes.
+- Node versions are never removed from `/opt/openbots/node/`.

@@ -154,9 +154,13 @@ a Docker container. A self-hosted install does not need it and leaves these empt
 agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
 set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
 the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
-The server calls the Sprites API with Fly's `@fly/sprites` SDK, which adds coarse client headers
-(whether the process has a terminal, its parent's kind, CI) to its requests; set
-`SPRITES_CLIENT_SIGNALS=0` in the server's environment to leave them out.
+The server calls the Sprites API with Fly's `@fly/sprites` SDK. The SDK can add client headers to
+its requests to the Sprites API: `Fly-Client-Interactive` and `Fly-Client-Parent` (whether the
+process has a terminal, its parent process's kind), `Fly-Client-CI`, and `Fly-Client-Agent` with
+`Fly-Client-Agent-Source` (a coding agent it detects from environment variables, such as
+`claude-code` when the server runs under one), and the same in its User-Agent. The server turns
+them off unless `SPRITES_CLIENT_SIGNALS` is set (to 1 to send them). The User-Agent still names the
+SDK and its version (`sprites-js/0.2.4`). These go only to the Sprites API host.
 
 ### Billing (managed service)
 
