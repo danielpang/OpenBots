@@ -403,17 +403,32 @@ export async function insertBot(
   const ids = { workspaceId: owner.workspaceId, ownerId: owner.id };
   const isMain = !(await mainBotOf(tx, owner));
   // Its name on the artifact domain (plan 21.11), given once and kept.
+  // Its random part can collide with another Bot's, in any organization:
+  // then it takes another, a few times. Each try is a savepoint, so a
+  // collision does not abort the caller's transaction.
   const { slug: orgSlug } = await getOrganization(tx, owner.workspaceId);
-  const publicSlug = botPublicSlug(values.handle, orgSlug);
-  let bot: BotRow;
-  try {
-    [bot] = (await tx
-      .insert(schema.bots)
-      .values({ ...ids, ...values, isMain, publicSlug })
-      .returning()) as [BotRow];
-  } catch (error) {
-    if (isUniqueViolation(error)) throw handleTaken(values.handle);
-    throw error;
+  let bot: BotRow | undefined;
+  for (let attempt = 1; !bot; attempt++) {
+    const publicSlug = botPublicSlug(values.handle, orgSlug);
+    try {
+      bot = await tx.transaction(
+        async (sp) =>
+          (
+            (await sp
+              .insert(schema.bots)
+              .values({ ...ids, ...values, isMain, publicSlug })
+              .returning()) as [BotRow]
+          )[0],
+      );
+    } catch (error) {
+      const constraint = uniqueViolation(error);
+      if (constraint === 'bots_public_slug_unique' && attempt < PUBLIC_SLUG_ATTEMPTS) continue;
+      // A driver that does not name the constraint: as before, the handle.
+      if (constraint === 'bots_handle_per_owner' || constraint === '') {
+        throw handleTaken(values.handle);
+      }
+      throw error;
+    }
   }
   const [chat] = await tx
     .insert(schema.chats)
@@ -492,9 +507,21 @@ export async function audit(
   });
 }
 
-function isUniqueViolation(error: unknown): boolean {
+/** How many random public slugs a new Bot tries before giving up. */
+const PUBLIC_SLUG_ATTEMPTS = 5;
+
+/** The constraint a unique violation broke ('' when the driver does not say); null for any other error. */
+function uniqueViolation(error: unknown): string | null {
   for (let e = error; e && typeof e === 'object'; e = (e as { cause?: unknown }).cause) {
-    if ((e as { code?: unknown }).code === '23505') return true;
+    const { code, constraint_name, constraint } = e as {
+      code?: unknown;
+      constraint_name?: unknown;
+      constraint?: unknown;
+    };
+    if (code !== '23505') continue;
+    // postgres.js names it `constraint_name`, PGlite `constraint`.
+    const name = constraint_name ?? constraint;
+    return typeof name === 'string' ? name : '';
   }
-  return false;
+  return null;
 }
