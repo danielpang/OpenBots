@@ -4,9 +4,12 @@ import { AwsV4Signer } from 'aws4fetch';
 import { checked } from './local.js';
 import {
   StorageError,
+  listAll,
+  pageSizeOf,
   parseListing,
   parseRef,
   type BlobRef,
+  type ListOptions,
   type ListedBlob,
   type BlobStore,
   type ByteRange,
@@ -39,7 +42,9 @@ import {
 //   region or endpoint.
 // - `list` is ListObjectsV2 on the bucket, by the organization's key prefix,
 //   a page at a time (1000 keys, the most S3 sends), following its
-//   continuation token.
+//   continuation token (`start-after` for the first page, when asked). A
+//   page that says it is truncated but gives no token, or that cannot be
+//   read, is refused as unavailable rather than taken as the end.
 
 export interface S3StorageConfig {
   driver: 's3';
@@ -220,17 +225,28 @@ export class S3BlobStore implements BlobStore {
     await discard(res);
   }
 
-  async list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
-    parseListing(workspaceId, keyPrefix);
+  list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
+    return listAll(this.listPages(workspaceId, keyPrefix));
+  }
+
+  async *listPages(
+    workspaceId: string,
+    keyPrefix: string,
+    options: ListOptions = {},
+  ): AsyncGenerator<ListedBlob[]> {
+    parseListing(workspaceId, keyPrefix, options);
     const orgPrefix = `${this.config.prefix}orgs/${workspaceId}/`;
-    const listed: ListedBlob[] = [];
+    const pageSize = pageSizeOf(options, this.listPageSize);
     let token: string | undefined;
     for (;;) {
       const query: Record<string, string> = {
         'list-type': '2',
         prefix: `${orgPrefix}${keyPrefix}`,
-        'max-keys': String(this.listPageSize),
+        'max-keys': String(pageSize),
         ...(token ? { 'continuation-token': token } : {}),
+        ...(!token && options.startAfter
+          ? { 'start-after': `${orgPrefix}${options.startAfter}` }
+          : {}),
       };
       const res = await this.send({ method: 'GET', key: '', query });
       if (res.status === 404) {
@@ -245,6 +261,13 @@ export class S3BlobStore implements BlobStore {
           'Object storage answered a listing it did not finish',
         );
       }
+      if (page.truncated && !page.next) {
+        throw new StorageError(
+          'unavailable',
+          'Object storage answered a truncated listing with no continuation',
+        );
+      }
+      const listed: ListedBlob[] = [];
       for (const { key, size } of page.contents) {
         if (!key.startsWith(orgPrefix)) continue;
         const own = key.slice(orgPrefix.length);
@@ -252,10 +275,11 @@ export class S3BlobStore implements BlobStore {
         if (!/^[A-Za-z0-9_-]+$/.test(own)) continue;
         listed.push({ storageKey: `${workspaceId}/${own}`, size });
       }
-      if (!page.truncated || !page.next) break;
+      listed.sort((a, b) => (a.storageKey < b.storageKey ? -1 : 1));
+      if (listed.length) yield listed;
+      if (!page.truncated) return;
       token = page.next;
     }
-    return listed.sort((a, b) => (a.storageKey < b.storageKey ? -1 : 1));
   }
 
   /**
@@ -387,6 +411,7 @@ const XML_ENTITIES: Record<string, string> = {
   quot: '"',
   apos: "'",
 };
+/** XML's escapes undone; throws a RangeError for a character reference past Unicode. */
 const unescapeXml = (text: string) =>
   text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (_, name: string) =>
     name.startsWith('#')
@@ -396,8 +421,22 @@ const unescapeXml = (text: string) =>
       : XML_ENTITIES[name.toLowerCase()]!,
   );
 
-/** A ListObjectsV2 answer's keys and sizes, and its continuation; null when it is not one. */
+/**
+ * A ListObjectsV2 answer's keys and sizes, and its continuation; null when
+ * it is not one, or holds an escape that names no character.
+ */
 export function parseListPage(
+  xml: string,
+): { contents: { key: string; size: number }[]; truncated: boolean; next?: string } | null {
+  try {
+    return readListPage(xml);
+  } catch (error) {
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
+function readListPage(
   xml: string,
 ): { contents: { key: string; size: number }[]; truncated: boolean; next?: string } | null {
   if (!/<ListBucketResult[\s>]/.test(xml) || !/<\/ListBucketResult>\s*$/.test(xml)) return null;

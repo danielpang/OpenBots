@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -193,6 +193,40 @@ describe.each(drivers)('the %s blob store', (_name, make) => {
     );
   });
 
+  it('lists a page at a time, in key order, from after a key when asked', async () => {
+    const org = randomUUID();
+    const keys = Array.from({ length: 7 }, (_, i) => `pagedpart_${String(i).padStart(2, '0')}`);
+    for (const key of [...keys].reverse()) {
+      await store.put({ workspaceId: org, storageKey: `${org}/${key}` }, bytesOf(key), {
+        size: key.length,
+        sha256: sha(bytesOf(key)),
+      });
+    }
+    const pages: string[][] = [];
+    for await (const page of store.listPages(org, 'pagedpart_', { pageSize: 3 })) {
+      pages.push(page.map((b) => b.storageKey.slice(org.length + 1)));
+    }
+    expect(pages).toEqual([keys.slice(0, 3), keys.slice(3, 6), keys.slice(6)]);
+    const after: string[] = [];
+    for await (const page of store.listPages(org, 'pagedpart_', {
+      startAfter: 'pagedpart_03',
+      pageSize: 2,
+    })) {
+      expect(page.length).toBeLessThanOrEqual(2);
+      after.push(...page.map((b) => b.storageKey.slice(org.length + 1)));
+    }
+    expect(after).toEqual(keys.slice(4));
+    // Stopping early asks for no more pages.
+    for await (const page of store.listPages(org, 'pagedpart_', { pageSize: 1 })) {
+      expect(page).toHaveLength(1);
+      break;
+    }
+    const bad = store.listPages(org, 'pagedpart_', { startAfter: '../x' });
+    await expect(bad[Symbol.asyncIterator]().next()).rejects.toSatisfy((e) =>
+      isStorageError(e, 'rejected'),
+    );
+  });
+
   it('keeps blobs of the same key in different organizations apart', async () => {
     const key = randomUUID();
     const [first, second] = [randomUUID(), randomUUID()];
@@ -200,5 +234,25 @@ describe.each(drivers)('the %s blob store', (_name, make) => {
     const b = { workspaceId: second, storageKey: `${second}/${key}` };
     await store.put(a, bytesOf('A'), { size: 1, sha256: sha(bytesOf('A')) });
     expect(await store.head(b)).toBeNull();
+  });
+});
+
+describe('the local blob store', () => {
+  it('lists no symbolic link, and follows none', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openbots-blobs-links-'));
+    try {
+      const store = new LocalBlobStore(dir);
+      const org = randomUUID();
+      const real = { workspaceId: org, storageKey: `${org}/linkpart_real` };
+      await store.put(real, bytesOf('real'), { size: 4, sha256: sha(bytesOf('real')) });
+      const outside = path.join(dir, 'outside.txt');
+      await writeFile(outside, 'not a blob of this organization');
+      await symlink(outside, path.join(path.dirname(store.path(real)), 'linkpart_link'));
+      expect(await store.list(org, 'linkpart_')).toEqual([
+        { storageKey: `${org}/linkpart_real`, size: 4 },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

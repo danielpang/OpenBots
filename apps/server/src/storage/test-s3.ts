@@ -6,7 +6,8 @@ import { verifySigV4 } from './test-sigv4.js';
 // An S3-compatible store in this process, for tests and for running the
 // server against the s3 driver without a network (storage/s3.ts). It speaks
 // PUT, GET (with Range), HEAD and DELETE for one bucket, and ListObjectsV2
-// (GET on the bucket with list-type=2, prefix, max-keys and a continuation token), addressed by path
+// (GET on the bucket with list-type=2, prefix, max-keys, start-after and a
+// continuation token), addressed by path
 // (`<endpoint>/<bucket>/<key>`) or by bucket hostname (a Host of
 // `<bucket>.<anything>`), and checks what a real store checks: the SigV4
 // signature, verified by test-sigv4.ts (written from the specification and
@@ -46,6 +47,8 @@ export interface TestS3 {
    * guessing how long a test needs.
    */
   hold(method?: string): { reached: Promise<void>; release(): void };
+  /** Drops every failure `fail` set that is still to come: the store is back. */
+  recover(): void;
   close(): Promise<void>;
 }
 
@@ -115,7 +118,9 @@ export async function startTestS3(
     if (listing) {
       const prefix = url.searchParams.get('prefix') ?? '';
       const max = Math.min(1000, Number(url.searchParams.get('max-keys') ?? 1000) || 1000);
-      const after = url.searchParams.get('continuation-token') ?? '';
+      // The token is the last key sent; start-after is a key to begin after.
+      const after =
+        url.searchParams.get('continuation-token') ?? url.searchParams.get('start-after') ?? '';
       const keys = [...objects.keys()].filter((k) => k.startsWith(prefix) && k > after).sort();
       const page = keys.slice(0, max);
       const truncated = keys.length > max;
@@ -223,6 +228,9 @@ export async function startTestS3(
     }),
     fail(count, how, method) {
       failures.push({ count, how, ...(method ? { method } : {}) });
+    },
+    recover() {
+      failures.length = 0;
     },
     hold(method) {
       let arrived!: () => void;

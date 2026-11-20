@@ -1,14 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
   StorageError,
+  listAll,
+  pageSizeOf,
   parseListing,
   parseRef,
   type BlobRef,
+  type ListOptions,
   type ListedBlob,
   type BlobStore,
   type ByteRange,
@@ -84,25 +87,40 @@ export class LocalBlobStore implements BlobStore {
     });
   }
 
-  async list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
-    parseListing(workspaceId, keyPrefix);
+  list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]> {
+    return listAll(this.listPages(workspaceId, keyPrefix));
+  }
+
+  async *listPages(
+    workspaceId: string,
+    keyPrefix: string,
+    options: ListOptions = {},
+  ): AsyncGenerator<ListedBlob[]> {
+    parseListing(workspaceId, keyPrefix, options);
+    const size = pageSizeOf(options);
     // Every key with the prefix shares its first two characters, so one shard holds them all.
     const shard = path.join(this.filesDir, 'orgs', workspaceId, keyPrefix.slice(0, 2));
     let names: string[];
     try {
       names = await readdir(shard);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw localError(error);
     }
-    const listed: ListedBlob[] = [];
-    for (const name of names
+    const after = options.startAfter;
+    const keys = names
       .filter((n) => n.startsWith(keyPrefix) && /^[A-Za-z0-9_-]+$/.test(n))
-      .sort()) {
-      const info = await stat(path.join(shard, name)).catch(() => null);
-      if (info?.isFile()) listed.push({ storageKey: `${workspaceId}/${name}`, size: info.size });
+      .filter((n) => after === undefined || n > after)
+      .sort();
+    for (let i = 0; i < keys.length; i += size) {
+      const page: ListedBlob[] = [];
+      for (const name of keys.slice(i, i + size)) {
+        // lstat: a symbolic link is not a blob, and is not followed.
+        const info = await lstat(path.join(shard, name)).catch(() => null);
+        if (info?.isFile()) page.push({ storageKey: `${workspaceId}/${name}`, size: info.size });
+      }
+      if (page.length) yield page;
     }
-    return listed;
   }
 }
 

@@ -370,4 +370,42 @@ describe('the S3 blob store', () => {
     s3.fail(1, { status: 503, code: 'SlowDown' });
     expect(await prefixed.list(workspaceId, 'paged_')).toHaveLength(5);
   });
+
+  it('refuses a listing that is truncated with no continuation, or that it cannot read', async () => {
+    const answering = (xml: string) =>
+      store({}, { fetch: (async () => new Response(xml, { status: 200 })) as typeof fetch });
+    const truncated = await answering(
+      `<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>orgs/${workspaceId}/paged_1</Key><Size>1</Size></Contents></ListBucketResult>`,
+    )
+      .list(workspaceId, 'paged_')
+      .catch((e: unknown) => e);
+    expect(isStorageError(truncated, 'unavailable')).toBe(true);
+    expectNothingSecret(truncated, 'paged_');
+    const malformed = await answering(
+      `<ListBucketResult><Contents><Key>orgs/${workspaceId}/paged_&#99999999;</Key><Size>1</Size></Contents></ListBucketResult>`,
+    )
+      .list(workspaceId, 'paged_')
+      .catch((e: unknown) => e);
+    expect(isStorageError(malformed, 'unavailable')).toBe(true);
+    expectNothingSecret(malformed, 'paged_');
+  });
+
+  it('starts a listing after a key with start-after, under the configured prefix', async () => {
+    const s = store({ prefix: 'after/' });
+    for (const n of [1, 2, 3]) {
+      await s.put({ workspaceId, storageKey: `${workspaceId}/startafter_${n}` }, bytes, {
+        size: bytes.byteLength,
+        sha256: sha(bytes),
+      });
+    }
+    s3.requests.length = 0;
+    const seen: string[] = [];
+    for await (const page of s.listPages(workspaceId, 'startafter_', {
+      startAfter: 'startafter_1',
+    })) {
+      seen.push(...page.map((b) => b.storageKey));
+    }
+    expect(seen).toEqual([`${workspaceId}/startafter_2`, `${workspaceId}/startafter_3`]);
+    expect(s3.requests).toHaveLength(1);
+  });
 });

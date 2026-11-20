@@ -1,7 +1,7 @@
 import type { Readable } from 'node:stream';
 import type { Config } from '../config.js';
 import { LocalBlobStore } from './local.js';
-import { S3BlobStore } from './s3.js';
+import { S3BlobStore, type S3Options } from './s3.js';
 
 // Where stored files' bytes live (plan 4.8; services/files.ts is the only
 // caller). Two drivers behind one narrow interface, made from the config:
@@ -23,8 +23,9 @@ import { S3BlobStore } from './s3.js';
 // delete (a blob whose row was never written). `list` finds one
 // organization's blobs by the start of their key: coding session logs
 // (services/coder-log.ts) are kept as numbered parts with no row of their
-// own, so their reader and the sweep of logs whose session is gone list
-// them. Nothing deletes blobs in bulk yet; that comes with the deletion of
+// own, so their reader lists them (`list`, a session's few parts) and the
+// sweep of logs whose session is gone goes through an organization's a
+// page at a time (`listPages`). Nothing deletes blobs in bulk yet; that comes with the deletion of
 // an organization, by its key prefix.
 
 /** A blob, as its `files` row names it. */
@@ -54,6 +55,13 @@ export interface ListedBlob {
   size: number;
 }
 
+export interface ListOptions {
+  /** Only keys (after `<organization>/`) that sort after this one, which the server made. */
+  startAfter?: string;
+  /** The most blobs in one page: 1000, the most S3 sends, by default. */
+  pageSize?: number;
+}
+
 /** The bytes to store: whole, or a stream made fresh for each attempt. */
 export type PutBody = Uint8Array | (() => Readable);
 
@@ -73,6 +81,23 @@ export interface BlobStore {
    * more of [A-Za-z0-9_-]. Bare keys from before organizations are not listed.
    */
   list(workspaceId: string, keyPrefix: string): Promise<ListedBlob[]>;
+  /**
+   * As `list`, a page at a time, each in key order and each fetched only
+   * when the one before has been taken: a caller that stops early asks for
+   * no more. Memory is one page.
+   */
+  listPages(
+    workspaceId: string,
+    keyPrefix: string,
+    options?: ListOptions,
+  ): AsyncIterable<ListedBlob[]>;
+}
+
+/** Every page of `listPages`, together: for a listing known to be small. */
+export async function listAll(pages: AsyncIterable<ListedBlob[]>): Promise<ListedBlob[]> {
+  const listed: ListedBlob[] = [];
+  for await (const page of pages) listed.push(...page);
+  return listed;
 }
 
 export type StorageErrorKind =
@@ -129,16 +154,36 @@ export function parseRef(ref: BlobRef): { workspaceId: string; inKey: boolean; k
 
 const KEY_PREFIX = /^[A-Za-z0-9_-]{2,200}$/;
 
-/** Checks `list`'s arguments: an organization id and a prefix the server made. */
-export function parseListing(workspaceId: string, keyPrefix: string): void {
+const START_AFTER = /^[A-Za-z0-9_-]{1,200}$/;
+
+/** Checks `list`'s arguments: an organization id and a prefix (and start key) the server made. */
+export function parseListing(
+  workspaceId: string,
+  keyPrefix: string,
+  options: ListOptions = {},
+): void {
   if (!WORKSPACE_ID.test(workspaceId) || !KEY_PREFIX.test(keyPrefix)) {
     throw new StorageError('rejected', 'Malformed storage key prefix');
   }
+  if (options.startAfter !== undefined && !START_AFTER.test(options.startAfter)) {
+    throw new StorageError('rejected', 'Malformed storage key to list after');
+  }
 }
 
-/** The store the config names; cheap to make, so made where it is needed. */
-export function blobStore(config: Pick<Config, 'filesDir' | 'storage'>): BlobStore {
+/** A page size within what S3 answers with. */
+export const pageSizeOf = (options: ListOptions = {}, fallback = 1000) =>
+  Math.min(1000, Math.max(1, Math.floor(options.pageSize ?? fallback)));
+
+/**
+ * The store the config names; cheap to make, so made where it is needed.
+ * `s3Options` tunes the s3 driver's tries and deadlines for a caller that
+ * would rather give up sooner (the coding session log).
+ */
+export function blobStore(
+  config: Pick<Config, 'filesDir' | 'storage'>,
+  s3Options?: S3Options,
+): BlobStore {
   return config.storage.driver === 's3'
-    ? new S3BlobStore(config.storage)
+    ? new S3BlobStore(config.storage, s3Options)
     : new LocalBlobStore(config.filesDir);
 }
