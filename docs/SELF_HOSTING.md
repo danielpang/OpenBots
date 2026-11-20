@@ -186,6 +186,12 @@ shared is stopped. An operator can take one public link down at once with
 `openbots artifacts takedown <link> [reason]` (and put it back with
 `openbots artifacts restore <link>`); both are recorded in the organization's audit log.
 
+An HTML Artifact runs its scripts in a sandboxed frame with no access to the app or the host's
+cookies, and they cannot fetch anything. They are not cut off from the network, though: browsers
+do not block WebRTC or DNS lookups from that frame, so a script in an Artifact can send what the
+Artifact contains to a server its author names. Treat an Artifact with scripts as able to leak
+what is in it, whoever it is shared with.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
