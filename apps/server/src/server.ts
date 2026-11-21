@@ -6,7 +6,7 @@ import { serve } from '@hono/node-server';
 import { makeNonDumpable } from '@openbots/mcp';
 import { createApp } from './app.js';
 import { createAuth, encryptStoredOAuthTokens } from './auth.js';
-import { loadConfig } from './config.js';
+import { loadConfig, storageWarning } from './config.js';
 import type { AppDeps } from './context.js';
 import { createDb } from './db/client.js';
 import { migrate } from './db/migrate.js';
@@ -49,6 +49,10 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
   if (makeNonDumpable())
     logger.info('stdio connectors run as nobody; this process is non-dumpable');
   const config = loadConfig();
+  // The driver's name only: never the bucket, the endpoint or the prefix.
+  logger.info({ driver: config.storage.driver }, 'file storage');
+  const storageWarned = storageWarning(config);
+  if (storageWarned) logger.warn({ driver: config.storage.driver }, storageWarned);
   // The core alone cannot make an organization: the managed service runs from ee/server.
   if (config.deployment === 'managed' && !extensions.organizations) {
     throw new Error(

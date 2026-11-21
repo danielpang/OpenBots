@@ -23,6 +23,7 @@
     "start": "node dist/main.js",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:s3": "OPENBOTS_TEST_STORAGE=s3 vitest run",
     "typecheck": "tsc --noEmit",
     "openapi": "tsx --conditions=@openbots/source src/openapi-cli.ts",
     "db:generate": "drizzle-kit generate",
@@ -33,6 +34,7 @@
     "devices": "tsx --conditions=@openbots/source src/cli/main.ts devices",
     "relay": "tsx --conditions=@openbots/source src/cli/main.ts relay",
     "artifacts": "tsx --conditions=@openbots/source src/cli/main.ts artifacts",
+    "storage": "tsx --conditions=@openbots/source src/cli/main.ts storage",
     "computers": "tsx --conditions=@openbots/source src/cli/main.ts computers",
     "soak": "tsx --conditions=@openbots/source src/soak/main.ts"
   },
@@ -55,6 +57,7 @@
     "@openbots/tunnel": "workspace:*",
     "@openbots/widgets": "workspace:*",
     "ai": "catalog:",
+    "aws4fetch": "^1.0.20",
     "better-auth": "catalog:",
     "bullmq": "catalog:",
     "drizzle-orm": "catalog:",

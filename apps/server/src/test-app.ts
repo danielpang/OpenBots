@@ -16,6 +16,7 @@ import { inWorkspace, scopedDb } from './db/scope.js';
 import type { ServerExtensions } from './extensions.js';
 import { createLogger } from './logger.js';
 import { generateMasterKey } from './secrets.js';
+import { startTestS3, type TestS3 } from './storage/test-s3.js';
 import { attachGateway } from './ws/gateway.js';
 import { ensureWorkspace, organizationSlug, type Role } from './workspace.js';
 
@@ -80,6 +81,10 @@ export interface TestApp {
   switchOrganization(cookie: string, workspaceId: string | null): Promise<void>;
   /** The id of the user with this email. */
   userId(email: string): Promise<string>;
+  /** The storage driver the app uses. */
+  storage: 'local' | 's3';
+  /** The app's own S3-compatible store, with the s3 driver from OPENBOTS_TEST_STORAGE. */
+  s3?: TestS3;
 }
 
 export const ORIGIN = 'http://localhost:3000';
@@ -106,12 +111,17 @@ export async function createTestApp(
   const ownFilesDir = env.OPENBOTS_FILES_DIR
     ? undefined
     : await mkdtemp(path.join(tmpdir(), 'openbots-test-files-'));
+  const s3 =
+    process.env.OPENBOTS_TEST_STORAGE === 's3' && !env.OPENBOTS_STORAGE_DRIVER
+      ? await startTestS3()
+      : undefined;
   const config: Config = loadConfig({
     OPENBOTS_MASTER_KEY: generateMasterKey(),
     DATABASE_URL: 'postgres://unused',
     OPENBOTS_PUBLIC_URL: ORIGIN,
     OPENBOTS_DEPLOYMENT: 'self_hosted',
     ...(ownFilesDir ? { OPENBOTS_FILES_DIR: ownFilesDir } : {}),
+    ...(s3 ? s3.env() : {}),
     ...env,
   });
   const logger = createLogger('silent');
@@ -173,10 +183,13 @@ export async function createTestApp(
       return inWorkspace(workspaceId ?? (await defaultOrganization()), fn);
     },
     testDb,
+    storage: config.storage.driver,
+    ...(s3 ? { s3 } : {}),
     close() {
       closed ??= (async () => {
         await infra.close();
         await testDb.close();
+        await s3?.close();
         if (ownFilesDir) await rm(ownFilesDir, { recursive: true, force: true });
       })();
       return closed;

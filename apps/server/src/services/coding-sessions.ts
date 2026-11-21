@@ -687,8 +687,9 @@ const LOG_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * The session's full event log, its last LOG_MAX_BYTES (empty before the
- * runner wrote any). The runner writes it on the server
- * (services/coder-state.ts), so the computer is not involved.
+ * runner wrote any). The runner writes it on the server, or in the object
+ * store with the s3 driver (services/coder-log.ts), so the computer is not
+ * involved.
  */
 export async function sessionLog(deps: AppDeps, owner: Owner, sessionId: string): Promise<string> {
   const row = await ownSession(deps.db, owner, sessionId);
@@ -769,6 +770,12 @@ export async function discardWorktree(deps: AppDeps, row: CodingSessionRow): Pro
       deps.logger.warn({ err: error, sessionId: row.id }, 'discarding a worktree failed');
     }
   }
+  // Recorded first: a spool of the log another machine still holds is
+  // dropped there, not stored, from now on (coder-log.ts).
+  await deps.db
+    .update(schema.codingSessions)
+    .set({ logDiscardedAt: new Date() })
+    .where(eq(schema.codingSessions.id, row.id));
   await removeSessionLog(deps, row).catch((error: unknown) =>
     deps.logger.warn({ err: error, sessionId: row.id }, 'removing a session log failed'),
   );

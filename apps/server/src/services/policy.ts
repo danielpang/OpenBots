@@ -25,6 +25,7 @@ import { audit } from './approvals.js';
 import {
   blockRules,
   customStdioRefusal,
+  unavailableHere,
   isBlocked,
   isCustomStdio,
   readConfig,
@@ -262,7 +263,9 @@ export async function botToolDefaults(
   for (const connector of mcp) {
     const hintsTrusted = connector.catalogId !== null || connector.trusted;
     const disabledByAdmin =
-      isBlocked(connector, rules) || Boolean(refusal && isCustomStdio(connector));
+      isBlocked(connector, rules) ||
+      Boolean(refusal && isCustomStdio(connector)) ||
+      unavailableHere(deps.config, connector);
     for (const tool of tools) {
       if (tool.connectorId !== connector.id) continue;
       const name = `${connector.slug}__${tool.name}`;

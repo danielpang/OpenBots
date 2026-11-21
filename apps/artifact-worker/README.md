@@ -39,13 +39,22 @@ Nothing here is deployed by CI. The artifact domain is not bought yet.
 still hold the last public answer for up to 60 seconds; purge the URL in Cloudflare (the dashboard
 or the purge API) when that minute matters.
 
+## Where the bytes come from
+
+Every request goes to the server, which decides on each one who may see the Artifact and streams
+its bytes from wherever the server stores files: its own disk under `OPENBOTS_FILES_DIR` with the
+default `local` storage driver, or an S3-compatible bucket (Cloudflare R2 on the hosted service)
+with `OPENBOTS_STORAGE_DRIVER=s3`. The Worker never reads the bucket. It caches public answers
+only, for 60 seconds, as above.
+
 ## Later
 
-Reading blobs straight from object storage, so public Artifacts are served without the server,
-waits for an object storage driver on the server, which does not exist yet: blobs live on the
-server's disk under `OPENBOTS_FILES_DIR`. The server's handler (`apps/server/src/artifact-host/`)
-uses web APIs only, so it can move into this Worker with its lookups and blob access injected once
-that driver exists.
+Reading public blobs straight from the bucket at the edge, so public Artifacts are served without
+the server, is a later optimization. Visibility is decided by the server per request, so the
+Worker would need that decision too (a takedown, or a change of visibility or of the organization's
+public links switch, must still land within a minute). The server's handler
+(`apps/server/src/artifact-host/`) uses web APIs only, so it can move into this Worker with its
+lookups and blob access injected when that is worth doing.
 
 ## Tests
 

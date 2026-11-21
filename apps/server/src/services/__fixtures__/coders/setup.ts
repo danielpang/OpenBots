@@ -302,14 +302,16 @@ export async function coderWorld(
   email = 'coder-owner@example.com',
   {
     fakeAgent = false,
+    env = {},
     refuseRepoJobs = false,
   }: {
     fakeAgent?: boolean;
+    env?: Record<string, string>;
     /** The queue refuses the start's repository jobs (a queue that is down). */
     refuseRepoJobs?: boolean;
   } = {},
 ): Promise<CoderWorld> {
-  const t = await createTestApp({ OPENBOTS_SIGNUP_MODE: 'open' });
+  const t = await createTestApp({ OPENBOTS_SIGNUP_MODE: 'open', ...env });
   const computer = await useTestComputer(t.ownerDeps);
   const coder = scriptedCoder();
   const inner = computer.provider;

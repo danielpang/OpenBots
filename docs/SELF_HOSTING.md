@@ -93,7 +93,7 @@ The stack (`compose.yaml` at the root includes `docker/docker-compose.yml` and
 | `docker-socket-proxy`                | `tecnativa/docker-socket-proxy` | Docker API filtered by URL, reachable only from `docker-guard`           |
 | `sandbox-firewall`                   | OpenBots sandbox firewall image | Keeps the computers' network rules applied on the Docker host            |
 | `egress-proxy` (profile `egress`)    | `kalaksi/tinyproxy`             | Optional allowlisting proxy for the computers' web traffic (below)       |
-| `minio` (profile `s3`)               | `minio/minio`                   | Optional object storage (not used by OpenBots yet)                       |
+| `minio` (profile `s3`)               | `minio/minio`                   | Optional object storage for the `s3` storage driver (below)              |
 | `ngrok` (profile `ngrok`)            | `ngrok/ngrok`                   | Optional tunnel, see below                                               |
 | `cloudflared` (profile `cloudflare`) | `cloudflare/cloudflared`        | Optional tunnel, see below                                               |
 
@@ -219,6 +219,99 @@ cookies, and they cannot fetch anything. They are not cut off from the network, 
 do not block WebRTC or DNS lookups from that frame, so a script in an Artifact can send what the
 Artifact contains to a server its author names. Treat an Artifact with scripts as able to leak
 what is in it, whoever it is shared with.
+
+### Object storage
+
+Uploads, attachments, avatars, webhook bodies and every Artifact version are stored on the
+server's disk under `OPENBOTS_FILES_DIR` unless you choose otherwise. That needs nothing set and
+suits a server on one machine. A server that runs on several machines (separate `api` and `worker`
+processes, say) needs one store they all reach: set `OPENBOTS_STORAGE_DRIVER=s3` and point it at an
+S3-compatible bucket, such as Cloudflare R2, AWS S3 or the MinIO in the compose `s3` profile.
+
+| Setting                                                      | What it is                                                                                                                                                       |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENBOTS_STORAGE_DRIVER`                                    | `local` (the default) or `s3`                                                                                                                                    |
+| `OPENBOTS_S3_BUCKET`                                         | The bucket, which must exist. Keep it private: the server checks who may see each file and serves it itself                                                      |
+| `OPENBOTS_S3_ENDPOINT`                                       | The service's address: `https://<account id>.r2.cloudflarestorage.com` for R2, `http://minio:9000` for the compose profile. Empty for AWS                        |
+| `OPENBOTS_S3_REGION`                                         | `auto` for R2 (the default when an endpoint is set); the bucket's region for AWS                                                                                 |
+| `OPENBOTS_S3_ACCESS_KEY_ID`, `OPENBOTS_S3_SECRET_ACCESS_KEY` | A key that may read, write and delete objects in that bucket only (on AWS, also `s3:ListBucket` on the bucket, below). Secrets: they may be given as `NAME_FILE` |
+| `OPENBOTS_S3_PREFIX`                                         | Optional: put before every key, for a bucket shared with other data, such as `openbots/prod`                                                                     |
+| `OPENBOTS_S3_PATH_STYLE`                                     | `true` to address the bucket as `<endpoint>/<bucket>` (the default with an endpoint), `false` for `<bucket>.<endpoint host>` (the default for AWS)               |
+
+The server checks these when it starts and stops with a message naming what is missing. An S3
+setting without `OPENBOTS_STORAGE_DRIVER=s3` is refused too, rather than ignored. Files are stored
+under `orgs/<organization id>/` in the bucket (after the prefix), named by ids the server makes.
+Each upload is checked against its sha256 on the way in; a file's type and size are kept in the
+database, not taken from the bucket. A request the store fails with a network error, a 5xx or a 429
+is tried again up to four times; while the store is down, reading or storing a file answers 503
+`STORAGE_UNAVAILABLE`. Error messages and logs never name the bucket, the endpoint, a key or a
+credential.
+
+On AWS, give the key `s3:ListBucket` on the bucket as well as `s3:GetObject`, `s3:PutObject` and
+`s3:DeleteObject` on its objects: coding session logs are found by listing, and without it AWS
+answers a request for a file that is not there with 403 Access Denied instead of 404, so a missing
+file looks like a permission error (and `openbots storage copy` fails every file it has not copied
+yet, saying so). R2 and MinIO answer 404 either way; an R2 token needs Object Read and Write.
+
+Coding session logs go to the bucket too, under the same `orgs/<organization id>/` prefix. The
+machine running a session appends its output to a spool file in `OPENBOTS_FILES_DIR/coders/` and
+stores it in parts: once 1 MB is waiting, 30 seconds after output starts waiting (for the first 64
+parts of a session; after that only by size), and when the session ends, when the spool is removed.
+Any machine reads a session's log from the bucket, the running ones included; the session's live
+feed in the apps does not depend on it. The log never holds a session up: when the bucket does not
+answer, a session starts within 5 seconds and keeps its output in the spool, the machine asks the
+bucket again after 30 seconds and then less often (up to every 5 minutes), and the end of a session
+waits at most 5 seconds for the last part. A spool that could not be stored stays on that machine's
+disk and is stored the next time the session runs there or the worker starts there.
+
+What a machine can lose: if it stops in the middle of a session and its disk survives, nothing (the
+spool is stored at the next start). If its disk is lost too, it loses what its spool held that was
+not stored yet: while the bucket answers, less than 1 MB, and for a session's first 64 parts also
+no more than its last 30 seconds of output; while the bucket was not answering, everything the
+session wrote since then, up to the 8 MB a session log keeps. Because the logs are found by
+listing the bucket, the key needs list permission (`s3:ListBucket` on AWS, below). At each start a
+worker also removes the parts of sessions that are gone, a few thousand parts for each organization
+at a time.
+
+`OPENBOTS_FILES_DIR` stays in use with the `s3` driver for those spools and for folder (Filesystem)
+connectors that run on the server. With `OPENBOTS_STDIO_RUNNER=host` a folder connector's folder is
+on the disk of the machine that runs it, so on several machines a folder made on one is missing on
+the others: turn them off there with `OPENBOTS_FOLDER_CONNECTORS=false` (the server warns at start
+when the `s3` driver runs with them on the host). Off, adding one is refused with 403
+`FOLDER_CONNECTORS_UNAVAILABLE`, the catalog leaves them out, and one that exists does not run and
+shows as disabled. A self-hosted install keeps them on unless you set it. With
+`OPENBOTS_STDIO_RUNNER=computer` each folder connector runs in its owner's computer and serves a
+folder there, which every machine reaches, so they stay available and the setting is not read. The
+Artifact host keeps serving through the server with either driver (the Cloudflare Worker forwards
+to it).
+
+**Moving an install that already has files.** Rows written before stay as they are; only where
+their bytes live changes. The last copy runs with the server stopped, so a file uploaded during the
+move cannot be left behind:
+
+1. Make the bucket and its key, and set the `OPENBOTS_S3_*` settings and
+   `OPENBOTS_STORAGE_DRIVER=s3` in `.env`. A running server keeps using `local` until it restarts.
+2. Optional, to shorten the time the server is down: copy while it is still running,
+   `docker compose run --rm openbots storage copy` (from a checkout:
+   `pnpm --filter @openbots/server storage copy`). It reads every stored file's record, checks the
+   file on disk against its size and sha256, uploads it, and checks it arrived. `--dry-run` only
+   counts. It prints one line for each file it could not copy (by its id) and a summary, and exits
+   with status 1 if any was missing, did not match its record or failed. It skips what is already
+   in the bucket, so it can be stopped and run again at any time. It copies the coding session logs
+   in `OPENBOTS_FILES_DIR/coders/` as well; run it on each machine that ran sessions, since a log
+   left on another machine's disk stays there.
+3. Stop the server: `docker compose stop openbots` (every api and worker process, if you run them
+   apart).
+4. Run the copy a final time, as in step 2. It sends only what was uploaded since the last run,
+   and the end of any session log that grew since then. Repeat it until it reports nothing failed.
+5. Start the server with the new settings, `docker compose up -d`, and check that an old upload and
+   an Artifact open.
+
+It never deletes anything, from the disk or the bucket. Once the server has run on the bucket for a
+while, the old copies under `OPENBOTS_FILES_DIR/orgs/` and its two character directories can be
+removed by hand, and so can the `<session id>.log` files in `coders/` once the copy has stored
+them (keep `connectors/`, and the `.spool` files of sessions still running). To go back to `local`, unset the settings: the
+files on disk are as they were, without anything uploaded since.
 
 ### Egress proxy for the computers
 
@@ -356,7 +449,8 @@ bash scripts/restore.sh backups/<timestamp> --yes   # the same without asking, f
 A backup, readable by your user only, holds:
 
 - `database.dump`: a `pg_dump` of the database.
-- `files.tar.gz`: the `files` volume (every upload and Artifact file).
+- `files.tar.gz`: the `files` volume (every upload and Artifact file with the default `local`
+  storage driver).
 - `computers/<volume>.tar.gz`: each Bot computer's home volume.
 - `MANIFEST`: checksums and the file count.
 
@@ -393,6 +487,12 @@ secrets.
 links to the relay with. If both copies run, they dial the relay as one server and the phone
 reaches whichever linked last. Stop the old install (`docker compose down`,
 `docker stop -t 60 <container>`, `fly machine stop`) before you start the restored one.
+
+**With the `s3` storage driver** ([Object storage](#object-storage)), uploads, Artifact files
+and coding session logs are in the bucket, not in the `files` volume, so `files.tar.gz` holds only
+the folder connectors' folders and the unsent end of running sessions' logs. Back the bucket up with your provider's own tools (versioning, replication or a
+scheduled copy) at the same time as the database: a restore needs both from the same moment, since
+a file whose record is in the dump but whose object is gone reads as not found.
 
 Without Docker (a development install), both scripts use `DATABASE_URL` and `OPENBOTS_FILES_DIR`
 and need `pg_dump` / `pg_restore` on `PATH`; computer volumes are skipped.
@@ -437,7 +537,8 @@ the last one finished. A backup made before a rotation needs the key it was made
 
 Each secret setting (`OPENBOTS_MASTER_KEY`, `OPENBOTS_MASTER_KEY_PREVIOUS`, `DATABASE_URL`,
 `REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
-`OPENBOTS_METRICS_TOKEN` and `OPENBOTS_ARTIFACT_EDGE_SECRET`) can be given as `NAME_FILE` instead: the path of a file holding the value,
+`OPENBOTS_METRICS_TOKEN`, `OPENBOTS_ARTIFACT_EDGE_SECRET` and the object storage keys
+`OPENBOTS_S3_ACCESS_KEY_ID` and `OPENBOTS_S3_SECRET_ACCESS_KEY`) can be given as `NAME_FILE` instead: the path of a file holding the value,
 such as a Docker or Kubernetes secret. Set one or the other, not both.
 
 The compose stack does this itself: its entrypoint moves the secrets from `.env` into private

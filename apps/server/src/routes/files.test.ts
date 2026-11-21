@@ -63,8 +63,14 @@ describe('/api/v1/files', () => {
       size: PNG.byteLength,
       sha256: createHash('sha256').update(PNG).digest('hex'),
     });
-    const shards = await readdir(dir);
-    expect(shards).toHaveLength(1);
+    // On disk under the organization's directory, or in the bucket under its prefix.
+    const workspaceId = (await ensureWorkspace(t.db)).id;
+    if (t.s3) {
+      expect([...t.s3.objects.keys()]).toEqual([expect.stringMatching(`^orgs/${workspaceId}/`)]);
+    } else {
+      expect(await readdir(dir)).toEqual(['orgs']);
+      expect(await readdir(path.join(dir, 'orgs'))).toEqual([workspaceId]);
+    }
 
     const got = await t.app.request(`/api/v1/files/${file.id}`, { headers: { cookie: alice } });
     expect(got.status).toBe(200);

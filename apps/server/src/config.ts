@@ -16,10 +16,12 @@ import {
   type Limits,
   type ProcessLimits,
 } from '@openbots/shared';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import { isCidr } from './client-ip.js';
 import { resolveSecretFiles } from './env-files.js';
 import { parseMasterKey } from './secrets.js';
+import type { S3StorageConfig } from './storage/s3.js';
 
 // Server configuration from the environment (plan 16.2). Empty values count as
 // unset, so a copied `.env.example` with blank keys parses cleanly. Secrets may
@@ -145,6 +147,7 @@ const envSchema = z.object({
   ),
   OPENBOTS_LOCAL_ENDPOINTS: optional(z.stringbool()),
   OPENBOTS_CUSTOM_STDIO: optional(z.stringbool()),
+  OPENBOTS_FOLDER_CONNECTORS: optional(z.stringbool()),
   OPENBOTS_STDIO_RUNNER: optional(z.enum(['host', 'computer'])),
   OPENBOTS_ALLOW_HOST_STDIO: withDefault(z.stringbool(), 'false'),
   OPENBOTS_SIGNUP_MODE: withDefault(
@@ -152,6 +155,39 @@ const envSchema = z.object({
     'first_user_admin',
   ),
   OPENBOTS_FILES_DIR: withDefault(z.string(), '/data/files'),
+  // Where stored files live (storage/index.ts). Checked together by storageFrom below.
+  OPENBOTS_STORAGE_DRIVER: withDefault(z.enum(['local', 's3']), 'local'),
+  OPENBOTS_S3_BUCKET: optional(
+    z
+      .string()
+      .refine(
+        (name) =>
+          /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(name) &&
+          !/\.\.|\.-|-\./.test(name) &&
+          !/^\d+\.\d+\.\d+\.\d+$/.test(name),
+        {
+          message:
+            'must be a bucket name: 3 to 63 lower case letters, digits, dots and hyphens, with no dot next to another dot or a hyphen, and not shaped like an IP address',
+        },
+      ),
+  ),
+  OPENBOTS_S3_ENDPOINT: optional(z.url({ protocol: /^https?$/ })),
+  OPENBOTS_S3_REGION: optional(
+    z
+      .string()
+      .regex(/^[a-z0-9-]{1,32}$/, { message: 'must be a region such as auto or us-east-1' }),
+  ),
+  OPENBOTS_S3_ACCESS_KEY_ID: optional(z.string()),
+  OPENBOTS_S3_SECRET_ACCESS_KEY: optional(z.string()),
+  OPENBOTS_S3_PREFIX: optional(
+    z
+      .string()
+      .transform((value) => value.replace(/\/+$/, ''))
+      .refine((value) => /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/.test(value), {
+        message: 'must be path segments of letters, digits, _ and -, such as openbots/prod',
+      }),
+  ),
+  OPENBOTS_S3_PATH_STYLE: optional(z.stringbool()),
   OPENBOTS_ARTIFACT_DOMAIN: optional(
     z
       .string()
@@ -218,6 +254,7 @@ const envSchema = z.object({
 });
 
 export type Deployment = 'self_hosted' | 'managed';
+export type StorageConfig = { driver: 'local' } | S3StorageConfig;
 export type StdioRunner = 'host' | 'computer';
 
 export interface OAuthClient {
@@ -357,6 +394,18 @@ export interface Config {
    */
   customStdio: boolean;
   /**
+   * Whether folder (filesystem) connectors may be added and run. Always on
+   * with the `computer` stdio runner: each runs in its owner's computer
+   * and serves a folder there. With the `host` runner each serves a folder
+   * on this server's disk, under `<filesDir>/connectors/`, which one
+   * machine of several does not share, so OPENBOTS_FOLDER_CONNECTORS
+   * decides: on by default for a self-hosted install, off by default for a
+   * managed one (which runs host stdio only with OPENBOTS_ALLOW_HOST_STDIO,
+   * every organization's on one server). Off, adding one is refused and
+   * one that exists does not run and reads as unavailable.
+   */
+  folderConnectors: boolean;
+  /**
    * Where stdio connectors run (OPENBOTS_STDIO_RUNNER). `host`, the default
    * for a self-hosted install, runs them as child processes of this server,
    * as an unprivileged user. `computer`, the default on the managed service,
@@ -366,7 +415,20 @@ export interface Config {
    * OPENBOTS_ALLOW_HOST_STDIO, and then warns at every start.
    */
   stdioRunner: StdioRunner;
+  /**
+   * OPENBOTS_FILES_DIR: uploads, Artifact blobs and coding session logs
+   * (`coders/`) with the local storage driver; with s3, only the spools of
+   * session logs this machine has not stored yet (services/coder-log.ts).
+   * Folder connectors' folders (`connectors/`) are here with either driver
+   * when they run on this server (the `host` stdio runner).
+   */
   filesDir: string;
+  /**
+   * Where stored files' bytes live (OPENBOTS_STORAGE_DRIVER, storage/index.ts):
+   * `local`, the default, is `filesDir`; `s3` is an S3-compatible bucket
+   * (OPENBOTS_S3_*), for several machines sharing one store.
+   */
+  storage: StorageConfig;
   /**
    * The artifact host (plan 21.11; OPENBOTS_ARTIFACT_DOMAIN): Artifacts a
    * person shared are served at `https://<bot>--<organization>.<domain>/<id>`,
@@ -427,6 +489,22 @@ export interface Config {
 export const DEFAULT_GITHUB_CONNECTOR_CLIENT_ID = 'Iv23liyL74CRKUWIUXhq';
 export const DEFAULT_GITHUB_CONNECTOR_APP_SLUG = 'openbots-github';
 
+/**
+ * What the server warns about at start in how storage is set up, or null.
+ * The s3 driver is for a server on several machines, but folder connectors
+ * that run on the server (the `host` stdio runner) keep their folders on
+ * one machine's disk (`<filesDir>/connectors/`), so a folder made on one is
+ * missing on the others. With the `computer` runner a folder is in its
+ * owner's computer, which every machine reaches. Names the settings only.
+ */
+export function storageWarning(
+  config: Pick<Config, 'storage' | 'folderConnectors' | 'stdioRunner'>,
+): string | null {
+  if (config.storage.driver !== 's3' || config.stdioRunner !== 'host' || !config.folderConnectors)
+    return null;
+  return "OPENBOTS_STORAGE_DRIVER=s3 with folder connectors on the server (OPENBOTS_STDIO_RUNNER=host, OPENBOTS_FOLDER_CONNECTORS): their folders stay on each machine's own disk, so on several machines a connector finds a different folder, or none; set OPENBOTS_FOLDER_CONNECTORS=false, or run stdio connectors in computers (OPENBOTS_STDIO_RUNNER=computer)";
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const secrets = resolveSecretFiles(env);
   const parsed = envSchema.safeParse(secrets.env);
@@ -477,6 +555,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const githubApp = githubAppFrom(e);
   const artifactHost = artifactHostFrom(e);
+  const storage = storageFrom(e);
   const raw = e as Record<string, unknown>;
   const limitOverrides: Partial<Limits> = {};
   for (const [key, name] of Object.entries(LIMIT_ENV_VARS) as [keyof Limits, string][]) {
@@ -528,8 +607,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     signupMode: e.OPENBOTS_SIGNUP_MODE,
     localEndpoints: e.OPENBOTS_LOCAL_ENDPOINTS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
     customStdio: e.OPENBOTS_CUSTOM_STDIO ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted',
+    // In the computer a folder is the member's own; on the server, the setting decides.
+    folderConnectors:
+      stdioRunner === 'computer' ||
+      (e.OPENBOTS_FOLDER_CONNECTORS ?? e.OPENBOTS_DEPLOYMENT === 'self_hosted'),
     stdioRunner,
     filesDir: e.OPENBOTS_FILES_DIR,
+    storage,
     ...(artifactHost ? { artifactHost } : {}),
     mcpCatalog: { dir: e.OPENBOTS_MCP_DIR, allowNpx: e.OPENBOTS_MCP_NPX_FALLBACK },
     role: e.OPENBOTS_ROLE,
@@ -585,6 +669,103 @@ function artifactHostFrom(e: z.infer<typeof envSchema>): Config['artifactHost'] 
     domain,
     ...(e.OPENBOTS_ARTIFACT_EDGE_SECRET ? { edgeSecret: e.OPENBOTS_ARTIFACT_EDGE_SECRET } : {}),
   };
+}
+
+const S3_SETTINGS = [
+  'OPENBOTS_S3_BUCKET',
+  'OPENBOTS_S3_ENDPOINT',
+  'OPENBOTS_S3_REGION',
+  'OPENBOTS_S3_ACCESS_KEY_ID',
+  'OPENBOTS_S3_SECRET_ACCESS_KEY',
+  'OPENBOTS_S3_PREFIX',
+  'OPENBOTS_S3_PATH_STYLE',
+] as const;
+
+/**
+ * The storage driver. `s3` needs a bucket, both keys, and an endpoint or a
+ * region: R2 and MinIO give an endpoint (the region is then `auto` unless
+ * set), AWS a region (the endpoint is then its own). The S3 settings apply
+ * only to `s3`, so one set without it is refused rather than ignored. The
+ * messages name settings, never their values.
+ */
+function storageFrom(e: z.infer<typeof envSchema>): StorageConfig {
+  if (e.OPENBOTS_STORAGE_DRIVER === 'local') {
+    const stray = S3_SETTINGS.filter((name) => e[name] !== undefined);
+    if (stray.length) {
+      throw new Error(
+        `invalid configuration:\n${stray.map((name) => `  ${name}: set only with OPENBOTS_STORAGE_DRIVER=s3`).join('\n')}`,
+      );
+    }
+    return { driver: 'local' };
+  }
+  const problems: string[] = [];
+  if (!e.OPENBOTS_S3_BUCKET)
+    problems.push('  OPENBOTS_S3_BUCKET: needed with OPENBOTS_STORAGE_DRIVER=s3');
+  if (!e.OPENBOTS_S3_ACCESS_KEY_ID) {
+    problems.push('  OPENBOTS_S3_ACCESS_KEY_ID: needed with OPENBOTS_STORAGE_DRIVER=s3');
+  }
+  if (!e.OPENBOTS_S3_SECRET_ACCESS_KEY) {
+    problems.push('  OPENBOTS_S3_SECRET_ACCESS_KEY: needed with OPENBOTS_STORAGE_DRIVER=s3');
+  }
+  if (!e.OPENBOTS_S3_ENDPOINT && !e.OPENBOTS_S3_REGION) {
+    problems.push(
+      '  OPENBOTS_S3_ENDPOINT: needed with OPENBOTS_STORAGE_DRIVER=s3, unless OPENBOTS_S3_REGION names an AWS region',
+    );
+  }
+  if (!e.OPENBOTS_S3_ENDPOINT && e.OPENBOTS_S3_REGION === 'auto') {
+    problems.push(
+      "  OPENBOTS_S3_REGION: auto needs OPENBOTS_S3_ENDPOINT (R2, MinIO); for AWS, name the bucket's region",
+    );
+  }
+  if (e.OPENBOTS_S3_ENDPOINT) {
+    const url = new URL(e.OPENBOTS_S3_ENDPOINT);
+    if (url.username || url.password || url.search || url.hash) {
+      problems.push(
+        "  OPENBOTS_S3_ENDPOINT: must be the service's address alone, with no user name, password, query or fragment (the keys go in OPENBOTS_S3_ACCESS_KEY_ID and OPENBOTS_S3_SECRET_ACCESS_KEY)",
+      );
+    } else if (url.protocol === 'http:' && !onThisNetwork(url.hostname)) {
+      problems.push(
+        '  OPENBOTS_S3_ENDPOINT: use https; plain http is taken only for this machine, a single label name such as a compose service, or a private address',
+      );
+    }
+  }
+  if (problems.length) throw new Error(`invalid configuration:\n${problems.join('\n')}`);
+  const region = e.OPENBOTS_S3_REGION ?? 'auto';
+  const endpoint = e.OPENBOTS_S3_ENDPOINT ?? `https://s3.${region}.amazonaws.com`;
+  // An endpoint of one's own (R2, MinIO) is addressed by path; AWS by bucket hostname.
+  const pathStyle = e.OPENBOTS_S3_PATH_STYLE ?? !!e.OPENBOTS_S3_ENDPOINT;
+  // <bucket>.<host> with a dot in the bucket is not covered by the host's wildcard certificate.
+  if (!pathStyle && e.OPENBOTS_S3_BUCKET!.includes('.') && endpoint.startsWith('https:')) {
+    throw new Error(
+      'invalid configuration:\n  OPENBOTS_S3_BUCKET: a name with dots cannot be reached by bucket hostname over https; set OPENBOTS_S3_PATH_STYLE=true or use a name without dots',
+    );
+  }
+  return {
+    driver: 's3',
+    bucket: e.OPENBOTS_S3_BUCKET!,
+    endpoint,
+    region,
+    accessKeyId: e.OPENBOTS_S3_ACCESS_KEY_ID!,
+    secretAccessKey: e.OPENBOTS_S3_SECRET_ACCESS_KEY!,
+    prefix: e.OPENBOTS_S3_PREFIX ? `${e.OPENBOTS_S3_PREFIX}/` : '',
+    pathStyle,
+  };
+}
+
+/**
+ * Whether a plain http endpoint stays off the public internet: this machine
+ * (loopback), a single label name (a compose service such as `minio`), or a
+ * private address literal (10/8, 172.16/12, 192.168/16, fc00::/7).
+ */
+function onThisNetwork(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const family = isIP(host);
+  if (family === 4) {
+    const [a, b] = host.split('.').map(Number) as [number, number];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (family === 6) return host === '::1' || /^f[cd][0-9a-f]{0,2}:/.test(host);
+  return host === 'localhost' || !host.includes('.');
 }
 
 const GITHUB_APP_REQUIRED = [

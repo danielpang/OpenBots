@@ -23,6 +23,7 @@ describe('loadConfig', () => {
       githubConnectorAppSlug: 'openbots-github',
       signupMode: 'first_user_admin',
       filesDir: '/data/files',
+      storage: { driver: 'local' },
       mcpCatalog: { dir: '/opt/openbots/mcp', allowNpx: false },
       role: 'all',
       limits: DEFAULT_LIMITS,
@@ -33,6 +34,195 @@ describe('loadConfig', () => {
     expect(config.sandboxProxy).toBeUndefined();
     expect(config.timezone).toBe('UTC');
     expect(config.sandboxNetwork).toEqual({ name: 'openbots-sbx', bridge: 'openbots-sbx' });
+  });
+
+  describe('storage', () => {
+    const r2 = {
+      OPENBOTS_STORAGE_DRIVER: 's3',
+      OPENBOTS_S3_BUCKET: 'openbots-files',
+      OPENBOTS_S3_ENDPOINT: 'https://0123abcd.r2.cloudflarestorage.com',
+      OPENBOTS_S3_ACCESS_KEY_ID: 'access-key-id-value',
+      OPENBOTS_S3_SECRET_ACCESS_KEY: 'secret-access-key-value',
+    };
+
+    it('is local disk unless set, with every S3 setting empty', () => {
+      expect(loadConfig({ ...base, OPENBOTS_STORAGE_DRIVER: '' }).storage).toEqual({
+        driver: 'local',
+      });
+      expect(
+        loadConfig({ ...base, OPENBOTS_S3_BUCKET: '', OPENBOTS_S3_PREFIX: '' }).storage,
+      ).toEqual({ driver: 'local' });
+    });
+
+    it('takes an S3-compatible endpoint, region auto and paths unless told otherwise', () => {
+      expect(loadConfig({ ...base, ...r2, OPENBOTS_S3_PREFIX: 'prod/eu/' }).storage).toEqual({
+        driver: 's3',
+        bucket: 'openbots-files',
+        endpoint: 'https://0123abcd.r2.cloudflarestorage.com',
+        region: 'auto',
+        accessKeyId: 'access-key-id-value',
+        secretAccessKey: 'secret-access-key-value',
+        prefix: 'prod/eu/',
+        pathStyle: true,
+      });
+      expect(loadConfig({ ...base, ...r2, OPENBOTS_S3_PATH_STYLE: 'false' }).storage).toMatchObject(
+        { pathStyle: false, prefix: '' },
+      );
+    });
+
+    it("takes AWS by region alone, with the region's endpoint and bucket hostnames", () => {
+      const { OPENBOTS_S3_ENDPOINT: _, ...aws } = r2;
+      expect(
+        loadConfig({ ...base, ...aws, OPENBOTS_S3_REGION: 'eu-west-1' }).storage,
+      ).toMatchObject({
+        endpoint: 'https://s3.eu-west-1.amazonaws.com',
+        region: 'eu-west-1',
+        pathStyle: false,
+      });
+    });
+
+    it('names each missing setting, and never a value', () => {
+      let message = '';
+      try {
+        loadConfig({
+          ...base,
+          OPENBOTS_STORAGE_DRIVER: 's3',
+          OPENBOTS_S3_SECRET_ACCESS_KEY: 'secret-access-key-value',
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('OPENBOTS_S3_BUCKET: needed with OPENBOTS_STORAGE_DRIVER=s3');
+      expect(message).toContain('OPENBOTS_S3_ACCESS_KEY_ID: needed');
+      expect(message).toContain('OPENBOTS_S3_ENDPOINT: needed');
+      expect(message).not.toContain('OPENBOTS_S3_SECRET_ACCESS_KEY:');
+      expect(message).not.toContain('secret-access-key-value');
+    });
+
+    it('refuses S3 settings without the s3 driver, rather than ignore them', () => {
+      expect(() => loadConfig({ ...base, OPENBOTS_S3_BUCKET: 'openbots-files' })).toThrow(
+        /OPENBOTS_S3_BUCKET: set only with OPENBOTS_STORAGE_DRIVER=s3/,
+      );
+    });
+
+    it('refuses a bucket, prefix or region that is not one', () => {
+      expect(() => loadConfig({ ...base, ...r2, OPENBOTS_S3_BUCKET: 'Bad_Bucket' })).toThrow(
+        /OPENBOTS_S3_BUCKET/,
+      );
+      for (const prefix of ['../up', '/abs', 'a//b', 'with space']) {
+        expect(() => loadConfig({ ...base, ...r2, OPENBOTS_S3_PREFIX: prefix }), prefix).toThrow(
+          /OPENBOTS_S3_PREFIX/,
+        );
+      }
+      expect(() => loadConfig({ ...base, ...r2, OPENBOTS_S3_ENDPOINT: 'ftp://x' })).toThrow(
+        /OPENBOTS_S3_ENDPOINT/,
+      );
+    });
+
+    /** The configuration error `env` gives, which must not hold any of `values`. */
+    const refusal = (env: Record<string, string>, ...values: string[]) => {
+      let message = '';
+      try {
+        loadConfig({ ...base, ...env });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      for (const value of values) expect(message).not.toContain(value);
+      return message;
+    };
+
+    it('refuses an endpoint with credentials, a query or a fragment in it', () => {
+      for (const endpoint of [
+        'https://user:pw-SECRETX@acct.r2.cloudflarestorage.com',
+        'https://user-SECRETX@acct.r2.cloudflarestorage.com',
+        'https://acct.r2.cloudflarestorage.com/?x-SECRETX=1',
+        'https://acct.r2.cloudflarestorage.com/#SECRETX',
+      ]) {
+        expect(
+          refusal({ ...r2, OPENBOTS_S3_ENDPOINT: endpoint }, 'SECRETX', 'acct.r2'),
+          endpoint,
+        ).toMatch(/OPENBOTS_S3_ENDPOINT: must be the service's address alone/);
+      }
+    });
+
+    it('refuses region auto without an endpoint, which names no AWS region', () => {
+      const { OPENBOTS_S3_ENDPOINT: _, ...aws } = r2;
+      expect(refusal({ ...aws, OPENBOTS_S3_REGION: 'auto' })).toMatch(
+        /OPENBOTS_S3_REGION: auto needs OPENBOTS_S3_ENDPOINT/,
+      );
+    });
+
+    it('refuses bucket names AWS would not take, or could not reach over https', () => {
+      for (const bucket of ['192.168.1.1', 'a..b', 'a.-b', 'a-.b']) {
+        expect(refusal({ ...r2, OPENBOTS_S3_BUCKET: bucket }, bucket), bucket).toMatch(
+          /OPENBOTS_S3_BUCKET: must be a bucket name/,
+        );
+      }
+      // A dotted name does not match the certificate of <bucket>.<host> over https.
+      const { OPENBOTS_S3_ENDPOINT: _, ...aws } = r2;
+      const dotted = {
+        ...aws,
+        OPENBOTS_S3_REGION: 'us-east-1',
+        OPENBOTS_S3_BUCKET: 'files.example',
+      };
+      expect(refusal(dotted, 'files.example')).toMatch(
+        /OPENBOTS_S3_BUCKET: a name with dots cannot be reached by bucket hostname over https; set OPENBOTS_S3_PATH_STYLE=true or use a name without dots/,
+      );
+      expect(
+        loadConfig({ ...base, ...dotted, OPENBOTS_S3_PATH_STYLE: 'true' }).storage,
+      ).toMatchObject({ bucket: 'files.example', pathStyle: true });
+      // By path, the default with an endpoint, a dotted name is fine.
+      expect(
+        loadConfig({ ...base, ...r2, OPENBOTS_S3_BUCKET: 'files.example' }).storage,
+      ).toMatchObject({ pathStyle: true });
+    });
+
+    it('takes plain http only on this machine or a private network', () => {
+      for (const endpoint of [
+        'http://127.0.0.1:9000',
+        'http://localhost:9000',
+        'http://[::1]:9000',
+        'http://minio:9000',
+        'http://10.1.2.3:9000',
+        'http://172.20.0.5:9000',
+        'http://192.168.1.10',
+        'http://[fd00::5]:9000',
+      ]) {
+        expect(
+          loadConfig({ ...base, ...r2, OPENBOTS_S3_ENDPOINT: endpoint }).storage,
+          endpoint,
+        ).toMatchObject({ endpoint });
+      }
+      for (const endpoint of [
+        'http://storage.example.com',
+        'http://8.8.8.8:9000',
+        'http://172.32.0.1',
+        'http://[2001:db8::1]',
+      ]) {
+        expect(
+          refusal({ ...r2, OPENBOTS_S3_ENDPOINT: endpoint }, endpoint.slice(7)),
+          endpoint,
+        ).toMatch(/OPENBOTS_S3_ENDPOINT: use https/);
+      }
+    });
+
+    it('takes the keys from files, like the other secrets', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openbots-s3-'));
+      writeFileSync(join(dir, 'id'), 'id-from-file\n');
+      writeFileSync(join(dir, 'secret'), 'secret-from-file\n');
+      const { OPENBOTS_S3_ACCESS_KEY_ID: _a, OPENBOTS_S3_SECRET_ACCESS_KEY: _s, ...rest } = r2;
+      const config = loadConfig({
+        ...base,
+        ...rest,
+        OPENBOTS_S3_ACCESS_KEY_ID_FILE: join(dir, 'id'),
+        OPENBOTS_S3_SECRET_ACCESS_KEY_FILE: join(dir, 'secret'),
+      });
+      expect(config.storage).toMatchObject({
+        accessKeyId: 'id-from-file',
+        secretAccessKey: 'secret-from-file',
+      });
+      expect(config.secretsFromEnvironment).not.toContain('OPENBOTS_S3_SECRET_ACCESS_KEY');
+    });
   });
 
   it('takes the Mac app local token on a self-hosted install only', () => {

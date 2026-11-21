@@ -176,7 +176,7 @@ describe('coder state', () => {
 
   it('reads the tail of a session log from the server, and removes it', async () => {
     const deps = w.t.deps;
-    const session = { id: '3c4d5e6f-0000-4000-8000-000000000123' };
+    const session = { id: '3c4d5e6f-0000-4000-8000-000000000123', workspaceId: w.workspaceId };
     const file = sessionLogPath(deps, session.id);
     expect(file).toBe(path.join(deps.config.filesDir, 'coders', `${session.id}.log`));
     expect(await readSessionLog(deps, session, 100)).toBe('');

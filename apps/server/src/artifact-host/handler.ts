@@ -519,7 +519,9 @@ export async function handleArtifactRequest(
     headers.set('vary', 'Cookie, Sec-Fetch-Dest, Sec-Fetch-Site');
   }
   // A page in the wrapper's frame is read whole, when small enough, to tell
-  // whether the link helper can go at its end.
+  // whether the link helper can go at its end. A HEAD of it reads it too: the
+  // length it reports depends on whether the helper fits. Every other HEAD
+  // takes its length from the version's row and never opens the blob.
   const page =
     part === 'content' &&
     headers.get('content-security-policy') === PAGE_CSP &&

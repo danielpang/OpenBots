@@ -17,7 +17,7 @@ import { DomainError, notFound } from '../errors.js';
 import { parseMasterKey } from '../secrets.js';
 import { effectiveSettings, getOrganization, isOrgAdmin, type Workspace } from '../workspace.js';
 import { recordAudit, type AuditActor } from './audit.js';
-import { openFile } from './files.js';
+import { findFile, openBlob, openFile } from './files.js';
 import { assertPerson } from './person.js';
 
 // Sharing Artifacts and the artifact host's rules (plan 21.11).
@@ -965,11 +965,18 @@ export async function resolveHostView(
     const viewerId = viewer && viewer.workspaceId === workspaceId ? viewer.userId : null;
     const view = await viewOf(deps, row.artifact, viewerId);
     if (!view) return null;
-    const { stream } = await openFile(
+    // The row is checked now; the blob is opened only when the body is read,
+    // so a redirect, a wrapper page or a HEAD never reaches the store. The
+    // one exception is a HEAD of a page framed in the wrapper, small enough
+    // for the link helper: whether the helper fits depends on the page's
+    // markup, so the length that HEAD reports needs the page read
+    // (artifact-host/handler.ts).
+    const file = await findFile(
       deps,
       { id: row.artifact.ownerId, workspaceId },
       view.version.storageKey,
     );
+    let stream: Readable | undefined;
     return {
       audience: view.audience,
       artifactId: row.artifact.id,
@@ -978,8 +985,11 @@ export async function resolveHostView(
       version: view.version.version,
       mime: view.version.mime,
       size: view.version.size,
-      body: async () => Readable.toWeb(stream) as ReadableStream<Uint8Array>,
-      discard: () => stream.destroy(),
+      body: async () => {
+        stream = await openBlob(deps, file);
+        return Readable.toWeb(stream) as ReadableStream<Uint8Array>;
+      },
+      discard: () => stream?.destroy(),
     };
   });
 }
