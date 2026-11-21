@@ -13,6 +13,7 @@ import {
   restartComputer,
   stopComputer,
   STOPPING_TAKEOVER_MS,
+  stopGiveUp,
   stopTimings,
   type ComputerRow,
 } from './computer.js';
@@ -337,12 +338,16 @@ describe('retired computers, fifth review', () => {
       const m = await member('slow-refresh@example.com');
       const row = await m.row();
       const giveUp = 1_000;
-      const late = 800;
+      // The stop's clock and give-up timer are the test's own: the deadline
+      // it arms is read, not timed, so a slow machine changes nothing.
+      let clock = 0;
+      const armed: { at: number; fire: () => void; disarmed: boolean }[] = [];
       // Refreshes of the stop's claim (a write of `status_at` alone): the
-      // first lands and answers at once, the second lands at once but its
-      // answer comes `late`, and the rest never answer (the database is gone).
+      // first lands and answers at once, at 0; the second is sent at 100 and
+      // lands at once, but its answer comes at 900; the rest never answer
+      // (the database is gone).
       let refreshes = 0;
-      let sentLate = 0;
+      let answerLate: (() => void) | undefined;
       const pending: (() => void)[] = [];
       const db = t.deps.db;
       const wrap = (target: object, refresh: boolean): unknown =>
@@ -357,14 +362,22 @@ describe('retired computers, fifth review', () => {
                   (v: unknown) => v,
                   (e: unknown) => Promise.reject(e),
                 );
-                if (n === 0) return landed.then(ok, fail);
-                if (n === 1) sentLate = Date.now();
+                if (n === 0) {
+                  return landed.then((v) => {
+                    clock = 100;
+                    return ok(v);
+                  }, fail);
+                }
                 return landed.then(
                   (v) =>
                     new Promise<void>((resolve) => {
                       const answer = () => resolve(ok(v));
-                      if (n === 1) setTimeout(answer, late);
-                      else pending.push(answer);
+                      if (n === 1) {
+                        answerLate = () => {
+                          clock = 900;
+                          answer();
+                        };
+                      } else pending.push(answer);
                     }),
                   fail,
                 );
@@ -390,7 +403,6 @@ describe('retired computers, fifth review', () => {
       });
       const provider = machines();
       const stop = provider.stop;
-      let abortedAt = 0;
       provider.stop = async (_ref, options) => {
         const signal = options?.signal;
         if (!signal) return;
@@ -398,25 +410,67 @@ describe('retired computers, fifth review', () => {
           if (signal.aborted) return resolve();
           signal.addEventListener('abort', () => resolve(), { once: true });
         });
-        abortedAt = Date.now();
         throw signal.reason as Error;
       };
       const timings = { ...stopTimings };
       stopTimings.heartbeatMs = 20;
       stopTimings.giveUpMs = giveUp;
+      stopTimings.now = () => clock;
+      stopTimings.setTimer = (fire, ms) => {
+        const timer = { at: clock + ms, fire, disarmed: false };
+        armed.push(timer);
+        return () => (timer.disarmed = true);
+      };
+      const stopping = t
+        .inOrganization(() => stopComputer({ ...t.deps, db: slow as typeof db }, row))
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
       try {
-        await expect(
-          t.inOrganization(() => stopComputer({ ...t.deps, db: slow as typeof db }, row)),
-        ).rejects.toMatchObject({ status: 503 });
+        await until(() => expect(answerLate).toBeDefined());
+        answerLate!();
+        await until(() => expect(armed).toHaveLength(2));
+        // From each refresh's sending: 0 + giveUp, then 100 + giveUp. Never
+        // from the late answer (that would be 900 + giveUp), and only later.
+        expect(armed.map((a) => a.at)).toEqual([giveUp, 100 + giveUp]);
+        expect(armed.map((a) => a.disarmed)).toEqual([true, false]);
+        // The give-up comes: the provider's call ends, and the stop with it.
+        armed[1]!.fire();
+        expect(await stopping).toMatchObject({ status: 503 });
       } finally {
+        for (const timer of armed) if (!timer.disarmed) timer.fire();
+        await stopping;
         provider.stop = stop;
         Object.assign(stopTimings, timings);
         for (const answer of pending) answer();
       }
-      expect(sentLate).toBeGreaterThan(0);
-      // From the late refresh's sending, its give-up: never pushed back by how
-      // long its answer took (that would be `giveUp + late`).
-      expect(abortedAt - sentLate).toBeLessThan(giveUp + late / 2);
+    });
+
+    it('a refresh sent earlier that lands later never moves the give-up back', () => {
+      const timings = { ...stopTimings };
+      let clock = 0;
+      const armed: number[] = [];
+      stopTimings.giveUpMs = 1_000;
+      stopTimings.now = () => clock;
+      stopTimings.setTimer = (_fire, ms) => {
+        armed.push(clock + ms);
+        return () => {};
+      };
+      try {
+        const giveUp = stopGiveUp(() => {});
+        clock = 400;
+        expect(giveUp.heard(300)).toBe(1_300);
+        // Sent at 200, answered after the one sent at 300: the deadline stays.
+        clock = 700;
+        expect(giveUp.heard(200)).toBe(1_300);
+        expect(giveUp.heard(300)).toBe(1_300);
+        clock = 900;
+        expect(giveUp.heard(500)).toBe(1_500);
+        expect(armed).toEqual([1_300, 1_500]);
+      } finally {
+        Object.assign(stopTimings, timings);
+      }
     });
   });
 

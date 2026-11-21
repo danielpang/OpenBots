@@ -21,6 +21,9 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
  */
 export type SessionLock = <T>(key: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>;
 
+/** Seconds a closing client waits for its queries before it destroys its connections. */
+const END_TIMEOUT_S = 5;
+
 /** Connections a process holds advisory locks on: one per key held or waited for. */
 const LOCK_CONNECTIONS = 8;
 /**
@@ -126,6 +129,8 @@ export function createDb(
   const slots: LockSlot[] = [];
   const free: LockSlot[] = [];
   const waiting: ((slot: LockSlot) => void)[] = [];
+  /** Slots whose connection was terminated, while their client ends. */
+  const ending = new Set<Promise<void>>();
   const makeSlot = (): LockSlot => {
     const slot: LockSlot = {
       holder: null,
@@ -133,6 +138,12 @@ export function createDb(
         onnotice: () => {},
         ...options,
         max: 1,
+        // Never ended for its age or for being idle, whatever the pool is
+        // given: while a holder works, no query is in flight on the lock's
+        // connection, and postgres.js would close it then, the lock with it
+        // (as it never does for its own LISTEN connection). 0 is no limit.
+        idle_timeout: 0,
+        max_lifetime: 0,
         // Its one connection closed (a restart, a network cut, terminated):
         // a lock held on it is gone. The next query opens a new one.
         onclose: () => {
@@ -155,6 +166,20 @@ export function createDb(
     const next = waiting.shift();
     if (next) next(slot);
     else free.push(slot);
+  };
+  // A slot whose connection was terminated is never lent again: the next
+  // holder's first query would land on the dying socket. Its client is
+  // destroyed at once (`timeout: 0`; postgres.js's plain `end` never settles
+  // for a connection that closes under a query still in flight), and a new
+  // slot takes its place for whoever waits.
+  const retire = (slot: LockSlot) => {
+    slot.holder = null;
+    slots.splice(slots.indexOf(slot), 1);
+    const end = slot.sql.end({ timeout: 0 }).catch(() => undefined);
+    ending.add(end);
+    void end.then(() => ending.delete(end));
+    const next = waiting.shift();
+    if (next) next(makeSlot());
   };
   const queues = new Map<string, Promise<void>>();
   const withSessionLock: SessionLock = async (key, fn) => {
@@ -215,8 +240,10 @@ export function createDb(
             Date.now() + lockWaitMs,
             key,
           ).catch(() => undefined);
+          retire(slot);
+        } else {
+          giveBack(slot);
         }
-        giveBack(slot);
       }
     } finally {
       done();
@@ -224,9 +251,14 @@ export function createDb(
     }
   };
   return Object.assign(db, {
+    // Bounded: a connection that does not end in time is destroyed, so a
+    // shutdown never waits on one forever.
     close: async () => {
-      await client.end();
-      await Promise.all(slots.map((slot) => slot.sql.end()));
+      await Promise.all([
+        client.end({ timeout: END_TIMEOUT_S }),
+        ...slots.map((slot) => slot.sql.end({ timeout: END_TIMEOUT_S })),
+        ...ending,
+      ]);
     },
     withSessionLock,
     /** Why the session locks are refused here, or null. */
