@@ -257,6 +257,10 @@ Devices, where revoking it signs it out at once; signing out in the app, or the 
 ending, revokes it too. The apps take the server from their build (`OPENBOTS_CLOUD_URL` for the
 Mac, `EXPO_PUBLIC_OPENBOTS_CLOUD_URL` for iOS). A server needs no setting for this.
 
+The Mac's session is a full web session: it can do what the person can do in a browser, including
+making API keys and pairing other devices, and revoking the Mac does not revoke the keys and
+devices it made.
+
 ### Shared Artifacts
 
 Sharing an Artifact with the organization or making it public, and opening one in a browser, is
