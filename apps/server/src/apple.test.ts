@@ -148,7 +148,7 @@ describe('Sign in with Apple, not configured', () => {
 
 describe('Sign in with Apple, configured', () => {
   let t: TestApp;
-  let appleKey: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
+  let appleKey: Awaited<ReturnType<typeof generateKeyPair>>['privateKey'];
   let jwk: JWK;
 
   /** An ID token as Apple would sign it, for the app (or `aud`), with the hashed nonce. */

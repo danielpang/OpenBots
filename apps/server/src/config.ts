@@ -229,7 +229,7 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: optional(z.string()),
   // Sign in with Apple (apple.ts). Checked together below.
   APPLE_CLIENT_ID: optional(
-    z.string().regex(/^[A-Za-z0-9.-]{1,155}$/, "must be the Services ID, such as com.example.web"),
+    z.string().regex(/^[A-Za-z0-9.-]{1,155}$/, 'must be the Services ID, such as com.example.web'),
   ),
   APPLE_TEAM_ID: optional(z.string().regex(/^[A-Z0-9]{10}$/, 'must be the 10 character Team ID')),
   APPLE_KEY_ID: optional(z.string().regex(/^[A-Z0-9]{10}$/, 'must be the 10 character Key ID')),
