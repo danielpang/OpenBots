@@ -136,6 +136,8 @@ async function refreshOne(
     await pruneWorktrees(deps, ctx, repo, path, branch);
     let dirty = dirtyLines(await git(ctx, ['-C', path, 'status', '--porcelain'])).length > 0;
     for (const worktree of dirty ? [] : await worktreesOf(ctx, path)) {
+      // Its directory is gone (removed by hand): no files, so no changes.
+      if (worktree.prunable) continue;
       const statusArgs = ['-C', worktree.path, 'status', '--porcelain'];
       const status = await askGit(ctx, statusArgs);
       if (status.code !== 0) throw new GitError(statusArgs, status);
@@ -195,7 +197,8 @@ async function pruneWorktrees(
 ): Promise<void> {
   let removed = 0;
   for (const worktree of await worktreesOf(ctx, path)) {
-    if (!worktree.branch) continue;
+    // A worktree whose directory is gone is git's to prune, not this sweep's.
+    if (!worktree.branch || worktree.prunable) continue;
     const sessions = await deps.db
       .select({
         id: schema.codingSessions.id,

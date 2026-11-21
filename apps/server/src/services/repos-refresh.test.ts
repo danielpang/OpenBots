@@ -1,7 +1,9 @@
+import { rmSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { schema } from '../db/client.js';
 import { WORKTREE, WORKTREES, useRepoJobsWorld } from './__fixtures__/coders/repo-jobs.js';
+import { realRepo } from './__fixtures__/coders/real-git.js';
 import { gitArgs, REPO_PATH } from './__fixtures__/coders/setup.js';
 import { queueRepoRefreshes, reconcileComputer, refreshStates } from './repos-refresh.js';
 import { CONFIG_REFUSED, RUNNER_GIT_CONFIG } from './repos-checkout.js';
@@ -77,6 +79,45 @@ describe('repository refresh and reconcile', () => {
     expect(await j.checkout()).toMatchObject({ state: 'error' });
     // The same for the counts against origin.
     j.gitBy((args) => (args.includes('rev-list') ? killed : undefined));
+    await j.inOrg(() => refreshStates(j.w.t.deps, j.computerId));
+    expect(await j.checkout()).toMatchObject({ state: 'error' });
+  });
+
+  it('a session worktree removed by hand, or an empty repository, refreshes as it is', async () => {
+    await j.readyCheckout({ state: 'error' });
+    const repo = realRepo();
+    try {
+      // Removed by hand: git lists it as prunable, and `git -C` there exits 128.
+      repo.git(['worktree', 'add', '--quiet', '-b', 'bot/x', '.worktrees/bot-x']);
+      rmSync(`${repo.root}/.worktrees/bot-x`, { recursive: true });
+      j.gitBy(repo.answer);
+      expect(await j.inOrg(() => refreshStates(j.w.t.deps, j.computerId))).toBe(1);
+      const head = repo.git(['rev-parse', 'HEAD']).trim();
+      expect(await j.checkout()).toMatchObject({ state: 'ready', headSha: head, error: null });
+    } finally {
+      repo.remove();
+    }
+    const empty = realRepo({ empty: true });
+    try {
+      j.gitBy(empty.answer);
+      expect(await j.inOrg(() => refreshStates(j.w.t.deps, j.computerId))).toBe(1);
+      expect(await j.checkout()).toMatchObject({
+        state: 'ready',
+        ahead: 0,
+        behind: 0,
+        error: null,
+      });
+    } finally {
+      empty.remove();
+    }
+    // A worktree that is there but that git fails in is still no answer.
+    j.gitBy((args, at) => {
+      if (args.includes('worktree')) return { code: 0, stdout: WORKTREES };
+      if (args.includes('status') && at === WORKTREE) {
+        return { code: 128, stderr: 'fatal: not a git repository' };
+      }
+      return undefined;
+    });
     await j.inOrg(() => refreshStates(j.w.t.deps, j.computerId));
     expect(await j.checkout()).toMatchObject({ state: 'error' });
   });
