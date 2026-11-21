@@ -1,12 +1,7 @@
 import {
-  SPRITES_CHECKPOINT_MAX_MS,
   SPRITES_EXEC_KILL_MS,
   SPRITES_PROVISION_MAX_MS,
-  SPRITES_RESTORE_MAX_MS,
-  SPRITES_RETIRE_INSIDE_MAX_MS,
-  SPRITES_RETIRE_MAX_MS,
   SPRITES_STATUS_MAX_MS,
-  SPRITES_UNRETIRE_MAX_MS,
 } from '@openbots/computer';
 
 // Every time bound the computers' claims rest on, in one place, with the
@@ -25,9 +20,8 @@ export const CLAIM_MARGIN_MS = 60_000;
 export const STOPPING_HEARTBEAT_MS = 15_000;
 /**
  * How long a `stopping` computer may go without that refresh before a start,
- * a reset or the sweep takes it over: its holder died or stalled. A computer
- * a reset retired is never taken over this way while its retirement is open
- * (computer.ts `abandonedStop`): the retirement's own record holds it.
+ * a reset or the sweep takes it over: its holder died or stalled
+ * (computer.ts `abandonedStop`).
  */
 export const STOPPING_TAKEOVER_MS = 4 * STOPPING_HEARTBEAT_MS;
 /**
@@ -43,35 +37,12 @@ export const STOPPING_GIVE_UP_MS = 2 * STOPPING_HEARTBEAT_MS;
 /** Slack for a give-up timer that fires late on a busy event loop. */
 export const STOPPING_GIVE_UP_SLACK_MS = 5_000;
 
-/** The longest a reset's own work on the record takes: the cut, then its undo. */
-export const RESET_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_UNRETIRE_MAX_MS;
-/** The longest a retire job takes on a record: the cut, then the steps inside or a read back. */
-export const JOB_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_RETIRE_INSIDE_MAX_MS;
-
 /**
- * How long a retire's claim on its record lasts: past the longest the
- * reset's cut and undo, or the job's cut and steps inside, can take, so the
- * sweep does not take a record whose holder is still at work. The claim
- * token keeps a late one from writing all the same.
+ * How long a claim on an old machine's deletion lasts (computer-retire.ts):
+ * the reset's own attempt, or a job's. Past it the sweep queues the deletion
+ * again; two deletions of one machine at once do no harm.
  */
-export const RETIRE_LEASE_MS = 5 * 60_000;
-/** How long a deletion's claim lasts before another worker may take the row again. */
-export const RETIRED_LEASE_MS = 30 * 60_000;
-/**
- * The longest an operator's restore holds its record (computer-retire.ts
- * `restoreRetiredComputer`): a checkpoint of the member's current machine,
- * its retire (the cut, and its undo), the retired machine's checkpoint put
- * back, its return to service, and on a failure the cut and the steps
- * inside it again.
- */
-export const RESTORE_MAX_MS =
-  SPRITES_CHECKPOINT_MAX_MS +
-  RESET_RETIRE_MAX_MS +
-  SPRITES_RESTORE_MAX_MS +
-  SPRITES_UNRETIRE_MAX_MS +
-  JOB_RETIRE_MAX_MS;
-/** How long an operator's restore may take before the sweep takes the machine back. */
-export const RESTORE_LEASE_MS = 45 * 60_000;
+export const RETIRED_LEASE_MS = 5 * 60_000;
 
 /**
  * How long a provisioning job may go without its heartbeat before a start or
@@ -89,9 +60,10 @@ export const PROVISION_STALE_MS = 20 * 60_000;
  */
 export const PROVISION_MAX_MS = SPRITES_STATUS_MAX_MS + 2 * SPRITES_PROVISION_MAX_MS;
 /**
- * When a retired machine's steps inside it are run once more: past the
- * longest a provisioning the reset cancelled could still be running, so an
- * agent it installed after all is removed (computer-retire.ts).
+ * How long after a full reset a deletion of its old machine counts as final:
+ * past the longest a provisioning the reset cancelled could still be running,
+ * which could make the machine again (computer-retire.ts). A deletion before
+ * then is run once more at this time.
  */
 export const RETIRED_RECHECK_MS = PROVISION_MAX_MS + CLAIM_MARGIN_MS;
 
@@ -99,14 +71,6 @@ function check(ok: boolean, what: string) {
   if (!ok) throw new Error(`Computer time bounds: ${what}`);
 }
 
-check(
-  RETIRE_LEASE_MS > RESET_RETIRE_MAX_MS + CLAIM_MARGIN_MS,
-  "RETIRE_LEASE_MS must outlast a reset's cut and its undo",
-);
-check(
-  RETIRE_LEASE_MS > JOB_RETIRE_MAX_MS + CLAIM_MARGIN_MS,
-  "RETIRE_LEASE_MS must outlast a job's cut and its steps inside",
-);
 check(
   STOPPING_TAKEOVER_MS >= 3 * STOPPING_HEARTBEAT_MS,
   'STOPPING_TAKEOVER_MS must allow for two missed heartbeats',
@@ -126,10 +90,6 @@ check(
   'PROVISION_STALE_MS must allow for missed heartbeats',
 );
 check(RETIRED_LEASE_MS > CLAIM_MARGIN_MS, 'RETIRED_LEASE_MS must outlast a deletion');
-check(
-  RESTORE_LEASE_MS > RESTORE_MAX_MS + CLAIM_MARGIN_MS,
-  "RESTORE_LEASE_MS must outlast a restore's calls",
-);
 check(
   RETIRED_RECHECK_MS > PROVISION_MAX_MS,
   'RETIRED_RECHECK_MS must come after any provisioning a reset cancelled has ended',

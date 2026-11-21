@@ -1,7 +1,7 @@
 import { spriteName } from '@openbots/computer';
 import { schema, type Db } from '@openbots/server/db/client';
 import { forEachWorkspace } from '@openbots/server/db/scope';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte, isNull, or } from 'drizzle-orm';
 import { HOUR_SECONDS } from './plans.js';
 import { ledgerSecondsBetween } from './store.js';
 
@@ -37,7 +37,7 @@ export interface ProviderUsageSource {
 
 export interface Discrepancy {
   workspaceId: string | null;
-  /** Sprites the provider billed that no organization's computer is or was (retired). */
+  /** Sprites the provider billed that no organization's computer is, or was in the window. */
   sprites?: string[];
   ledgerHours: number;
   providerHours: number;
@@ -68,7 +68,7 @@ export async function reconcile(
   const claimed = new Set<string>();
   await forEachWorkspace(db, async (workspaceId) => {
     let providerSeconds = 0;
-    for (const name of await spritesOf(db, workspaceId, namePrefix)) {
+    for (const name of await spritesOf(db, workspaceId, namePrefix, since)) {
       if (!billed.has(name)) continue;
       claimed.add(name);
       providerSeconds += billed.get(name)!;
@@ -98,12 +98,21 @@ export async function reconcile(
 }
 
 /**
- * The names of every Sprite an organization's computers have had. A computer
- * is named from its machine key once a full reset gave it one, else from its
- * id; the Sprite a reset retired keeps its old name, recorded on its
- * `retired_computers` row, and the member's usage before the reset was on it.
+ * The names of every Sprite an organization's computers could have been
+ * billed for in the window from `since`. A computer is named from its machine
+ * key once a full reset gave it one, else from its id. The Sprite a full reset
+ * took off a computer keeps its old name, recorded on its `retired_computers`
+ * row, and the member's usage before the reset was on it: it counts while the
+ * record is `deleting` (the machine may still exist) and once `deleted` if
+ * that was in the window. A Sprite deleted before the window should not have
+ * been billed in it, so it stays unclaimed and is reported as nobody's.
  */
-async function spritesOf(db: Db, workspaceId: string, namePrefix: string): Promise<Set<string>> {
+async function spritesOf(
+  db: Db,
+  workspaceId: string,
+  namePrefix: string,
+  since: Date,
+): Promise<Set<string>> {
   const names = new Set<string>();
   const computers = await db
     .select({
@@ -125,6 +134,10 @@ async function spritesOf(db: Db, workspaceId: string, namePrefix: string): Promi
       and(
         eq(schema.retiredComputers.workspaceId, workspaceId),
         eq(schema.retiredComputers.provider, 'sprites'),
+        or(
+          isNull(schema.retiredComputers.deletedAt),
+          gte(schema.retiredComputers.deletedAt, since),
+        ),
       ),
     );
   for (const { providerRef } of retired) names.add(providerRef);

@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { fenceHere, forgetFences, isFenced } from './computer-fence.js';
 
-// The fences a process knows (computer-fence.ts) are kept by time, past the
-// longest a retired machine is kept, never by number: no run of resets can
-// push out a fence that still guards a machine.
+// The fences a process knows (computer-fence.ts) are kept by time, never by
+// number: no run of resets can push out a fence that still guards a machine.
 
 describe('computer fences in a process', () => {
   afterEach(() => forgetFences());

@@ -286,7 +286,6 @@ describe('row-level security between organizations', () => {
       'openbots_device_workspaces',
       'openbots_devices_exist',
       'openbots_github_installation_workspaces',
-      'openbots_machine_in_use',
       'openbots_pairing_workspace',
       'openbots_session_device_workspace',
     ];
@@ -440,9 +439,8 @@ describe('row-level security between organizations', () => {
           ownerId: owner,
           provider: 'sprites',
           providerRef: ref,
-          status: 'retired',
+          status: 'deleting',
           retiredAt: new Date(),
-          deleteAfter: new Date(Date.now() + 7 * 24 * 60 * 60_000),
         })
         .returning({ id: schema.retiredComputers.id })
         .then(([row]) => row!.id);
@@ -452,7 +450,7 @@ describe('row-level security between organizations', () => {
       expect((await q(sql`select id from retired_computers`)).map((r) => r.id)).toEqual([mine]);
       expect(
         await q(
-          sql`update retired_computers set status = 'deleting' where id = ${theirs} returning id`,
+          sql`update retired_computers set status = 'deleted' where id = ${theirs} returning id`,
         ),
       ).toEqual([]);
       expect(await q(sql`delete from retired_computers where id = ${theirs} returning id`)).toEqual(
@@ -462,8 +460,8 @@ describe('row-level security between organizations', () => {
     const insert = await failure(t.db, (tx) =>
       as(tx, APP_ROLE, orgA, (q) =>
         q(
-          sql`insert into retired_computers (workspace_id, owner_id, provider, provider_ref, status, retired_at, delete_after)
-              values (${orgB}, ${owner}, 'sprites', 'ob-rls-c', 'retired', now(), now())`,
+          sql`insert into retired_computers (workspace_id, owner_id, provider, provider_ref, status, retired_at)
+              values (${orgB}, ${owner}, 'sprites', 'ob-rls-c', 'deleting', now())`,
         ),
       ),
     );
@@ -476,7 +474,7 @@ describe('row-level security between organizations', () => {
       .select()
       .from(schema.retiredComputers)
       .where(sql`id = ${theirs}`);
-    expect(b).toMatchObject({ status: 'retired' });
+    expect(b).toMatchObject({ status: 'deleting' });
     await t.db.delete(schema.retiredComputers).where(sql`provider_ref like 'ob-rls-%'`);
   });
 

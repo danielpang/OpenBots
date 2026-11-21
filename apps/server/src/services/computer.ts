@@ -69,7 +69,6 @@ import { admitComputerWork, computerWorkRefusal } from './computer-admission.js'
 import {
   computerBusy,
   computerChanged,
-  retainsOnReset,
   retireMachine,
   type ResetRecord,
   type RetiredRow,
@@ -444,7 +443,7 @@ async function setStatusIf(
   return updated ?? row;
 }
 
-/** A provisioning job whose row moved on meanwhile (another attempt, a reset, a restore). */
+/** A provisioning job whose row moved on meanwhile (another attempt, a reset). */
 class StaleJobError extends Error {
   constructor() {
     super('The computer changed while its provisioning ran');
@@ -639,8 +638,7 @@ async function createMachine(
       agentToken,
       volumeName: row.volumeName ?? volumeName(row.id),
       ...env,
-      // Set by a full reset that kept the old machine, or by a restore, which
-      // records the restored machine's own name (computer-retire.ts).
+      // Set by a full reset: the old machine is being deleted (computer-retire.ts).
       ...(row.machineKey ? { machineKey: row.machineKey } : {}),
       ...(signal ? { signal } : {}),
     });
@@ -984,7 +982,7 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   const began = Date.now();
   const owner = { id: row.ownerId, workspaceId: row.workspaceId };
   // Every write of this job lands only while the row is still its own: the
-  // same attempt and the same machine key. A reset or restore that moved the
+  // same attempt and the same machine key. A reset that moved the
   // row on meanwhile is never overwritten by what this job read before.
   const guard = jobGuard(row);
   // Its heartbeat: `status_at` says the job runs (a start or the sweep queues
@@ -1125,7 +1123,7 @@ export async function recoverProvisioning(deps: AppDeps): Promise<number> {
         // `stopping` too: a start waits on it (BUSY) and, unlike a Docker
         // computer's, never takes it over, while the idle sweep skips Sprites,
         // so a stop cut short would leave the computer unusable for good.
-        // A stop still held, or a reset's retirement still open, is left alone.
+        // A stop still held is left alone.
         or(inArray(schema.computers.status, PROVISIONING), abandonedStop()),
       ),
     );
@@ -1188,20 +1186,12 @@ const clockOf = (at?: Date) => (at ? sql`${at.toISOString()}::timestamptz` : sql
 
 /**
  * A `stopping` row that nobody holds: its holder's heartbeat (`status_at`,
- * the database's clock) is older than `STOPPING_TAKEOVER_MS`, and no reset's
- * retirement of its machine is still open (not settled). A retirement holds
- * the computer `stopping` until it is settled (`audited_at`), by the reset,
- * its job, or the job giving up on it, whatever its age (computer-retire.ts):
- * a start in between would make the new machine while the reset could still
- * be undone, and its cleanup could then land on it. Settling releases the
- * computer in the same transaction as the cleanup, so this never lets go of
- * one whose reset has not cleaned up.
+ * the database's clock) is older than `STOPPING_TAKEOVER_MS`.
  */
 function abandonedStop(at?: Date): SQL {
   return and(
     eq(schema.computers.status, 'stopping'),
     sql`${schema.computers.statusAt} < ${clockOf(at)} - ${STOPPING_TAKEOVER_MS} * interval '1 millisecond'`,
-    sql`not exists (select 1 from ${schema.retiredComputers} r where r.computer_id = "computers"."id" and r.status in ('retiring', 'deleting') and r.audited_at is null)`,
   )!;
 }
 
@@ -1414,11 +1404,13 @@ export function beginComputerUse(
   const machines = computerProvider(deps);
   let hold: Parameters<typeof beginUse>[1]['hold'];
   if (machines?.hold && machines.name === row.provider && row.agentUrl && row.agentToken) {
-    // The machine the use began on, until the provider refuses it: a reset
-    // may have retired it, which the provider refuses without waking it.
-    // Then the hold moves to the machine the row has now, if any, and the
-    // use goes on with that one. No read in the usual case, so the hold is
-    // in place before the work's first call.
+    // The machine the use began on, until a reset takes it off the computer
+    // (its token is fenced then: the old machine is never held or woken
+    // again, since it is being deleted) or the provider refuses it. Then the
+    // hold moves to the machine the row has now, if any, and the use goes on
+    // with that one. No read in the usual case, so the hold is in place
+    // before the work's first call.
+    let from: ComputerRow = row;
     let known = refOf(deps, row);
     const current = () =>
       inWorkspace(row.workspaceId, async () => {
@@ -1426,22 +1418,31 @@ export function beginComputerUse(
           .select()
           .from(schema.computers)
           .where(eq(schema.computers.id, row.id));
-        return now?.agentUrl && now.agentToken && now.provider === machines.name
-          ? refOf(deps, now)
-          : null;
+        return now?.agentUrl && now.agentToken && now.provider === machines.name ? now : null;
       });
+    const move = (now: ComputerRow) => {
+      from = now;
+      known = refOf(deps, now);
+    };
     hold = {
       hold: async (name, seconds) => {
+        if (isFenced(from)) {
+          const now = await current();
+          if (!now) throw computerUnavailable('The computer was reset. Try again.');
+          move(now);
+        }
         try {
           await machines.hold!(known, name, seconds);
         } catch (error) {
           const now = await current();
           if (!now || now.containerId === known.containerId) throw error;
-          known = now;
+          move(now);
           await machines.hold!(known, name, seconds);
         }
       },
-      release: async (name) => machines.release?.(known, name),
+      release: async (name) => {
+        if (!isFenced(from)) await machines.release?.(known, name);
+      },
     };
   }
   return beginUse(
@@ -1539,8 +1540,8 @@ export async function stopComputer(
 ): Promise<ComputerRow> {
   // A claim of its own: a start or a job meanwhile writes nothing over it.
   // Only of the row as read (its status and generation): a reset, a start or
-  // another stop that took it since keeps it, and a stop still held (a
-  // reset's retirement included) is never taken over (`abandonedStop`).
+  // another stop that took it since keeps it, and a stop still held is
+  // never taken over (`abandonedStop`).
   // A claim lost to a row that moved on to something a stop stops (a start
   // that finished first: `running`, or `error`) is tried again on the row as
   // it now is, a bounded number of times; a stop never answers as done while
@@ -1606,25 +1607,17 @@ export interface DestroyComputerOptions {
   /** Removes the state volume too: the cookie store and the coding agents' sign-ins. */
   signIns: boolean;
   /**
-   * With `signIns`, on a provider that would keep the old machine for
-   * `RETIRED_COMPUTER_DAYS` (computer-retire.ts): deletes it now instead, for
-   * a member who wants it gone (someone else got into it). Support cannot
-   * restore it then.
+   * The member's reset: where the old machine is deleted after the reset
+   * (computer-retire.ts), its cleanup and audit go in the transaction that
+   * takes the machine off the computer.
    */
-  deleteOld?: boolean;
-  /**
-   * The checkpoint taken just before (`checkpointBeforeReset`), recorded
-   * with a machine that is retired rather than removed.
-   */
-  checkpointId?: string | null;
-  /** The member's reset, recorded with a retired machine for its audit and cleanup. */
   reset?: ResetRecord;
 }
 
-/** What `resetMachine` did: the row as it now is, and the record of a machine it retired. */
+/** What `resetMachine` did: the row as it now is, and the record of an old machine to delete. */
 export interface MachineReset {
   computer: ComputerRow;
-  /** Set when the machine was retired (kept, or deleted through the record). */
+  /** Set when the old machine is deleted through a record (computer-retire.ts). */
   retired: RetiredRow | null;
 }
 
@@ -1637,22 +1630,22 @@ export interface MachineReset {
  * taken over; a fresher stop is refused (409 `COMPUTER_BUSY`), so no member
  * waits longer than that to reset. Then the computer is stopped if it is up
  * (its stdio connectors and coding sessions end with it) and its machine is
- * taken away: with `signIns`, on a provider that can retire it (Sprites), it
- * is retired (computer-retire.ts) and kept `RETIRED_COMPUTER_DAYS`, or
- * deleted through its record with `deleteOld`; otherwise the provider removes
- * the container and its home volume, and the state volume only with
- * `signIns`. The row stays, `stopped`, with no machine, so the next start
- * makes a fresh one; where the provider keeps the machine and clears its home
- * in place (a Sprite reset without its sign-ins), the row goes on naming it
- * (`containerId`), with no agent, so the next start provisions that machine
- * again and a later full reset or restore retires it. A row never forgets a
- * machine that still exists. Docker and Sprites only: the remote machine is not the
- * server's to remove (409 `RESET_UNSUPPORTED`). A stop that fails does not
- * stop the reset, since removing or retiring the machine stops it anyway.
- * Once the old machine is gone or out of reach, every process fences its
- * agent token (computer-fence.ts). Every branch is keyed on `containerId`,
- * the machine's existence, so a machine with no agent yet (a restored one)
- * is never left behind unrecorded.
+ * taken away: with `signIns`, on a provider that names machines by key
+ * (Sprites), the row gets a new key and the old machine is deleted through a
+ * record that the retired-computers job retries (computer-retire.ts);
+ * otherwise the provider removes the container and its home volume, and the
+ * state volume only with `signIns`. The row stays, `stopped`, with no
+ * machine, so the next start makes a fresh one; where the provider keeps the
+ * machine and clears its home in place (a Sprite reset without its sign-ins),
+ * the row goes on naming it (`containerId`), with no agent, so the next start
+ * provisions that machine again and a later full reset deletes it. A row never
+ * forgets a machine that still exists. Docker and Sprites only: the remote
+ * machine is not the server's to remove (409 `RESET_UNSUPPORTED`). A stop that
+ * fails does not stop the reset, since removing the machine stops it anyway.
+ * Once the old machine is gone or taken off the computer, every process
+ * fences its agent token (computer-fence.ts). Every branch is keyed on
+ * `containerId`, the machine's existence, so a machine with no agent yet is
+ * never left behind unrecorded.
  */
 export async function resetMachine(
   deps: AppDeps,
@@ -1700,7 +1693,7 @@ export async function resetMachine(
   // `stopMachine` ends the coding sessions; with nothing to stop, they end here.
   if (claimed.agentUrl && claimed.agentToken && row.status !== 'stopped') {
     await stopMachine(deps, claimed, by, {}, { keepClaim: true }).catch((error: unknown) =>
-      // Removing or retiring the machine stops it anyway.
+      // Removing the machine stops it anyway.
       deps.logger.warn({ err: error, computerId: row.id }, 'stop before reset failed'),
     );
   } else {
@@ -1713,22 +1706,17 @@ export async function resetMachine(
         deps.logger.warn({ err: error, computerId: row.id }, 'stopping coding sessions failed'),
     );
   }
-  // A full reset on a provider that can retire the machine takes it out of
-  // reach and records it (computer-retire.ts): kept RETIRED_COMPUTER_DAYS, or
-  // deleted now through its record when the member asked. The row gets a new
-  // machine key, so its next start makes a new machine. It answers only once
-  // the old machine is out of reach, or says it failed.
+  // A full reset on a provider that names machines by key: the row gets a
+  // new key, so its next start makes a new machine, and the old one is
+  // deleted through its record, retried until it is gone (computer-retire.ts).
   if (
     options.signIns &&
-    retainsOnReset(machines) &&
+    machines.machineKeyed === true &&
     current.containerId &&
     current.provider === machines.name
   ) {
     return retireMachine(deps, machines, current, {
-      checkpointId: options.checkpointId ?? null,
       by,
-      reason: 'reset',
-      deleteNow: options.deleteOld ?? false,
       ...(options.reset ? { reset: options.reset } : {}),
     });
   }
@@ -1755,7 +1743,7 @@ export async function resetMachine(
   }
   // A machine the provider kept (a Sprite whose home was cleared in place)
   // is still named on the row: it holds the state directory, the sign-ins
-  // with it, so a later full reset or a restore finds it and retires it.
+  // with it, so a later full reset finds it and deletes it.
   const kept = !options.signIns && machines.keepsMachineOnHomeReset === true;
   const reset = await setStatusIf(
     deps,
@@ -1802,13 +1790,13 @@ export async function destroyComputer(
 }
 
 /**
- * Before a reset that keeps the machine (a Sprite reset without its
- * sign-ins clears the home in place; one with them retires the Sprite, kept
- * seven days), a checkpoint of its whole disk, so an operator can undo a
- * mistaken reset (`restore`). Returns its id, or null when the provider
- * takes none or the machine goes with the reset (one that cannot retire it).
- * A checkpoint that fails does not stop the reset: a computer that will not
- * work is when a reset helps most.
+ * Before a reset that keeps the machine (a Sprite reset without its sign-ins
+ * clears the home in place), a checkpoint of its whole disk, so an operator
+ * can undo a mistaken reset (`restore`). Returns its id, or null when the
+ * provider takes none or the machine goes with the reset (a full reset,
+ * whose machine is deleted with its checkpoints). A checkpoint that fails
+ * does not stop the reset: a computer that will not work is when a reset
+ * helps most.
  */
 export async function checkpointBeforeReset(
   deps: AppDeps,
@@ -1817,7 +1805,7 @@ export async function checkpointBeforeReset(
 ): Promise<string | null> {
   const machines = provider(deps);
   if (!machines.checkpoint) return null;
-  if (options.signIns && (options.deleteOld || !retainsOnReset(machines))) return null;
+  if (options.signIns) return null;
   if (machines.name !== row.provider || !row.containerId) return null;
   try {
     return await machines.checkpoint(
