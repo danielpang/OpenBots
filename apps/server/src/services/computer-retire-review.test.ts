@@ -656,7 +656,12 @@ describe('retired computers, second review', () => {
       } finally {
         read.restore();
       }
-      expect(await m.row()).toMatchObject({ status: 'stopped', containerId: null, agentUrl: null });
+      // The kept Sprite is still named; the job wrote no agent.
+      expect(await m.row()).toMatchObject({
+        status: 'stopped',
+        containerId: before.containerId,
+        agentUrl: null,
+      });
     });
   });
 
