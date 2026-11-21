@@ -295,7 +295,10 @@ describe('retired computers', () => {
       const [row] = await retiredOf(m.ownerId);
       expect(row).toMatchObject({ status: 'retiring', providerRef: oldName, sealedAt: null });
       // Claimed by the reset for a short while only, and the sweep runs often.
-      expect(row!.nextAttemptAt!.getTime() - row!.retiredAt.getTime()).toBe(RETIRE_LEASE_MS);
+      // The lease is on the database's clock, `retired_at` on this process's.
+      const lease = row!.nextAttemptAt!.getTime() - row!.retiredAt.getTime();
+      expect(lease).toBeGreaterThanOrEqual(RETIRE_LEASE_MS - 1_000);
+      expect(lease).toBeLessThanOrEqual(RETIRE_LEASE_MS + 1_000);
       expect(RETIRED_SWEEP_MS).toBeLessThanOrEqual(5 * 60_000);
       // Meanwhile the member's computer waits: no start begins on it.
       expect(await m.row()).toMatchObject({ status: 'stopping', containerId: null });

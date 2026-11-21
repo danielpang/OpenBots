@@ -6,7 +6,19 @@ import {
   type CoderControl,
   type JobHandler,
 } from '@openbots/shared';
-import { and, desc, eq, inArray, isNotNull, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { inWorkspace, rowsOf } from '../db/scope.js';
@@ -198,6 +210,19 @@ function errorText(error: unknown) {
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 500 ? `${text.slice(0, 500)}...` : text;
 }
+
+/**
+ * When a claim's lease ends, on the database's clock: the sweep reads it on
+ * that clock too (`clockAt`), so two processes whose own clocks differ never
+ * cut a lease short. A caller that names the time (a test, a sweep run for a
+ * given moment) gets it from that time instead.
+ */
+const leaseEnd = (ms: number, at?: Date): Date | SQL =>
+  at ? new Date(at.getTime() + ms) : sql`clock_timestamp() + ${ms} * interval '1 millisecond'`;
+
+/** The moment a claim is compared with: the database's, or the caller's. */
+const clockAt = (at?: Date) =>
+  at ? sql`${at.toISOString()}::timestamptz` : sql`clock_timestamp()`;
 
 function isUniqueViolation(error: unknown): boolean {
   for (let e = error as { code?: string; cause?: unknown } | undefined; e;) {
@@ -504,12 +529,13 @@ export async function retireMachine(
   deps: Deps,
   machines: ComputerProvider,
   row: ComputerRow,
-  { checkpointId, by, reason, reset, deleteNow = false, now = new Date() }: RetireOptions,
+  { checkpointId, by, reason, reset, deleteNow = false, now: at }: RetireOptions,
 ): Promise<{ computer: ComputerRow; retired: RetiredRow }> {
   if (!retainsOnReset(machines)) {
     throw new Error(`The ${machines.name} provider cannot retire a machine`);
   }
   if (!row.containerId) throw new Error('The computer has no machine to retire');
+  const now = at ?? new Date();
   const ref = machineRef(row);
   const key = randomUUID();
   const claim = randomUUID();
@@ -564,7 +590,7 @@ export async function retireMachine(
           deleteAfter: deleteNow ? now : new Date(now.getTime() + RETIRED_COMPUTER_DAYS * DAY_MS),
           // Claimed by this call; the sweep takes it only once the lease runs out.
           claim,
-          nextAttemptAt: new Date(now.getTime() + RETIRE_LEASE_MS),
+          nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at),
           fence: fenceOf(row.agentToken),
           context,
         })
@@ -588,7 +614,7 @@ export async function retireMachine(
   try {
     await machines.retire!(ref);
   } catch (error) {
-    return undoRetire(deps, machines, row, switched, claim, error, now);
+    return undoRetire(deps, machines, row, switched, claim, error, at);
   }
   const next = randomUUID();
   let done: { computer: ComputerRow | null; retired: RetiredRow } | null;
@@ -603,13 +629,13 @@ export async function retireMachine(
                 sealedAt: sealed,
                 status: 'deleting',
                 claim: next,
-                nextAttemptAt: new Date(sealed.getTime() + RETIRED_LEASE_MS),
+                nextAttemptAt: leaseEnd(RETIRED_LEASE_MS, at),
                 lastError: null,
               }
             : {
                 sealedAt: sealed,
                 claim: next,
-                nextAttemptAt: new Date(sealed.getTime() + RETIRE_LEASE_MS),
+                nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at),
                 lastError: null,
               },
         )
@@ -740,7 +766,7 @@ async function undoRetire(
   switched: { computer: ComputerRow; retired: RetiredRow },
   claim: string,
   error: unknown,
-  now: Date,
+  at: Date | undefined,
 ): Promise<never> {
   deps.logger.error(
     { err: error, computerId: row.id, retiredId: switched.retired.id },
@@ -758,7 +784,7 @@ async function undoRetire(
   try {
     const [taken] = await deps.db
       .update(schema.retiredComputers)
-      .set({ claim: undo, nextAttemptAt: new Date(now.getTime() + RETIRE_LEASE_MS) })
+      .set({ claim: undo, nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at) })
       .where(
         and(
           eq(schema.retiredComputers.id, id),
@@ -848,14 +874,14 @@ class UndoLost extends Error {}
  * job of an earlier claim does nothing. Rows the job gave up on are left to
  * an operator.
  */
-export async function sweepRetiredComputers(deps: SweepDeps, now = new Date()): Promise<number> {
-  const lease = new Date(now.getTime() + RETIRED_LEASE_MS);
-  const retireLease = new Date(now.getTime() + RETIRE_LEASE_MS);
+export async function sweepRetiredComputers(deps: SweepDeps, at?: Date): Promise<number> {
+  const now = at ?? new Date();
+  const lease = leaseEnd(RETIRED_LEASE_MS, at);
+  const retireLease = leaseEnd(RETIRE_LEASE_MS, at);
   const fresh = sql`gen_random_uuid()`;
-  const due = or(
-    isNull(schema.retiredComputers.nextAttemptAt),
-    lte(schema.retiredComputers.nextAttemptAt, now),
-  );
+  // A claim runs out on the clock it was written on (`leaseEnd`).
+  const ranOut = sql`${schema.retiredComputers.nextAttemptAt} <= ${clockAt(at)}`;
+  const due = or(isNull(schema.retiredComputers.nextAttemptAt), ranOut);
   const tried = isNull(schema.retiredComputers.gaveUpAt);
   const deleting = await deps.db
     .update(schema.retiredComputers)
@@ -872,10 +898,7 @@ export async function sweepRetiredComputers(deps: SweepDeps, now = new Date()): 
             due,
           ),
           // A claim whose job never finished (lost with its process).
-          and(
-            eq(schema.retiredComputers.status, 'deleting'),
-            lte(schema.retiredComputers.nextAttemptAt, now),
-          ),
+          and(eq(schema.retiredComputers.status, 'deleting'), ranOut),
         ),
       ),
     )
@@ -973,7 +996,7 @@ class ClaimLost extends Error {}
  */
 async function failed(
   deps: Deps,
-  machines: ComputerProvider,
+  machines: ComputerProvider | null,
   row: RetiredRow,
   from: 'retiring' | 'deleting',
   error: unknown,
@@ -996,7 +1019,10 @@ async function failed(
     if (!outOfReach) {
       try {
         // A provider that cannot say keeps it for an operator.
-        const state = machines.retiredState ? await machines.retiredState(machineRef(row)) : null;
+        const state =
+          machines?.name === row.provider && machines.retiredState
+            ? await machines.retiredState(machineRef(row))
+            : null;
         outOfReach = state === 'retired' || state === 'gone';
       } catch (again) {
         deps.logger.warn({ err: again, retiredId: row.id }, 'checking a retired computer failed');
@@ -1074,6 +1100,7 @@ async function finishRetire(
   machines: ComputerProvider,
   row: RetiredRow,
   now: Date,
+  at: Date | undefined,
 ): Promise<void> {
   const ref = machineRef(row);
   const check = claimCheck(deps, row, 'retiring');
@@ -1094,7 +1121,7 @@ async function finishRetire(
                   sealedAt,
                   status: 'deleting',
                   claim: next,
-                  nextAttemptAt: new Date(now.getTime() + RETIRED_LEASE_MS),
+                  nextAttemptAt: leaseEnd(RETIRED_LEASE_MS, at),
                 }
               : { sealedAt },
           )
@@ -1104,11 +1131,12 @@ async function finishRetire(
       });
       if (!sealed) return;
       if (row.deleteNow) {
-        await runRetiredComputerJob(deps, machines, {
-          retiredId: row.id,
-          kind: 'delete',
-          claim: next,
-        });
+        await runRetiredComputerJob(
+          deps,
+          machines,
+          { retiredId: row.id, kind: 'delete', claim: next },
+          at,
+        );
         return;
       }
       row = sealed;
@@ -1141,27 +1169,21 @@ async function finishRetire(
  * for good, once it took the row from the claim it was queued with (a claim
  * of its own, so a job delivered twice runs once). Does nothing for a row in
  * any other status (another worker finished it, or an operator restored it
- * meanwhile), for a claim another took, or when the provider is not the
- * row's (the claim runs out and it is tried again later).
+ * meanwhile) or for a claim another took. Where the install has not the
+ * row's provider, the attempt fails and counts toward giving up.
  */
 export async function runRetiredComputerJob(
   deps: Deps,
   machines: ComputerProvider | null,
   job: Pick<RetiredComputerJob, 'retiredId' | 'kind' | 'claim'>,
-  now = new Date(),
+  at?: Date,
 ): Promise<void> {
+  const now = at ?? new Date();
   const [found] = await deps.db
     .select()
     .from(schema.retiredComputers)
     .where(eq(schema.retiredComputers.id, job.retiredId));
   if (!found) return;
-  if (!machines || machines.name !== found.provider || !retainsOnReset(machines)) {
-    deps.logger.warn(
-      { retiredId: found.id, provider: found.provider },
-      'a retired computer is on a provider this install no longer has; left for later',
-    );
-    return;
-  }
   const status = job.kind === 'retire' ? 'retiring' : 'deleting';
   if (found.status !== status || (job.kind === 'retire' && found.gaveUpAt)) return;
   if (!job.claim || !UUID.test(job.claim)) return;
@@ -1170,9 +1192,7 @@ export async function runRetiredComputerJob(
     .update(schema.retiredComputers)
     .set({
       claim: randomUUID(),
-      nextAttemptAt: new Date(
-        now.getTime() + (job.kind === 'retire' ? RETIRE_LEASE_MS : RETIRED_LEASE_MS),
-      ),
+      nextAttemptAt: leaseEnd(job.kind === 'retire' ? RETIRE_LEASE_MS : RETIRED_LEASE_MS, at),
     })
     .where(
       and(
@@ -1183,6 +1203,22 @@ export async function runRetiredComputerJob(
     )
     .returning();
   if (!row) return;
+  // A provider this install does not have (not configured, or another one):
+  // a failed attempt like any other, retried with backoff and then given up
+  // for an operator (`gave_up_at`, `computers retired --gave-up`), which also
+  // lets the member's computer go (computer.ts `abandonedStop`). Never left
+  // waiting without a count.
+  if (!machines || machines.name !== row.provider || !retainsOnReset(machines)) {
+    await failed(
+      deps,
+      null,
+      row,
+      status,
+      new Error(`This install has no ${row.provider} provider to finish it`),
+      now,
+    );
+    return;
+  }
   // A record the reset did not settle (its process died, its cut failed and
   // could not be undone, its seal failed): the job never undoes it, so this
   // is past the point of no return. Settled first, before any call on the
@@ -1201,7 +1237,7 @@ export async function runRetiredComputerJob(
     await announceSettled(deps, row, settled.computer);
   }
   if (job.kind === 'retire') {
-    await finishRetire(deps, machines, row, now);
+    await finishRetire(deps, machines, row, now, at);
     return;
   }
   const ref = machineRef(row);
@@ -1326,19 +1362,18 @@ export async function purgeRetiredComputers(
       .set({
         status: 'deleting',
         claim: sql`gen_random_uuid()`,
-        nextAttemptAt: new Date(now.getTime() + RETIRED_LEASE_MS),
+        nextAttemptAt: leaseEnd(RETIRED_LEASE_MS),
       })
       .where(
         and(owned, inArray(schema.retiredComputers.status, ['retiring', 'retired', 'deleting'])),
       )
       .returning();
     for (const row of claimed) {
-      await runRetiredComputerJob(
-        deps,
-        machines,
-        { retiredId: row.id, kind: 'delete', claim: row.claim! },
-        now,
-      );
+      await runRetiredComputerJob(deps, machines, {
+        retiredId: row.id,
+        kind: 'delete',
+        claim: row.claim!,
+      });
     }
     const left = await deps.db
       .select({ id: schema.retiredComputers.id })
@@ -1464,7 +1499,7 @@ export async function restoreRetiredComputer(
   machines: ComputerProvider,
   scope: { workspaceId: string; retiredId: string },
   operator: string,
-  now = new Date(),
+  at?: Date,
 ): Promise<Restored> {
   const by = SYSTEM_ACTOR;
   const [found] = await deps.db
@@ -1489,7 +1524,7 @@ export async function restoreRetiredComputer(
   const machineKey = found.providerRef;
   // Claimed, with a lease: the deletion job leaves it alone, and the sweep
   // takes it back if this process dies before the end.
-  const lease = new Date(now.getTime() + RESTORE_LEASE_MS);
+  const lease = leaseEnd(RESTORE_LEASE_MS, at);
   const claim = randomUUID();
   const [retired] = await deps.db
     .update(schema.retiredComputers)
@@ -1548,14 +1583,17 @@ export async function restoreRetiredComputer(
     throw computerBusy(current.status);
   }
   let unretired = false;
+  let replaced: RetiredRow | null = null;
   const ref = machineRef(retired);
   try {
-    let replaced: RetiredRow | null = null;
     let row = current;
+    // The row names every machine that may still exist under it, one whose
+    // home a reset cleared in place too (computer.ts `resetMachine`): it is
+    // retired, never left in service unnamed.
     if (row.containerId) {
       await endWork(deps, row);
       let checkpointId: string | null = null;
-      if (machines.checkpoint && row.agentUrl) {
+      if (machines.checkpoint) {
         checkpointId = await machines
           .checkpoint(
             machineRef(row),
@@ -1586,13 +1624,16 @@ export async function restoreRetiredComputer(
         .where(ours);
       if (!still) throw computerChanged();
     };
-    if (retired.checkpointId) {
-      await stillOurs();
-      await machines.restore?.(ref, retired.checkpointId);
-    }
     await stillOurs();
-    // Set first: an unretire that fails part way still leaves it to be retired again.
+    // Set before anything changes the machine: a checkpoint restore puts its
+    // old agent and token back on the disk, and a restore or an unretire that
+    // fails part way (or lands though its answer was lost) still leaves it to
+    // be cut and cleared inside again.
     unretired = true;
+    if (retired.checkpointId) {
+      await machines.restore?.(ref, retired.checkpointId);
+      await stillOurs();
+    }
     await machines.unretire!(ref);
     const result = await deps.db.transaction(async (tx) => {
       // Checked again where it counts: a removal waits for this to commit, or this sees it.
@@ -1647,6 +1688,30 @@ export async function restoreRetiredComputer(
     await publishStatus(deps, result.computer, 'stopped');
     return { ...result, replaced };
   } catch (error) {
+    // What the record says now decides what is left to do. The last
+    // transaction may have committed though its answer was lost: the machine
+    // is then the member's computer, and nothing of it is undone.
+    let now: Pick<RetiredRow, 'status' | 'claim'> | null | 'unknown';
+    try {
+      const [read] = await deps.db
+        .select({ status: schema.retiredComputers.status, claim: schema.retiredComputers.claim })
+        .from(schema.retiredComputers)
+        .where(eq(schema.retiredComputers.id, retired.id));
+      now = read ?? null;
+    } catch (again) {
+      now = 'unknown';
+      deps.logger.error({ err: again, retiredId: retired.id }, 'reading a restore back failed');
+    }
+    if (now !== 'unknown' && now?.status === 'restored') {
+      const done = await restoredAfterAll(deps, retired, replaced).catch(() => null);
+      if (done) return done;
+      // Committed, but not readable now: the restore stands; the operator reads it again.
+      throw error;
+    }
+    // Not readable: the lease runs out, and the sweep takes the machine back
+    // if the restore did not commit (`sweepRetiredComputers`). Cutting it
+    // here could cut off a machine that is the member's after all.
+    if (now === 'unknown') throw error;
     // Put back in service but not recorded as the member's: out of service again.
     let sealed = true;
     if (unretired) {
@@ -1662,4 +1727,36 @@ export async function restoreRetiredComputer(
     await release(sealed);
     throw error;
   }
+}
+
+/**
+ * A restore whose last transaction committed though its caller saw it fail:
+ * what it made, read back. Null when the member's computer no longer names
+ * the restored machine (something moved it on since).
+ */
+async function restoredAfterAll(
+  deps: Deps,
+  retired: RetiredRow,
+  replaced: RetiredRow | null,
+): Promise<Restored | null> {
+  const [restored] = await deps.db
+    .select()
+    .from(schema.retiredComputers)
+    .where(eq(schema.retiredComputers.id, retired.id));
+  const [computer] = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(
+      and(
+        eq(schema.computers.workspaceId, retired.workspaceId),
+        eq(schema.computers.ownerId, retired.ownerId),
+        eq(schema.computers.containerId, retired.providerRef),
+      ),
+    );
+  if (!restored || !computer) return null;
+  deps.logger.warn(
+    { retiredId: retired.id, computerId: computer.id },
+    'a restore committed though its answer was lost; it stands',
+  );
+  return { restored, replaced, computer };
 }

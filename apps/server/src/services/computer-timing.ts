@@ -1,6 +1,11 @@
 import {
+  SPRITES_CHECKPOINT_MAX_MS,
+  SPRITES_EXEC_KILL_MS,
+  SPRITES_PROVISION_MAX_MS,
+  SPRITES_RESTORE_MAX_MS,
   SPRITES_RETIRE_INSIDE_MAX_MS,
   SPRITES_RETIRE_MAX_MS,
+  SPRITES_STATUS_MAX_MS,
   SPRITES_UNRETIRE_MAX_MS,
 } from '@openbots/computer';
 
@@ -25,6 +30,13 @@ export const STOPPING_HEARTBEAT_MS = 15_000;
  * (computer.ts `abandonedStop`): the retirement's own record holds it.
  */
 export const STOPPING_TAKEOVER_MS = 4 * STOPPING_HEARTBEAT_MS;
+/**
+ * How long a holder of `stopping` goes on with no refresh landing (the
+ * database unreachable) before it ends its own provider call: past this its
+ * claim may soon be taken over, and the call must be over before then. The
+ * call ends at most `SPRITES_EXEC_KILL_MS` after its signal.
+ */
+export const STOPPING_GIVE_UP_MS = 2 * STOPPING_HEARTBEAT_MS;
 
 /** The longest a reset's own work on the record takes: the cut, then its undo. */
 export const RESET_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_UNRETIRE_MAX_MS;
@@ -40,8 +52,21 @@ export const JOB_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_RETIRE_INSIDE_M
 export const RETIRE_LEASE_MS = 5 * 60_000;
 /** How long a deletion's claim lasts before another worker may take the row again. */
 export const RETIRED_LEASE_MS = 30 * 60_000;
+/**
+ * The longest an operator's restore holds its record (computer-retire.ts
+ * `restoreRetiredComputer`): a checkpoint of the member's current machine,
+ * its retire (the cut, and its undo), the retired machine's checkpoint put
+ * back, its return to service, and on a failure the cut and the steps
+ * inside it again.
+ */
+export const RESTORE_MAX_MS =
+  SPRITES_CHECKPOINT_MAX_MS +
+  RESET_RETIRE_MAX_MS +
+  SPRITES_RESTORE_MAX_MS +
+  SPRITES_UNRETIRE_MAX_MS +
+  JOB_RETIRE_MAX_MS;
 /** How long an operator's restore may take before the sweep takes the machine back. */
-export const RESTORE_LEASE_MS = 30 * 60_000;
+export const RESTORE_LEASE_MS = 45 * 60_000;
 
 /**
  * How long a provisioning job may go without its heartbeat before a start or
@@ -54,11 +79,10 @@ export const PROVISION_STALE_MS = 20 * 60_000;
  * The longest a provisioning job can run once its computer moved on before
  * it ends: it checks its claim every heartbeat and ends its provider call
  * then, but a process cut off from the database is bounded only by the
- * provisioning's own limits (packages/computer sprites.ts and sprites-api.ts:
- * 2 minutes to make the Sprite, 5 for each upload, 15 for the script, 1 for
- * the agent to answer).
+ * provisioning's own limits (packages/computer sprites.ts): a status read,
+ * then a make and a start, each within `SPRITES_PROVISION_MAX_MS`.
  */
-export const PROVISION_MAX_MS = 30 * 60_000;
+export const PROVISION_MAX_MS = SPRITES_STATUS_MAX_MS + 2 * SPRITES_PROVISION_MAX_MS;
 /**
  * When a retired machine's steps inside it are run once more: past the
  * longest a provisioning the reset cancelled could still be running, so an
@@ -83,7 +107,23 @@ check(
   'STOPPING_TAKEOVER_MS must allow for two missed heartbeats',
 );
 check(
+  STOPPING_GIVE_UP_MS + SPRITES_EXEC_KILL_MS + 5_000 <= STOPPING_TAKEOVER_MS,
+  'a holder that cannot refresh its stop must end its call before the stop can be taken over',
+);
+check(
+  STOPPING_GIVE_UP_MS > STOPPING_HEARTBEAT_MS,
+  'STOPPING_GIVE_UP_MS must allow for one missed heartbeat',
+);
+check(
   PROVISION_STALE_MS >= 10 * PROVISION_HEARTBEAT_MS,
   'PROVISION_STALE_MS must allow for missed heartbeats',
 );
 check(RETIRED_LEASE_MS > CLAIM_MARGIN_MS, 'RETIRED_LEASE_MS must outlast a deletion');
+check(
+  RESTORE_LEASE_MS > RESTORE_MAX_MS + CLAIM_MARGIN_MS,
+  "RESTORE_LEASE_MS must outlast a restore's calls",
+);
+check(
+  RETIRED_RECHECK_MS > PROVISION_MAX_MS,
+  'RETIRED_RECHECK_MS must come after any provisioning a reset cancelled has ended',
+);

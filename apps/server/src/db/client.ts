@@ -16,8 +16,10 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
  * Runs `fn` holding the Postgres advisory lock named `key`, across every
  * process on the database (`withSessionLock`). Only a database made by
  * `createDb` has one; PGlite, one process with one connection, does not.
+ * `fn`'s signal is aborted when the lock's connection is lost while it runs
+ * (the lock went with it): `fn` stops what it can.
  */
-export type SessionLock = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
+export type SessionLock = <T>(key: string, fn: (signal: AbortSignal) => Promise<T>) => Promise<T>;
 
 /** Connections a process holds advisory locks on: one per key held or waited for. */
 const LOCK_CONNECTIONS = 8;
@@ -27,6 +29,19 @@ const LOCK_CONNECTIONS = 8;
  * fails cleanly for the queue to retry, instead of holding a connection.
  */
 export const SESSION_LOCK_WAIT_MS = 60_000;
+/**
+ * How often a held lock's connection is checked while its holder works: a
+ * connection that is gone took the lock with it, and the holder is told.
+ */
+export const SESSION_LOCK_WATCH_MS = 5_000;
+
+/** The lock's connection was lost while its holder ran: the lock is gone. */
+export class SessionLockLost extends Error {
+  constructor(key: string) {
+    super(`The lock ${key} was lost with its database connection`);
+    this.name = 'SessionLockLost';
+  }
+}
 
 /** A session lock not had within its wait. */
 export class SessionLockTimeout extends Error {
@@ -63,6 +78,8 @@ export interface CreateDbOptions {
   sessionUrl?: string;
   /** `SESSION_LOCK_WAIT_MS` unless a test sets it. */
   lockWaitMs?: number;
+  /** `SESSION_LOCK_WATCH_MS` unless a test sets it. */
+  lockWatchMs?: number;
 }
 
 /** Rejects with `SessionLockTimeout` once `deadline` passes, unless `promise` settles first. */
@@ -82,7 +99,11 @@ function within<T>(promise: Promise<T>, deadline: number, key: string): Promise<
 export function createDb(
   url: string,
   options: postgres.Options<Record<string, never>> = {},
-  { sessionUrl = url, lockWaitMs = SESSION_LOCK_WAIT_MS }: CreateDbOptions = {},
+  {
+    sessionUrl = url,
+    lockWaitMs = SESSION_LOCK_WAIT_MS,
+    lockWatchMs = SESSION_LOCK_WATCH_MS,
+  }: CreateDbOptions = {},
 ) {
   const client = postgres(url, { onnotice: () => {}, ...options });
   const db = drizzle(client, { schema });
@@ -123,6 +144,8 @@ export function createDb(
         throw error;
       });
       let healthy = true;
+      // The lock's session ended while it was held (the watch below).
+      let gone = false;
       try {
         const wait = Math.max(1, deadline - Date.now());
         await held`select set_config('lock_timeout', ${`${wait}ms`}, false)`;
@@ -133,21 +156,79 @@ export function createDb(
           throw error;
         }
         await held`select set_config('lock_timeout', '0', false)`;
+        const [{ pid } = { pid: null }] = await held<{ pid: number }[]>`
+          select pg_backend_pid() as pid
+        `;
+        // Watched while it is held, from the pool (never on the lock's own
+        // connection, which may be dead): the database's own word that the
+        // session holding it is gone, or two checks in a row that could not
+        // get an answer, mean the lock may be someone else's.
+        const lost = new AbortController();
+        let checking = false;
+        let misses = 0;
+        const missed = () => {
+          if (++misses >= 2) lost.abort(new SessionLockLost(key));
+        };
+        const watch = setInterval(() => {
+          if (lost.signal.aborted) return;
+          if (checking) return missed();
+          checking = true;
+          client<{ held: boolean }[]>`
+            select exists (
+              select 1 from pg_locks
+              where pid = ${pid} and locktype = 'advisory' and granted and objsubid = 1
+                and classid = ((hashtextextended(${key}, 0) >> 32) & 4294967295)::oid
+                and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+            ) as held
+          `.then(
+            ([row]) => {
+              checking = false;
+              if (row?.held) {
+                misses = 0;
+                return;
+              }
+              gone = true;
+              lost.abort(new SessionLockLost(key));
+            },
+            () => {
+              checking = false;
+              missed();
+            },
+          );
+        }, lockWatchMs);
+        watch.unref?.();
         try {
-          return await fn();
+          return await fn(lost.signal);
         } finally {
-          // An unlock that did not release the lock (it ran on a session that
-          // did not hold it): the connection goes, and the lock with it.
-          const [row] = await held<{ ok: boolean }[]>`
-            select pg_advisory_unlock(hashtextextended(${key}, 0)) as ok
-          `.catch(() => [{ ok: false }]);
-          if (row?.ok !== true) healthy = false;
+          clearInterval(watch);
+          if (gone) {
+            // Its session is gone, the lock with it: nothing to unlock, and
+            // the connection is not asked anything more.
+            healthy = false;
+          } else {
+            // An unlock that did not release the lock (it ran on a session that
+            // did not hold it): the connection goes, and the lock with it.
+            const [row] = await within(
+              held<{ ok: boolean }[]>`
+                select pg_advisory_unlock(hashtextextended(${key}, 0)) as ok
+              `,
+              Date.now() + lockWaitMs,
+              key,
+            ).catch(() => [{ ok: false }]);
+            if (row?.ok !== true) healthy = false;
+          }
         }
       } finally {
-        if (!healthy) {
-          await held`select pg_terminate_backend(pg_backend_pid())`.catch(() => undefined);
+        if (!healthy && !gone) {
+          await within(
+            held`select pg_terminate_backend(pg_backend_pid())`,
+            Date.now() + lockWaitMs,
+            key,
+          ).catch(() => undefined);
         }
-        held.release();
+        // A connection whose session ended is the pool's to make again: given
+        // back, it would be handed out dead.
+        if (!gone) held.release();
       }
     } finally {
       done();

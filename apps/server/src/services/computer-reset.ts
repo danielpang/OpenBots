@@ -323,10 +323,13 @@ export async function resetComputer(
   );
   // A machine retired took the reset's cleanup with it, and its audit is
   // written once it is out of reach (computer-retire.ts).
+  // Without one, there was no machine to keep or delete: the audit does not
+  // say the old computer was kept or deleted.
   if (!retired) {
+    const { oldComputer: _, ...record } = resetRecord;
     await deps.db.transaction(async (tx) => {
       const checkouts = await cleanupAfterReset(tx as unknown as Db, row, resetSignIns);
-      await auditReset(tx as unknown as Db, row, by, { ...resetRecord, checkouts });
+      await auditReset(tx as unknown as Db, row, by, { ...record, checkouts });
     });
   }
   return reset;

@@ -501,7 +501,10 @@ describe('retired computers, forward only', () => {
         expect(await inEveryOrganization(t.deps, () => recoverStaleComputers(t.deps))).toBe(0);
         clearing.go();
         const out = await reset;
-        expect(out).toMatchObject({ computer: { status: 'stopped', containerId: null } });
+        // The Sprite stays, its home cleared, and the row still names it.
+        expect(out).toMatchObject({
+          computer: { status: 'stopped', containerId: before.containerId, agentUrl: null },
+        });
       } finally {
         clearing.restore();
       }
@@ -786,7 +789,12 @@ describe('retired computers, forward only', () => {
         provisionTimings.heartbeatMs = beat;
         sprites.api.exec = exec;
       }
-      expect(await m.row()).toMatchObject({ status: 'stopped', containerId: null });
+      // The kept Sprite is still named; the cancelled job wrote no agent.
+      expect(await m.row()).toMatchObject({
+        status: 'stopped',
+        containerId: before.containerId,
+        agentUrl: null,
+      });
     });
   });
 
