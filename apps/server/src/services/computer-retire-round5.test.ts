@@ -300,7 +300,7 @@ describe('retired computers, fifth review', () => {
         provider: 'sprites',
         containerId: row.containerId,
         agentUrl: row.agentUrl!,
-        agentToken: row.agentToken!,
+        agentToken: '',
         volumeName: null,
       };
       const stop = provider.stop;
