@@ -9,6 +9,8 @@ import { inEveryOrganization } from '../workers.js';
 import {
   computerProvider,
   recoverStaleComputers,
+  restartComputer,
+  stopComputer,
   STOPPING_TAKEOVER_MS,
   type ComputerRow,
 } from './computer.js';
@@ -284,6 +286,32 @@ describe('retired computers, fifth review', () => {
       expect(await m.row()).toMatchObject({ status: 'running', containerId: fresh.containerId });
       expect(await resetAudits(requestId)).toHaveLength(audits);
       expect(audits).toBeLessThanOrEqual(1);
+    });
+  });
+
+  describe('5. a stop that loses its claim to a start that finished', () => {
+    it('stops the computer as it now is, rather than answer stopped while it runs', async () => {
+      const m = await member('stop-race@example.com');
+      const running = await m.row();
+      expect(running.status).toBe('running');
+      // The stop read the computer while it was starting; the start finished
+      // first, and its guarded write kept the generation the stop read.
+      const read: ComputerRow = { ...running, status: 'starting' };
+      const out = await t.inOrganization(() => stopComputer(t.deps, read));
+      expect(out.status).toBe('stopped');
+      expect(await m.row()).toMatchObject({ status: 'stopped' });
+    });
+
+    it('a restart restarts', async () => {
+      const m = await member('restart-race@example.com');
+      const running = await m.row();
+      const read: ComputerRow = { ...running, status: 'starting' };
+      const started = await t.inOrganization(() =>
+        restartComputer(t.deps, { id: m.ownerId, workspaceId }, read),
+      );
+      // Stopped first, so this call started it again.
+      expect(started.computer.status).toBe('running');
+      expect(started.durationMs).not.toBeNull();
     });
   });
 });

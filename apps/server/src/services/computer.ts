@@ -1478,34 +1478,55 @@ export async function stopComputer(
   row: ComputerRow,
   by: AuditActor = { type: 'user', id: row.ownerId },
 ): Promise<ComputerRow> {
-  if (!row.agentUrl || row.status === 'stopped') return row;
   // A claim of its own: a start or a job meanwhile writes nothing over it.
   // Only of the row as read (its status and generation): a reset, a start or
   // another stop that took it since keeps it, and a stop still held (a
   // reset's retirement included) is never taken over (`abandonedStop`).
-  const [claimed] = await deps.db
-    .update(schema.computers)
-    .set({ status: 'stopping', statusAt: sql`clock_timestamp()`, generation: nextGeneration() })
-    .where(
-      and(
-        eq(schema.computers.id, row.id),
-        eq(schema.computers.status, row.status),
-        sameGeneration(row),
-        row.status === 'stopping' ? abandonedStop() : undefined,
-      ),
-    )
-    .returning();
-  if (!claimed) {
+  // A claim lost to a row that moved on to something a stop stops (a start
+  // that finished first: `running`, or `error`) is tried again on the row as
+  // it now is, a bounded number of times; a stop never answers as done while
+  // the computer runs.
+  let read = row;
+  for (let attempt = 0; ; attempt++) {
+    if (!read.agentUrl || read.status === 'stopped') return read;
+    const [claimed] = await deps.db
+      .update(schema.computers)
+      .set({ status: 'stopping', statusAt: sql`clock_timestamp()`, generation: nextGeneration() })
+      .where(
+        and(
+          eq(schema.computers.id, read.id),
+          eq(schema.computers.status, read.status),
+          sameGeneration(read),
+          read.status === 'stopping' ? abandonedStop() : undefined,
+        ),
+      )
+      .returning();
+    if (claimed) {
+      endStartWork(read.id);
+      await publishStatus(deps, claimed, 'stopping');
+      return stopMachine(deps, claimed, by);
+    }
     const [now] = await deps.db
       .select()
       .from(schema.computers)
-      .where(eq(schema.computers.id, row.id));
-    return now ?? row;
+      .where(eq(schema.computers.id, read.id));
+    // Gone, stopped, or held by another stop or a reset: left as it is.
+    if (!now || now.status === 'stopping' || !now.agentUrl || now.status === 'stopped') {
+      return now ?? read;
+    }
+    if (attempt >= STOP_CLAIM_ATTEMPTS - 1) {
+      throw new DomainError(
+        503,
+        'COMPUTER_UNAVAILABLE',
+        'The computer changed while it was being stopped and is still on. Try again.',
+      );
+    }
+    read = now;
   }
-  endStartWork(row.id);
-  await publishStatus(deps, claimed, 'stopping');
-  return stopMachine(deps, claimed, by);
 }
+
+/** How many times a stop claims the computer when a start or a job keeps moving it on. */
+const STOP_CLAIM_ATTEMPTS = 3;
 
 /**
  * Stops the owner's computer if it is up, then starts it again; its files
