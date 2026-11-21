@@ -13,8 +13,11 @@ cd apps/desktop && pnpm dist:dev       # unsigned .app in release/ (macOS), see 
 ```
 
 `OPENBOTS_DESKTOP_LOCAL_URL=http://localhost:5173` points the local profile at the web app's Vite dev
-server instead of the local stack. `OPENBOTS_CLOUD_URL=https://...` enables "Sign in to an OpenBots
-account" in a development run (a release build takes it from the build; see RELEASING.md).
+server instead of the local stack. `OPENBOTS_CLOUD_URL=https://...` enables "Sign in to OpenBots
+Cloud" in a development run (a release build takes it from the build; see RELEASING.md). That
+sign-in happens in the default browser, which comes back through an `openbots://app-sign-in` link
+(`src/main/cloud-sign-in.ts`), so a preview build, which does not claim the `openbots://` scheme,
+cannot finish it.
 
 ## Testing "Run OpenBots on this Mac" against images built from source
 

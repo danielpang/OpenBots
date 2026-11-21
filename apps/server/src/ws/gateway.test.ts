@@ -237,6 +237,46 @@ describe('WS gateway', () => {
     bystander.close();
   });
 
+  it("closes a Mac app's socket 1008 when its session device is revoked, and no other session's", async () => {
+    const closedWith = (client: TestClient) =>
+      new Promise<number>((resolve) => client.raw.once('close', (code) => resolve(code)));
+    const signedIn = await t.app.request('/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ email: 'alice@example.com', password: 'correct horse battery' }),
+    });
+    const mac = signedIn.headers.getSetCookie()[0]!.split(';')[0]!;
+    const token = decodeURIComponent(mac.split('=')[1]!).split('.')[0]!;
+    const [session] = await t.db
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(eq(schema.sessions.token, token));
+    await t.switchOrganization(mac, await t.defaultOrganization());
+    const [device] = await t.db
+      .insert(schema.devices)
+      .values({
+        workspaceId: await t.defaultOrganization(),
+        ownerId: await t.userId('alice@example.com'),
+        name: 'Mac',
+        platform: 'desktop',
+        sessionId: session!.id,
+      })
+      .returning();
+    const macSocket = await connect(url, { cookie: mac, origin: ORIGIN });
+    const browser = await connect(url, { cookie: alice, origin: ORIGIN });
+    const macClosed = closedWith(macSocket);
+    const revoked = await t.app.request(`/api/v1/devices/${device!.id}`, {
+      method: 'DELETE',
+      headers: { cookie: alice, origin: ORIGIN },
+    });
+    expect(revoked.status).toBe(204);
+    expect(await macClosed).toBe(1008);
+    expect(await browser.next()).toMatchObject({ type: 'device.revoked' });
+    browser.send({ type: 'ping' });
+    expect(await browser.next()).toMatchObject({ type: 'pong' });
+    browser.close();
+  });
+
   it("delivers a user's account events only to their sockets in that organization (plan 21.3)", async () => {
     const home = await t.defaultOrganization();
     const aliceId = await t.userId('alice@example.com');

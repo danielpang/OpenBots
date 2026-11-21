@@ -21,6 +21,9 @@ jest.mock('../hosts/store', () => ({
 jest.mock('../hosts/secure-store', () => ({ createSecureHostStorage: () => ({}) }));
 jest.mock('../hosts/pairing', () => ({}));
 jest.mock('./sign-in', () => ({}));
+jest.mock('./cloud-sign-in', () => ({}));
+jest.mock('expo-apple-authentication', () => ({}));
+jest.mock('expo-web-browser', () => ({}));
 jest.mock('./files', () => ({}));
 jest.mock('expo-secure-store', () => ({ getItemAsync: async () => 'false' }));
 jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));

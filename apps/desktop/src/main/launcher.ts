@@ -8,7 +8,9 @@ import type {
 import { stackView } from '../renderer/stack-view.js';
 import { parseServerAddress, ServerUrlError } from '../server-url.js';
 import type { StackManager } from '../stack/manager.js';
+import type { CloudSignIn } from './cloud-sign-in.js';
 import { CLOUD_PROFILE_ID, LOCAL_PROFILE_ID, type ProfileStore } from './profiles.js';
+import type { SessionToken } from './tokens.js';
 import {
   checkServer,
   entryPath,
@@ -55,6 +57,13 @@ export interface LauncherOptions {
    * resolves its profile. Missing where pairing is not wired up.
    */
   pair?: (link: string) => Promise<ServerProfile>;
+  /**
+   * OpenBots Cloud sign-in in the default browser (./cloud-sign-in.ts), and
+   * where the session it ends with is kept (./tokens.ts). Without them the
+   * account's sign-in opens in the window, as before.
+   */
+  cloudSignIn?: CloudSignIn;
+  saveToken?: (profileId: string, token: SessionToken) => Promise<void>;
   /** For tests: how long and how often to wait for /readyz. */
   wait?: WaitOptions;
 }
@@ -105,7 +114,10 @@ export interface Launcher {
   launch(): Promise<'welcome' | 'server' | 'start' | 'upgrade'>;
   /** Back to the three choices; saved profiles stay. */
   changeConnection(): Promise<void>;
+  /** OpenBots Cloud: opens the browser to sign in; `finishCloudSignIn` takes its answer. */
   connectCloud(): Promise<void>;
+  /** The browser's `openbots://app-sign-in` answer: keeps the session and opens the account. */
+  finishCloudSignIn(link: string): Promise<void>;
   checkServer(input: string): Promise<ServerCheckResult>;
   connectServer(input: string): Promise<void>;
   /** Pairs with another OpenBots server from its pairing link, saves it and opens it. */
@@ -179,8 +191,23 @@ export function createLauncher(options: LauncherOptions): Launcher {
 
     async connectCloud() {
       if (!cloudUrl) throw new Error('OpenBots accounts are not available yet.');
+      if (options.cloudSignIn) {
+        // Nothing is chosen until the browser comes back signed in.
+        await options.cloudSignIn.start();
+        return;
+      }
       const profile = await profiles.setActive(CLOUD_PROFILE_ID);
       await window.openServer(profile, '/sign-in');
+    },
+
+    async finishCloudSignIn(link) {
+      if (!cloudUrl || !options.cloudSignIn || !options.saveToken) {
+        throw new Error('OpenBots accounts are not available yet.');
+      }
+      const token = await options.cloudSignIn.finish(link);
+      await options.saveToken(CLOUD_PROFILE_ID, token);
+      const profile = await profiles.setActive(CLOUD_PROFILE_ID);
+      await window.openServer(profile);
     },
 
     checkServer: check,

@@ -18,7 +18,9 @@ import {
 // pairing link was opened on this Mac, for the choice that pairs with it. Otherwise it is
 // shown when the active server does not answer, with the reason, the bundled
 // stack's controls for This Mac (start, stop, update, logs), and a way to
-// change the connection; with `upgrade=1` when the app was updated past the
+// change the connection; with `cloudError=<sentence>` when an OpenBots Cloud
+// sign-in in the browser did not finish (or the session ended); with
+// `upgrade=1` when the app was updated past the
 // release the stack runs, and `logs=1` from the web app's "Show logs". A
 // self-hosted or account connection never asks Docker.
 
@@ -60,6 +62,8 @@ export interface StartState {
     /** A connection was chosen before: the screen came from "Change connection…". */
     changing: boolean;
     cloud: { enabled: boolean; note: string | null };
+    /** The browser is open at OpenBots Cloud's sign-in; the app waits for it. */
+    cloudWaiting: boolean;
     address: string;
     warning: string | null;
     checking: boolean;
@@ -125,6 +129,7 @@ export function createStartFlow(bridge: AppBridge, query: URLSearchParams) {
     welcome: {
       changing: false,
       cloud: { enabled: false, note: null },
+      cloudWaiting: false,
       address: '',
       warning: null,
       checking: false,
@@ -140,6 +145,9 @@ export function createStartFlow(bridge: AppBridge, query: URLSearchParams) {
       logs: { open: false, lines: [] },
     },
   });
+  // Why an OpenBots Cloud sign-in did not finish, from the main process.
+  const cloudError = welcome ? query.get('cloudError') : null;
+  if (cloudError) store.update({ error: { message: cloudError, detail: null, place: 'cloud' } });
   const get = () => store.get();
   const setWelcome = (patch: Partial<StartState['welcome']>) =>
     store.update((s) => ({ welcome: { ...s.welcome, ...patch } }));
@@ -300,7 +308,10 @@ export function createStartFlow(bridge: AppBridge, query: URLSearchParams) {
     welcome: {
       cloud: () => {
         clearError();
-        return bridge.connect.cloud().catch(showError('cloud'));
+        return bridge.connect
+          .cloud()
+          .then(() => setWelcome({ cloudWaiting: true }))
+          .catch(showError('cloud'));
       },
       setAddress: (address: string) => setWelcome({ address, warning: addressWarning(address) }),
       connectServer: () => {

@@ -96,6 +96,14 @@ const PairRequestSchema = z
     ownerName: z.string().trim().min(1).max(100).optional().openapi({
       description: 'The new owner’s name, used only on a server with no owner yet',
     }),
+    codeVerifier: z
+      .string()
+      .regex(/^[A-Za-z0-9._~-]{43,128}$/)
+      .optional()
+      .openapi({
+        description:
+          'The PKCE verifier, for a code from an app sign-in in the browser (`POST /app-sign-in/codes`); such a code works only with it. Ignored for a QR pairing.',
+      }),
   })
   .openapi('PairRequest');
 
@@ -303,6 +311,10 @@ export const deviceRoutes = createRouter()
     }),
     async (c) => {
       const { user } = c.var;
+      // In the caller's active organization only: a Mac whose session has
+      // switched to another organization finds its own device there 404, as
+      // every other organization's row. Its device is revoked in its own
+      // organization when the session ends (auth.ts, revokeSessionDevices).
       await revokeDevice(
         c.var.deps,
         { workspaceId: user.workspaceId, ownerId: user.id },

@@ -889,9 +889,17 @@
               },
               "google": {
                 "type": "boolean"
+              },
+              "apple": {
+                "type": "boolean",
+                "description": "Sign in with Apple is configured (APPLE_CLIENT_ID and the rest)"
               }
             },
             "required": ["github", "google"]
+          },
+          "nativeAppleSignIn": {
+            "type": "boolean",
+            "description": "The iOS app may sign in with Apple natively (APPLE_APP_BUNDLE_ID is set beside Apple's other settings)"
           },
           "computer": {
             "type": "boolean",
@@ -8791,6 +8799,11 @@
             "minLength": 1,
             "maxLength": 100,
             "description": "The new owner’s name, used only on a server with no owner yet"
+          },
+          "codeVerifier": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~-]{43,128}$",
+            "description": "The PKCE verifier, for a code from an app sign-in in the browser (`POST /app-sign-in/codes`); such a code works only with it. Ignored for a QR pairing."
           }
         },
         "required": ["code", "name", "platform", "publicKey", "pushKey"],
@@ -8864,6 +8877,100 @@
           }
         },
         "required": ["hostId", "relayUrl", "status", "since", "error"]
+      },
+      "AppSignInCode": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The one-time code, base64url; shown only once"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": ["code", "expiresAt"]
+      },
+      "AppSignInCodeRequest": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string",
+            "enum": ["ios", "desktop"],
+            "description": "The app being signed in"
+          },
+          "codeChallenge": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "description": "The app's PKCE challenge: base64url SHA-256 of its verifier"
+          }
+        },
+        "required": ["platform", "codeChallenge"],
+        "additionalProperties": false
+      },
+      "AppSession": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string",
+                "enum": ["desktop"]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": ["id", "name", "platform", "createdAt"]
+          },
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"]
+          }
+        },
+        "required": ["device", "user"]
+      },
+      "AppSessionRequest": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "codeVerifier": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~-]{43,128}$",
+            "description": "The PKCE verifier the challenge was made from"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "This Mac's name in Devices"
+          }
+        },
+        "required": ["code", "codeVerifier", "name"],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -21638,6 +21745,142 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/app-sign-in/codes": {
+      "post": {
+        "tags": ["devices"],
+        "summary": "Make a one-time code that signs the iOS or Mac app in (a browser session only)",
+        "description": "The web app calls this at /app-sign-in once the person confirms, then sends the browser to `openbots://app-sign-in#code=...&state=...`. The code lasts 5 minutes, works once, and only with the verifier of `codeChallenge`. API keys answer 403 SESSION_REQUIRED.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSignInCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSignInCode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Too many open codes and pairings (TOO_MANY_PAIRINGS)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/app-sign-in/session": {
+      "post": {
+        "tags": ["devices"],
+        "summary": "Trade an app sign-in code for a session (the Mac app)",
+        "description": "No authentication: the code and its PKCE verifier are the credential. Rate-limited per client (10 an hour) and per code (5 tries). Sets the session cookie and makes the Mac a device, which Settings > Devices can revoke. The iOS app trades its code at `POST /devices/pair` instead, with `codeVerifier`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The device and its owner, with the session cookie set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The code is unknown, used, expired, not a Mac app sign-in code, or the verifier is wrong (PAIRING_INVALID)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This server signs in from the Mac app only (LOCAL_ONLY)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts",
             "content": {
               "application/problem+json": {
                 "schema": {

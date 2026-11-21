@@ -58,8 +58,19 @@ export function createApp(deps: AppDeps, { webDist = WEB_DIST }: AppOptions = {}
   // No CORS for the Mac app's local sign-in (routes/local.ts): no page may read it.
   const apiCors = cors({ origin, credentials: true, maxAge: 600 });
   app.use('/api/*', (c, next) => (c.req.path === LOCAL_SESSION_PATH ? next() : apiCors(c, next)));
+  // Apple answers its web sign-in with a cross-site form POST, and any
+  // SameSite=None cookie on the domain (a CDN's, say) rides along. better-auth
+  // (1.7.7, api/routes/callback.mjs) only turns that POST into a redirect to
+  // the GET callback, where the state is checked, so it alone is let through,
+  // and only when Apple sign-in is on.
+  const appleCallback = config.oauth.apple ? APPLE_CALLBACK_PATH : null;
   app.use('/api/*', async (c, next) => {
-    if (UNSAFE_METHODS.has(c.req.method) && crossOriginWithCookie(c.req.raw.headers, origin)) {
+    const exempt = c.req.method === 'POST' && c.req.path === appleCallback;
+    if (
+      !exempt &&
+      UNSAFE_METHODS.has(c.req.method) &&
+      crossOriginWithCookie(c.req.raw.headers, origin)
+    ) {
       throw new DomainError(403, 'ORIGIN_NOT_ALLOWED', `This request must come from ${origin}`);
     }
     await next();
@@ -148,6 +159,9 @@ function securityHeaders(publicUrl: string): MiddlewareHandler {
 }
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** Where Apple posts its web sign-in's answer (better-auth's callback for `apple`). */
+const APPLE_CALLBACK_PATH = '/api/auth/callback/apple';
 
 /**
  * A browser request riding the session cookie from another origin (S-19).

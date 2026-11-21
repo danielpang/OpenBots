@@ -1,4 +1,4 @@
-import { createAuthClient, createClient, unwrap } from '@openbots/api-client';
+import { createAuthClient, createClient, unwrap, type AuthClient } from '@openbots/api-client';
 import { normalizeServerUrl } from '../transport';
 import { pairHost, parsePairingLink } from '../hosts/pairing';
 
@@ -14,9 +14,24 @@ export async function signInAndPair(
   },
   fetchImpl: typeof fetch = fetch,
 ) {
+  return sessionAndPair(
+    {
+      address: input.address,
+      deviceName: input.deviceName,
+      signIn: (auth) => auth.signInEmail({ email: input.email.trim(), password: input.password }),
+    },
+    fetchImpl,
+  );
+}
+
+/** The same with any sign-in that sets the session cookie (Sign in with Apple's ID token). */
+export async function sessionAndPair(
+  input: { address: string; deviceName: string; signIn(auth: AuthClient): Promise<unknown> },
+  fetchImpl: typeof fetch = fetch,
+) {
   const origin = normalizeServerUrl(input.address);
   const auth = createAuthClient(origin, fetchImpl);
-  await auth.signInEmail({ email: input.email.trim(), password: input.password });
+  await input.signIn(auth);
   try {
     const api = createClient(origin, fetchImpl);
     const offer = await unwrap(

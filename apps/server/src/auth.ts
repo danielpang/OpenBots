@@ -5,12 +5,13 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { APIError, createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
 import { symmetricEncrypt } from 'better-auth/crypto';
-import { and, asc, eq, isNotNull, or } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or } from 'drizzle-orm';
 import { z } from 'zod';
+import { APPLE_ISSUER, appleProvider, type AppleProviderOptions } from './apple.js';
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
-import { asDirectory, inWorkspace, withScope } from './db/scope.js';
+import { asDirectory, inWorkspace, sessionDeviceWorkspace, withScope } from './db/scope.js';
 import { problem } from './errors.js';
 import type { RateLimiter } from './infra/rate-limit.js';
 import type { Logger } from './logger.js';
@@ -18,8 +19,9 @@ import { parseMasterKey } from './secrets.js';
 import { recordAudit } from './services/audit.js';
 import { ensureWorkspace, lockWorkspace } from './workspace.js';
 
-// better-auth (plan section 3): email and password, optional GitHub and Google
-// sign-in, cookie sessions, and API keys (U4). Mounted at `/api/auth/*`.
+// better-auth (plan section 3): email and password, optional GitHub, Google and
+// Apple sign-in (apple.ts), cookie sessions, and API keys (U4). Mounted at
+// `/api/auth/*`.
 //
 // Organizations (plan section 21): a self-hosted install (OPENBOTS_DEPLOYMENT)
 // is one person's, in one implicit organization. Its first account is the
@@ -82,6 +84,9 @@ const PAIRING_OWNER_PATH = '/openbots/pairing-owner';
 
 /** better-auth's path for `setOwnerCredentials`, which no HTTP request reaches. */
 const OWNER_CREDENTIALS_PATH = '/openbots/owner-credentials';
+
+/** better-auth's path for `createAppSession`, which no HTTP request reaches. */
+export const APP_SESSION_PATH = '/openbots/app-session';
 
 /** The server-only endpoints that may make the owner in local mode. */
 const OWNER_PATHS = new Set([LOCAL_SESSION_PATH, PAIRING_OWNER_PATH]);
@@ -148,6 +153,17 @@ export interface Auth {
     setOwnerCredentials(input: {
       body: { userId: string; email: string; password: string };
     }): Promise<{ user: { id: string; email: string } }>;
+    /**
+     * A new session for a user, working in `workspaceId`, for a Mac app
+     * signed in through the browser (services/app-sign-in.ts). The response
+     * carries the session cookie and `{ session: { id } }`. The session hooks
+     * run as for any sign-in: refused in local mode, audited as a sign-in.
+     */
+    createAppSession(input: {
+      body: { userId: string; workspaceId: string };
+      headers: Headers;
+      asResponse: true;
+    }): Promise<Response>;
   };
 }
 
@@ -164,6 +180,7 @@ export function createAuth({
   limiter,
   rateLimit = true,
   plugins = [],
+  apple: appleOptions,
 }: {
   config: Config;
   db: Db;
@@ -173,9 +190,12 @@ export function createAuth({
   rateLimit?: boolean;
   /** better-auth plugins from the managed build (`ServerExtensions.authPlugins`). */
   plugins?: BetterAuthPlugin[];
+  /** Apple's keys and the clock, for tests (apple.ts). */
+  apple?: AppleProviderOptions;
 }): Auth {
   const origin = new URL(config.publicUrl).origin;
   const { github, google } = config.oauth;
+  const apple = config.oauth.apple ? appleProvider(config.oauth.apple, appleOptions) : undefined;
   // Read at each call: tests turn an install self-hosted while it runs.
   const selfHosted = () => config.deployment === 'self_hosted';
 
@@ -184,7 +204,8 @@ export function createAuth({
     baseURL: config.publicUrl,
     basePath: '/api/auth',
     secret: authSecret(config.masterKey),
-    trustedOrigins: [origin],
+    // Apple answers its sign-in with a form POST from its own origin.
+    trustedOrigins: apple ? [origin, APPLE_ISSUER] : [origin],
     // better-auth's own queries are the directory's (db/scope.ts).
     database: drizzleAdapter(withScope(db, { directory: true }), {
       provider: 'pg',
@@ -196,6 +217,7 @@ export function createAuth({
     socialProviders: {
       ...(github && { github }),
       ...(google && { google }),
+      ...(apple && { apple }),
     },
     rateLimit: {
       enabled: rateLimit,
@@ -314,6 +336,12 @@ export function createAuth({
           },
         },
         delete: {
+          // A Mac app signed in through the browser works with a session; when
+          // it ends (sign-out, expiry, revocation) its device is revoked too.
+          // That never stops the session ending: a failure is logged.
+          before: async (session) => {
+            await revokeSessionDevices(db, logger, session);
+          },
           after: async (session, ctx) => {
             // Expiry and revocation delete sessions too; only signing out counts.
             if (ctx?.path !== '/sign-out') return;
@@ -420,7 +448,10 @@ async function ensureOwner(
   }
 }
 
-/** `createLocalSession`, `createPairingOwner` and `setOwnerCredentials` (see the top of this file). */
+/**
+ * `createLocalSession`, `createPairingOwner`, `setOwnerCredentials` and
+ * `createAppSession` (see the top of this file).
+ */
 function ownerPlugin(db: Db) {
   const body = z.object({ name: z.string().min(1).max(100) });
   const credentials = z.object({
@@ -516,8 +547,94 @@ function ownerPlugin(db: Db) {
           return ctx.json({ user: { id: userId, email } });
         },
       ),
+      createAppSession: createAuthEndpoint(
+        APP_SESSION_PATH,
+        {
+          method: 'POST',
+          body: z.object({ userId: z.string().min(1), workspaceId: z.string().min(1) }),
+          // Called from services/app-sign-in.ts only, never routed.
+          metadata: { SERVER_ONLY: true },
+        },
+        async (ctx) => {
+          const adapter = ctx.context.internalAdapter;
+          const user = await adapter.findUserById(ctx.body.userId);
+          if (!user) throw new APIError('NOT_FOUND', { message: 'No such account' });
+          const session = await adapter.createSession(user.id, false, {
+            activeOrganizationId: ctx.body.workspaceId,
+          });
+          // Without the organization plugin (a self-hosted install) better-auth
+          // drops a field it does not know; the column is the core's.
+          await asDirectory(() =>
+            db
+              .update(schema.sessions)
+              .set({ activeOrganizationId: ctx.body.workspaceId })
+              .where(eq(schema.sessions.id, session.id)),
+          );
+          await setSessionCookie(ctx, { session, user });
+          return ctx.json({ session: { id: session.id } });
+        },
+      ),
     },
   } satisfies BetterAuthPlugin;
+}
+
+/**
+ * Marks the device that held this session revoked, in the device's own
+ * organization: the one it was made in, whichever the session has switched
+ * to since (openbots_session_device_workspace(), db/scope.ts). Only the
+ * session's own user's device. The device row keeps its name for the Devices
+ * list's history; the foreign key clears its session once the row is gone.
+ *
+ * Never throws: the session ends whatever happens here. A failure is logged
+ * by its kind only, never with the session or its token.
+ */
+async function revokeSessionDevices(
+  db: Db,
+  logger: Logger,
+  session: { id: string; userId: string },
+): Promise<void> {
+  try {
+    const workspaceId = await sessionDeviceWorkspace(db, session.id);
+    if (!workspaceId) return;
+    await inWorkspace(workspaceId, () =>
+      db.transaction(async (tx) => {
+        const revoked = await tx
+          .update(schema.devices)
+          .set({ revokedAt: new Date() })
+          .where(
+            and(
+              eq(schema.devices.workspaceId, workspaceId),
+              eq(schema.devices.sessionId, session.id),
+              eq(schema.devices.ownerId, session.userId),
+              isNull(schema.devices.revokedAt),
+            ),
+          )
+          .returning({
+            id: schema.devices.id,
+            name: schema.devices.name,
+            platform: schema.devices.platform,
+          });
+        for (const device of revoked) {
+          await recordAudit(tx as unknown as Db, {
+            workspaceId,
+            actor: { type: 'user', id: session.userId },
+            action: 'device.revoked',
+            targetType: 'device',
+            targetId: device.id,
+            metadata: { name: device.name, platform: device.platform, via: 'session_ended' },
+          });
+        }
+      }),
+    );
+  } catch (error) {
+    logger.error(
+      {
+        error: error instanceof Error ? error.name : typeof error,
+        code: (error as { code?: unknown } | null)?.code ?? null,
+      },
+      'revoking the device of an ended session failed',
+    );
+  }
 }
 
 /** The session's active organization (the organization plugin's field), if any. */

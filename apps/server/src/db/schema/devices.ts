@@ -1,6 +1,6 @@
 import { boolean, check, index, integer, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
-import { apikeys, users } from './auth.js';
+import { apikeys, sessions, users } from './auth.js';
 import { bytea, createdAt, id, timestamptz } from './columns.js';
 import { workspaceId } from './workspace.js';
 
@@ -10,10 +10,19 @@ import { workspaceId } from './workspace.js';
 export const DEVICE_PLATFORMS = ['ios', 'android', 'desktop'] as const;
 export type DevicePlatform = (typeof DEVICE_PLATFORMS)[number];
 
-export const PAIRING_CREATORS = ['user', 'cli'] as const;
+/**
+ * Who made a pairing: a person in the app (`user`), `openbots pair` (`cli`),
+ * or a signed-in browser handing a sign-in to the iOS or Mac app (`app`,
+ * services/app-sign-in.ts), whose code needs the app's PKCE verifier.
+ */
+export const PAIRING_CREATORS = ['user', 'cli', 'app'] as const;
 export type PairingCreator = (typeof PAIRING_CREATORS)[number];
 
-/** A paired client: a phone, or later a desktop, holding an owner's API key. */
+/**
+ * A paired client: a phone or a Mac holding an owner's API key, or a Mac app
+ * signed in to the hosted service through the browser, holding a session
+ * (`sessionId`) instead.
+ */
 export const devices = pgTable(
   'devices',
   {
@@ -33,6 +42,13 @@ export const devices = pgTable(
     publicKey: bytea('public_key'),
     /** The better-auth API key it authenticates with; null once revoked. */
     apiKeyId: uuid('api_key_id').references(() => apikeys.id, { onDelete: 'set null' }),
+    /**
+     * The better-auth session a Mac app signed in through the browser works
+     * with (services/app-sign-in.ts), instead of an API key; null for every
+     * other device. Revoking the device deletes the session, and the session
+     * ending (sign-out, expiry) revokes the device.
+     */
+    sessionId: uuid('session_id').references(() => sessions.id, { onDelete: 'set null' }),
     /** The APNs (or later FCM) token, sealed; null until `PUT /devices/{id}/push`. */
     pushToken: bytea('push_token'),
     /** `production` or `sandbox`, for the token. */
@@ -46,6 +62,7 @@ export const devices = pgTable(
   (t) => [
     index('devices_workspace_owner').on(t.workspaceId, t.ownerId),
     unique('devices_workspace_public_key').on(t.workspaceId, t.publicKey),
+    unique('devices_session_id').on(t.sessionId),
   ],
 );
 
@@ -66,6 +83,19 @@ export const devicePairings = pgTable(
     /** The server's name in the link. */
     name: text('name').notNull(),
     createsOwner: boolean('creates_owner').notNull().default(false),
+    /**
+     * An app sign-in's PKCE challenge (base64url SHA-256 of the app's
+     * verifier, RFC 7636 S256): the code works only with the verifier, so
+     * another app that catches the `openbots://` redirect cannot use it.
+     * Null for a QR pairing.
+     */
+    codeChallenge: text('code_challenge'),
+    /**
+     * The app an app sign-in's code is for: `ios` trades it at
+     * `POST /devices/pair`, `desktop` at `POST /app-sign-in/session`, and
+     * neither at the other's route. Null for a QR pairing.
+     */
+    appPlatform: text('app_platform').$type<'ios' | 'desktop'>(),
     expiresAt: timestamptz('expires_at').notNull(),
     usedAt: timestamptz('used_at'),
     createdBy: text('created_by').$type<PairingCreator>().notNull(),

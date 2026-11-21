@@ -5,6 +5,8 @@ const require = createRequire(import.meta.url);
 const { version: packageVersion } = require('./package.json') as { version: string };
 const releaseVersion = process.env.OPENBOTS_MOBILE_VERSION ?? packageVersion;
 const version = releaseVersion.split('-')[0]!;
+/** Builds with the Sign in with Apple entitlement (OPENBOTS_IOS_APPLE_SIGN_IN=1). */
+const appleSignIn = ['1', 'true'].includes(process.env.OPENBOTS_IOS_APPLE_SIGN_IN ?? '');
 const projectId = process.env.EXPO_PUBLIC_EAS_PROJECT_ID ?? '5cd2b86b-c6f1-4be7-b068-7af28d521c1f';
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
@@ -30,6 +32,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // Keep Split View and resizable iPad windows available.
     requireFullScreen: false,
     associatedDomains: ['applinks:openbots.dev'],
+    // Sign in with Apple needs its capability on the App ID first; off until then.
+    ...(appleSignIn ? { usesAppleSignIn: true } : {}),
     infoPlist: {
       ITSAppUsesNonExemptEncryption: true,
       NSFaceIDUsageDescription: 'Unlock your OpenBots servers and conversations.',
@@ -41,6 +45,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-router',
     'expo-secure-store',
     'expo-sqlite',
+    'expo-web-browser',
+    ...(appleSignIn ? ['expo-apple-authentication'] : []),
     'expo-notifications',
     [
       'expo-camera',
@@ -66,5 +72,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       process.env.OPENBOTS_APNS_ENVIRONMENT === 'production' ? 'production' : 'sandbox',
     ...(projectId ? { eas: { projectId } } : {}),
     cloudUrl: process.env.EXPO_PUBLIC_OPENBOTS_CLOUD_URL ?? null,
+    appleSignIn,
   },
 });

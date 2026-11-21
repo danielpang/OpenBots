@@ -49,7 +49,7 @@ describe('the welcome screen', () => {
     await show(fakeBridge(), 'welcome=1');
     const titles = [...container.querySelectorAll('h2')].map((h) => h.textContent);
     expect(titles).toEqual([
-      'Sign in to an OpenBots account',
+      'Sign in to OpenBots Cloud',
       'Connect to a self-hosted server',
       'Connect to another Mac',
       'Run OpenBots on this Mac',
@@ -74,6 +74,16 @@ describe('the welcome screen', () => {
     await show(bridge, 'welcome=1');
     await click('#cloud-go');
     expect(bridge.connect.cloud).toHaveBeenCalled();
+    expect(text()).toContain('Finish signing in in your browser.');
+  });
+
+  it('says why an OpenBots Cloud sign-in did not finish', async () => {
+    const bridge = fakeBridge({ cloudUrl: 'https://app.openbots.example' });
+    const why = 'You are signed out of OpenBots Cloud. Sign in again to go on where you left off.';
+    await show(bridge, `welcome=1&cloudError=${encodeURIComponent(why)}`);
+    expect(text()).toContain(why);
+    expect(text()).not.toContain('Finish signing in in your browser.');
+    expect(text()).not.toMatch(/[–—]/);
   });
 
   it('shows a failed pull with its output behind "Show details"', async () => {

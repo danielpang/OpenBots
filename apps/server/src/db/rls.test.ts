@@ -16,6 +16,7 @@ import {
   githubInstallationWorkspaces,
   inWorkspace,
   pairingWorkspace,
+  sessionDeviceWorkspace,
   webhookWorkspaces,
   workspaceIds,
 } from './scope.js';
@@ -261,6 +262,9 @@ describe('row-level security between organizations', () => {
     expect(await deviceWorkspaces(t.deps.db, Buffer.alloc(32, 9))).toEqual([]);
     expect(await pairingWorkspace(t.deps.db, hash)).toBe(orgA);
     expect(await pairingWorkspace(t.deps.db, Buffer.alloc(32, 9))).toBeNull();
+    expect(await sessionDeviceWorkspace(t.deps.db, '00000000-0000-4000-8000-000000000000')).toBe(
+      null,
+    );
     expect(await devicesExist(t.deps.db)).toBe(true);
     // In organization A, B's device is out of reach too.
     const inA = await inWorkspace(orgA, () =>
@@ -283,6 +287,7 @@ describe('row-level security between organizations', () => {
       'openbots_devices_exist',
       'openbots_github_installation_workspaces',
       'openbots_pairing_workspace',
+      'openbots_session_device_workspace',
     ];
     const functions = rowsOf<{ name: string; definer: boolean; owner: string }>(
       await t.db.execute(sql`

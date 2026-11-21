@@ -23,7 +23,8 @@ describe('capabilities route', () => {
     const res = await t.app.request('/api/v1/capabilities');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      oauth: { github: false, google: false },
+      oauth: { github: false, google: false, apple: false },
+      nativeAppleSignIn: false,
       computer: false,
       deployment: 'self_hosted',
       customStdio: true,
@@ -47,7 +48,8 @@ describe('capabilities route', () => {
       '/api/v1/capabilities',
     );
     expect(await res.json()).toEqual({
-      oauth: { github: true, google: false },
+      oauth: { github: true, google: false, apple: false },
+      nativeAppleSignIn: false,
       computer: false,
       deployment: 'self_hosted',
       customStdio: true,

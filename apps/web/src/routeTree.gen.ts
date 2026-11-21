@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root';
 import { Route as AppRouteImport } from './routes/_app';
+import { Route as AppSignInRouteImport } from './routes/app-sign-in';
 import { Route as OnboardingRouteImport } from './routes/onboarding';
 import { Route as SetupRouteImport } from './routes/setup';
 import { Route as SignInRouteImport } from './routes/sign-in';
@@ -41,6 +42,11 @@ import { Route as AppBotsBotIdSettingsRouteImport } from './routes/_app/bots/$bo
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
+  getParentRoute: () => rootRouteImport,
+} as any);
+const AppSignInRoute = AppSignInRouteImport.update({
+  id: '/app-sign-in',
+  path: '/app-sign-in',
   getParentRoute: () => rootRouteImport,
 } as any);
 const OnboardingRoute = OnboardingRouteImport.update({
@@ -186,6 +192,7 @@ const AppBotsBotIdSettingsRoute = AppBotsBotIdSettingsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute;
+  '/app-sign-in': typeof AppSignInRoute;
   '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
@@ -215,6 +222,7 @@ export interface FileRoutesByFullPath {
   '/bots/$botId/': typeof AppBotsBotIdIndexRoute;
 }
 export interface FileRoutesByTo {
+  '/app-sign-in': typeof AppSignInRoute;
   '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
@@ -245,6 +253,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   '/_app': typeof AppRouteWithChildren;
+  '/app-sign-in': typeof AppSignInRoute;
   '/onboarding': typeof OnboardingRoute;
   '/setup': typeof SetupRoute;
   '/sign-in': typeof SignInRoute;
@@ -278,6 +287,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
   fullPaths:
     | '/'
+    | '/app-sign-in'
     | '/onboarding'
     | '/setup'
     | '/sign-in'
@@ -307,6 +317,7 @@ export interface FileRouteTypes {
     | '/bots/$botId/';
   fileRoutesByTo: FileRoutesByTo;
   to:
+    | '/app-sign-in'
     | '/onboarding'
     | '/setup'
     | '/sign-in'
@@ -336,6 +347,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_app'
+    | '/app-sign-in'
     | '/onboarding'
     | '/setup'
     | '/sign-in'
@@ -368,6 +380,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren;
+  AppSignInRoute: typeof AppSignInRoute;
   OnboardingRoute: typeof OnboardingRoute;
   SetupRoute: typeof SetupRoute;
   SignInRoute: typeof SignInRoute;
@@ -381,6 +394,13 @@ declare module '@tanstack/react-router' {
       path: '';
       fullPath: '/';
       preLoaderRoute: typeof AppRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    '/app-sign-in': {
+      id: '/app-sign-in';
+      path: '/app-sign-in';
+      fullPath: '/app-sign-in';
+      preLoaderRoute: typeof AppSignInRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     '/onboarding': {
@@ -660,6 +680,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren);
 
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
+  AppSignInRoute: AppSignInRoute,
   OnboardingRoute: OnboardingRoute,
   SetupRoute: SetupRoute,
   SignInRoute: SignInRoute,

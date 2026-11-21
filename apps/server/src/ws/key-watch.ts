@@ -21,6 +21,12 @@ const REASON = 'api key revoked';
 export interface KeyedSocket {
   /** The API key the socket authenticated with; null for a session. */
   readonly apiKeyId: string | null;
+  /**
+   * The session it authenticated with, for a session. Closed only when a
+   * device holding that session is revoked (services/devices.ts), not on a
+   * timer: sessions are not looked up again here.
+   */
+  readonly sessionId?: string | null;
   close(code: number, reason: string): void;
 }
 
@@ -40,6 +46,11 @@ export async function watchApiKeys(
   const closeKey = (apiKeyId: string) => {
     for (const socket of [...sockets()]) {
       if (socket.apiKeyId === apiKeyId) socket.close(CLOSE_KEY_REVOKED, REASON);
+    }
+  };
+  const closeSession = (sessionId: string) => {
+    for (const socket of [...sockets()]) {
+      if (socket.sessionId === sessionId) socket.close(CLOSE_KEY_REVOKED, 'session revoked');
     }
   };
 
@@ -76,8 +87,9 @@ export async function watchApiKeys(
 
   const unsubscribe: Unsubscribe = await infra.bus.subscribe<ApiKeyRevoked>(
     API_KEY_REVOKED_CHANNEL,
-    ({ apiKeyId }) => {
+    ({ apiKeyId, sessionId }) => {
       if (typeof apiKeyId === 'string') closeKey(apiKeyId);
+      if (typeof sessionId === 'string') closeSession(sessionId);
     },
   );
 

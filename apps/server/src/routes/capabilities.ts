@@ -5,7 +5,7 @@ import { folderConnectorsOn } from '../services/connectors.js';
 import { RELAY_PROTOCOL_VERSION, serverVersion } from '../version.js';
 
 // What this install has turned on, for clients deciding what to show before
-// sign-in (GitHub and Google buttons, U1), whether there is a computer
+// sign-in (GitHub, Google and Apple buttons, U1), whether there is a computer
 // (Phase 4), and what kind of install it is: self-hosted has one owner and no
 // admin screens; managed has organizations, which the managed build adds. `auth` says
 // whether the Mac app signs the owner in itself (routes/local.ts). `version`
@@ -14,7 +14,18 @@ import { RELAY_PROTOCOL_VERSION, serverVersion } from '../version.js';
 
 const CapabilitiesSchema = z
   .object({
-    oauth: z.object({ github: z.boolean(), google: z.boolean() }),
+    oauth: z.object({
+      github: z.boolean(),
+      google: z.boolean(),
+      // Optional: older servers do not send it. Always sent.
+      apple: z.boolean().optional().openapi({
+        description: 'Sign in with Apple is configured (APPLE_CLIENT_ID and the rest)',
+      }),
+    }),
+    nativeAppleSignIn: z.boolean().optional().openapi({
+      description:
+        "The iOS app may sign in with Apple natively (APPLE_APP_BUNDLE_ID is set beside Apple's other settings)",
+    }),
     // Optional for the same reason; always sent.
     computer: z.boolean().optional().openapi({
       description: 'A computer provider (Docker or a remote agent) is configured',
@@ -85,7 +96,8 @@ export const capabilityRoutes = createRouter().openapi(
     const { oauth, deployment, localToken, customStdio, localEndpoints } = c.var.deps.config;
     return c.json(
       {
-        oauth: { github: !!oauth.github, google: !!oauth.google },
+        oauth: { github: !!oauth.github, google: !!oauth.google, apple: !!oauth.apple },
+        nativeAppleSignIn: !!oauth.apple?.appBundleId,
         computer: computerAvailable(c.var.deps),
         deployment,
         customStdio,

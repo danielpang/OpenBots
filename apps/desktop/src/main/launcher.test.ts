@@ -9,6 +9,8 @@ import {
 } from './launcher.js';
 import { createProfileStore, pairedProxyUrl, type ProfileFiles } from './profiles.js';
 import type { ServerProfile } from '../ipc.js';
+import type { CloudSignIn } from './cloud-sign-in.js';
+import type { SessionToken } from './tokens.js';
 
 const PATH = '/user-data/profiles.json';
 const LOCAL = 'http://localhost:3000';
@@ -39,6 +41,7 @@ function setup(
     /** Whether the window's open passes the server check (./opener.ts). */
     opens?: boolean;
     pair?: (link: string) => Promise<ServerProfile>;
+    cloudSignIn?: CloudSignIn;
   } = {},
 ) {
   const data = new Map<string, string>();
@@ -74,6 +77,7 @@ function setup(
     showWelcome: vi.fn<LauncherWindow['showWelcome']>(async () => undefined),
   };
   const fetch = fakeFetch(options.routes ?? {});
+  const saved = new Map<string, SessionToken>();
   const launcher = createLauncher({
     profiles,
     stack,
@@ -81,11 +85,17 @@ function setup(
     cloudUrl: options.cloudUrl ?? null,
     window,
     pair: options.pair,
+    ...(options.cloudSignIn
+      ? {
+          cloudSignIn: options.cloudSignIn,
+          saveToken: async (id: string, token: SessionToken) => void saved.set(id, token),
+        }
+      : {}),
     wait: { sleep: async () => undefined, timeoutMs: 0 },
   });
   const stored = () => JSON.parse(data.get(PATH) ?? 'null') as unknown;
   const stackCalls = () => Object.values(stack).reduce((sum, fn) => sum + fn.mock.calls.length, 0);
-  return { launcher, profiles, stack, window, fetch, stored, stackCalls };
+  return { launcher, profiles, stack, window, fetch, stored, stackCalls, saved };
 }
 
 describe('first launch', () => {
@@ -142,6 +152,56 @@ describe('Sign in to an OpenBots account', () => {
     );
     expect(stored()).toEqual({ activeId: 'cloud', chosen: true, profiles: [] });
     expect(stackCalls()).toBe(0);
+  });
+});
+
+describe('Sign in to OpenBots Cloud in the browser', () => {
+  const token = { name: '__Secure-better-auth.session_token', value: 'sealed.value' };
+  const cloudSignIn = (finish: CloudSignIn['finish'] = async () => token) => ({
+    start: vi.fn<CloudSignIn['start']>(async () => undefined),
+    finish: vi.fn<CloudSignIn['finish']>(finish),
+  });
+
+  it('opens the browser and chooses nothing until it comes back', async () => {
+    const browser = cloudSignIn();
+    const { launcher, window, stored, saved } = setup({ cloudUrl: CLOUD, cloudSignIn: browser });
+    await launcher.connectCloud();
+    expect(browser.start).toHaveBeenCalled();
+    expect(window.openServer).not.toHaveBeenCalled();
+    expect(stored()).toBeNull();
+    expect(saved.size).toBe(0);
+  });
+
+  it('keeps the session from the answer and opens the account', async () => {
+    const browser = cloudSignIn();
+    const { launcher, window, stored, saved, stackCalls } = setup({
+      cloudUrl: CLOUD,
+      cloudSignIn: browser,
+    });
+    await launcher.finishCloudSignIn('openbots://app-sign-in#code=c&state=s');
+    expect(browser.finish).toHaveBeenCalledWith('openbots://app-sign-in#code=c&state=s');
+    expect(saved.get('cloud')).toEqual(token);
+    expect(window.openServer.mock.calls[0]![0]).toEqual({
+      id: 'cloud',
+      name: 'OpenBots account',
+      url: CLOUD,
+      kind: 'cloud',
+    });
+    expect(stored()).toEqual({ activeId: 'cloud', chosen: true, profiles: [] });
+    expect(stackCalls()).toBe(0);
+  });
+
+  it('keeps and opens nothing when the answer is refused', async () => {
+    const browser = cloudSignIn(async () => {
+      throw new Error('Sign-in was cancelled.');
+    });
+    const { launcher, window, stored, saved } = setup({ cloudUrl: CLOUD, cloudSignIn: browser });
+    await expect(launcher.finishCloudSignIn('openbots://app-sign-in#x')).rejects.toThrow(
+      'Sign-in was cancelled.',
+    );
+    expect(saved.size).toBe(0);
+    expect(window.openServer).not.toHaveBeenCalled();
+    expect(stored()).toBeNull();
   });
 });
 

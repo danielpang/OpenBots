@@ -22,6 +22,9 @@ import { defaultDeviceName } from '../components/adaptive-layout';
 import { router, type Href } from 'expo-router';
 import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Crypto from 'expo-crypto';
+import * as WebBrowser from 'expo-web-browser';
 import { HostStore } from '../hosts/store';
 import { createSecureHostStorage } from '../hosts/secure-store';
 import { pairHost, parsePairingLink } from '../hosts/pairing';
@@ -39,6 +42,7 @@ import {
 } from '../push/notifications';
 import { uploadAttachment, openFile, type Attachment } from './files';
 import { signInAndPair } from './sign-in';
+import { CloudSignInCancelled, signInToCloud, signInWithAppleToCloud } from './cloud-sign-in';
 import { cacheBotNotificationAvatars, forgetNotificationAvatars } from '../push/avatars';
 import { withSubscriptionCounts } from './subscriptions';
 import { ConnectionErrorsContext, OfflineError, RECONNECT_NOTICE_AFTER } from './connection-state';
@@ -46,6 +50,31 @@ import { MobileNotices } from '../notices';
 import { ownerHandles, type Notice } from '@openbots/shared';
 
 const hosts = new HostStore(createSecureHostStorage());
+/** The hosted OpenBots server this build signs in to, if any (app.config.ts). */
+export const CLOUD_URL =
+  typeof Constants.expoConfig?.extra?.cloudUrl === 'string'
+    ? Constants.expoConfig.extra.cloudUrl
+    : null;
+/** This build carries the Sign in with Apple entitlement (OPENBOTS_IOS_APPLE_SIGN_IN). */
+export const APPLE_SIGN_IN_BUILD = Constants.expoConfig?.extra?.appleSignIn === true;
+
+/** transport's CredentialRejectedError, told by name so a mocked transport still compares. */
+const isCredentialRejected = (cause: unknown): cause is Error =>
+  cause instanceof Error && cause.name === 'CredentialRejectedError';
+const randomBytes = (length: number) => crypto.getRandomValues(new Uint8Array(length));
+const sha256Base64url = async (text: string) =>
+  (
+    await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, text, {
+      encoding: Crypto.CryptoEncoding.BASE64,
+    })
+  )
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+const sha256Hex = (text: string) =>
+  Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, text, {
+    encoding: Crypto.CryptoEncoding.HEX,
+  });
 const lockPolicy = new AppLockPolicy();
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 type Resync = () => void;
@@ -78,6 +107,12 @@ export interface MobileContextValue {
     kind?: 'server' | 'account',
   ): Promise<void>;
   pair(link: string, name: string, ownerName?: string): Promise<{ setupNeeded: boolean }>;
+  /** OpenBots Cloud in an authentication session: the browser sign-in, then this device's key. */
+  signInToCloud(name?: string): Promise<void>;
+  /** OpenBots Cloud with native Sign in with Apple, when the server and this build allow it. */
+  signInWithApple(name?: string): Promise<void>;
+  /** An OpenBots Cloud account: revokes this device on the server, then forgets it here. */
+  signOut(id: string): Promise<void>;
   activateHost(id: string): Promise<void>;
   removeHost(id: string): Promise<void>;
   refresh(): void;
@@ -407,6 +442,20 @@ export function MobileProvider({ children }: { children: ReactNode }) {
         }
       },
       onError(cause) {
+        // OpenBots Cloud refused this device's key: it was revoked. Forget it.
+        if (isCredentialRejected(cause) && !stopped) {
+          stopped = true;
+          forgetNotificationAvatars(host.id);
+          void hosts
+            .remove(host.id)
+            .then(async () => {
+              await cache.removeHost(host.id);
+              await removeSharedPushKey(host.id).catch(() => {});
+            })
+            .catch(() => undefined)
+            .finally(() => setError(cause.message));
+          return;
+        }
         if (!stopped) {
           setFailedAttempts(++failures);
           if (failures >= RECONNECT_NOTICE_AFTER) setError(errorText(cause));
@@ -522,6 +571,15 @@ export function MobileProvider({ children }: { children: ReactNode }) {
     };
   }, [host?.id, cache, queryClient]);
 
+  async function saveAccount(result: Awaited<ReturnType<typeof signInToCloud>>) {
+    await hosts.save(result.host, result.secrets);
+    lockPolicy.unlock();
+    setLocked(false);
+    await setSharedPushKey(result.host.id, result.secrets.pushKey!).catch((cause) =>
+      setError(`Signed in. Notifications require a native build: ${errorText(cause)}`),
+    );
+  }
+
   const value: MobileContextValue = {
     host,
     hosts: snapshot.hosts,
@@ -579,6 +637,70 @@ export function MobileProvider({ children }: { children: ReactNode }) {
         setError(`Paired successfully. Notifications need a native build: ${errorText(cause)}`);
       }
       return { setupNeeded: result.setupNeeded };
+    },
+    async signInToCloud(name = defaultDeviceName()) {
+      if (!CLOUD_URL) throw new Error('OpenBots Cloud sign-in is not configured in this build.');
+      const result = await signInToCloud({
+        cloudUrl: CLOUD_URL,
+        deviceName: name,
+        openAuthSession: async (url, callback) => {
+          const answer = await WebBrowser.openAuthSessionAsync(url, callback);
+          return answer.type === 'success' ? answer.url : null;
+        },
+        sha256Base64url,
+        randomBytes,
+      });
+      await saveAccount(result);
+    },
+    async signInWithApple(name = defaultDeviceName()) {
+      if (!CLOUD_URL) throw new Error('OpenBots Cloud sign-in is not configured in this build.');
+      const result = await signInWithAppleToCloud({
+        cloudUrl: CLOUD_URL,
+        deviceName: name,
+        signInWithApple: async (nonce) => {
+          try {
+            const credential = await AppleAuthentication.signInAsync({
+              requestedScopes: [
+                AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+                AppleAuthentication.AppleAuthenticationScope.EMAIL,
+              ],
+              nonce,
+            });
+            if (!credential.identityToken) throw new Error('Apple did not sign you in.');
+            const fullName = [credential.fullName?.givenName, credential.fullName?.familyName]
+              .filter(Boolean)
+              .join(' ');
+            return {
+              identityToken: credential.identityToken,
+              ...(fullName ? { name: fullName } : {}),
+            };
+          } catch (cause) {
+            if ((cause as { code?: string }).code === 'ERR_REQUEST_CANCELED')
+              throw new CloudSignInCancelled();
+            throw cause;
+          }
+        },
+        sha256Hex,
+        randomBytes,
+      });
+      await saveAccount(result);
+    },
+    async signOut(id) {
+      const saved = hosts.getSnapshot().hosts.find((entry) => entry.id === id);
+      if (saved?.kind === 'account' && saved.deviceId) {
+        // Best effort: offline, the device stays listed on the web until revoked there.
+        try {
+          const connection = await connectHost(saved, await hosts.secrets(id));
+          try {
+            await connection.fetch(`/api/v1/devices/${saved.deviceId}`, { method: 'DELETE' });
+          } finally {
+            connection.close();
+          }
+        } catch {
+          // Signed out here whatever the server said.
+        }
+      }
+      await value.removeHost(id);
     },
     activateHost: (id) => hosts.activate(id),
     async removeHost(id) {

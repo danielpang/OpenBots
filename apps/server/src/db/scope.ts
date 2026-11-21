@@ -43,6 +43,10 @@ import type { Db } from './client.js';
 //   openbots_device_workspaces() and openbots_pairing_workspace(); the
 //   device or the code is then read there. `devicesExist` says only whether any
 //   organization has a device or an open pairing (openbots_devices_exist()).
+// - `sessionDeviceWorkspace`: which organization the device holding a
+//   session is in (openbots_session_device_workspace(), drizzle/0051), for a
+//   session the server has in hand: a request's own, or one being deleted.
+//   A Mac's session may be active in another organization than its device's.
 // - `githubInstallationWorkspaces`: which organizations have a connection
 //   to a GitHub App installation, through
 //   openbots_github_installation_workspaces() (drizzle/0029; 0030 holds
@@ -266,6 +270,19 @@ export async function deviceWorkspaces(db: Db, publicKey: Uint8Array): Promise<s
 export async function pairingWorkspace(db: Db, codeHash: Uint8Array): Promise<string | null> {
   const result = await db.execute<{ id: string | null }>(
     sql`select openbots_pairing_workspace(${Buffer.from(codeHash)}) as id`,
+  );
+  return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
+}
+
+/**
+ * The organization of the device that holds this session
+ * (openbots_session_device_workspace(), drizzle/0051), or null. Ask it only
+ * with a session the server has in hand; the device is then read and changed
+ * in that organization, checked against the session's user there.
+ */
+export async function sessionDeviceWorkspace(db: Db, sessionId: string): Promise<string | null> {
+  const result = await db.execute<{ id: string | null }>(
+    sql`select openbots_session_device_workspace(${sessionId}::uuid) as id`,
   );
   return rowsOf<{ id: string | null }>(result)[0]?.id ?? null;
 }

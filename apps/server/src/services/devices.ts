@@ -5,13 +5,14 @@ import { findInstallOwner, type Auth } from '../auth.js';
 import type { Config } from '../config.js';
 import type { AppDeps, RelayLink } from '../context.js';
 import { schema, type Db } from '../db/client.js';
-import { announceApiKeyRevoked } from '../api-key-events.js';
+import { announceApiKeyRevoked, announceSessionRevoked } from '../api-key-events.js';
 import {
   asDirectory,
   deviceWorkspaces,
   devicesExist,
   inWorkspace,
   pairingWorkspace,
+  sessionDeviceWorkspace,
 } from '../db/scope.js';
 import type { DevicePlatform, PairingCreator } from '../db/schema/devices.js';
 import { DomainError, notFound } from '../errors.js';
@@ -190,6 +191,13 @@ export interface CreatePairingInput {
    * seconds (relay/link.ts).
    */
   relay?: Pick<RelayLink, 'wake'>;
+  /**
+   * An app sign-in's PKCE challenge (services/app-sign-in.ts): the code then
+   * works only with the app's verifier.
+   */
+  codeChallenge?: string;
+  /** With `codeChallenge`: the app the code is for, and so the one route that takes it. */
+  appPlatform?: 'ios' | 'desktop';
 }
 
 /**
@@ -252,6 +260,8 @@ export async function createPairing(input: CreatePairingInput): Promise<CreatedP
           createsOwner,
           expiresAt,
           createdBy,
+          codeChallenge: input.codeChallenge ?? null,
+          appPlatform: input.codeChallenge ? (input.appPlatform ?? null) : null,
         })
         .returning();
       return row!;
@@ -286,6 +296,8 @@ export interface PairRequest {
   publicKey: string;
   pushKey: string;
   ownerName?: string;
+  /** The PKCE verifier, for a code an app sign-in made (services/app-sign-in.ts). */
+  codeVerifier?: string;
 }
 
 export interface PairResult {
@@ -324,38 +336,14 @@ export async function completePairing(input: CompletePairingInput): Promise<Pair
   }
   if (handshakeKey && !sameBytes(handshakeKey, publicKey)) throw pairingKeyMismatch();
 
-  const hash = pairingCodeHash(code);
-  const workspaceId = await pairingWorkspace(db, hash);
-  if (!workspaceId) throw pairingInvalid();
-
-  // Every check that can refuse, then the code is spent, so whatever happens next it works once.
-  const pairing = await inWorkspace(workspaceId, () =>
-    db.transaction(async (tx) => {
-      const [found] = await tx
-        .select({
-          row: schema.devicePairings,
-          live: sql<boolean>`${schema.devicePairings.expiresAt} > now()`,
-        })
-        .from(schema.devicePairings)
-        .where(eq(schema.devicePairings.codeHash, hash));
-      const row = found?.row;
-      if (!row || !sameBytes(row.codeHash, hash) || row.usedAt !== null || !found.live) {
-        throw pairingInvalid();
-      }
-      // An owner suspended or removed since the link was made pairs nothing.
-      if (row.ownerId && !(await ownerActive(tx, { ownerId: row.ownerId, workspaceId }))) {
-        throw pairingInvalid();
-      }
-      if (await deviceKeyTaken(tx, workspaceId, publicKey)) throw devicePaired();
-      const [spent] = await tx
-        .update(schema.devicePairings)
-        .set({ usedAt: sql`now()` })
-        .where(and(eq(schema.devicePairings.id, row.id), isNull(schema.devicePairings.usedAt)))
-        .returning();
-      if (!spent) throw pairingInvalid();
-      return spent;
-    }),
-  );
+  const { workspaceId, pairing } = await spendPairing(db, code, {
+    codeVerifier: body.codeVerifier,
+    // A QR code has no challenge and pairs any device; an app sign-in's only the iOS app.
+    appPlatform: 'ios',
+    check: async (tx, ws) => {
+      if (await deviceKeyTaken(tx, ws, publicKey)) throw devicePaired();
+    },
+  });
 
   let ownerId: string | null = null;
   let createdOwner = false;
@@ -469,6 +457,80 @@ export async function completePairing(input: CompletePairingInput): Promise<Pair
   };
 }
 
+/** RFC 7636 S256: the base64url SHA-256 of the verifier, compared in constant time. */
+export function verifierMatches(verifier: string | undefined, challenge: string): boolean {
+  if (typeof verifier !== 'string' || !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) return false;
+  const computed = Buffer.from(createHash('sha256').update(verifier).digest('base64url'));
+  const expected = Buffer.from(challenge);
+  return computed.length === expected.length && timingSafeEqual(computed, expected);
+}
+
+/**
+ * Spends a pairing code once: every check that can refuse runs first (the
+ * code is live and unspent, its owner still an active member, an app
+ * sign-in's verifier matches its challenge, and the caller's own `check`),
+ * then the code is marked used with a conditional update, so two callers
+ * racing for one code cannot both win. Every refusal of the code is the same
+ * 401 PAIRING_INVALID. `requireChallenge` takes only an app sign-in's code.
+ * `appPlatform` is the app the calling route serves: an app sign-in's code
+ * made for the other app is refused like any other, and stays unspent (the
+ * route has already counted the try against the code's limit).
+ */
+export async function spendPairing(
+  db: Db,
+  code: Uint8Array,
+  options: {
+    codeVerifier?: string;
+    requireChallenge?: boolean;
+    appPlatform: 'ios' | 'desktop';
+    check?: (tx: Db, workspaceId: string) => Promise<void>;
+  },
+): Promise<{ workspaceId: string; pairing: PairingRow }> {
+  const hash = pairingCodeHash(code);
+  const workspaceId = await pairingWorkspace(db, hash);
+  if (!workspaceId) throw pairingInvalid();
+
+  // Every check that can refuse, then the code is spent, so whatever happens next it works once.
+  const pairing = await inWorkspace(workspaceId, () =>
+    db.transaction(async (tx) => {
+      const [found] = await tx
+        .select({
+          row: schema.devicePairings,
+          live: sql<boolean>`${schema.devicePairings.expiresAt} > now()`,
+        })
+        .from(schema.devicePairings)
+        .where(eq(schema.devicePairings.codeHash, hash));
+      const row = found?.row;
+      if (!row || !sameBytes(row.codeHash, hash) || row.usedAt !== null || !found.live) {
+        throw pairingInvalid();
+      }
+      // A code an app sign-in made works only with that app's verifier.
+      if (row.codeChallenge !== null && !verifierMatches(options.codeVerifier, row.codeChallenge)) {
+        throw pairingInvalid();
+      }
+      if (options.requireChallenge && row.codeChallenge === null) throw pairingInvalid();
+      // An app sign-in's code is for one app: the iOS app's never makes a web
+      // session, the Mac app's never a device key.
+      if (row.codeChallenge !== null && row.appPlatform !== options.appPlatform) {
+        throw pairingInvalid();
+      }
+      // An owner suspended or removed since the link was made pairs nothing.
+      if (row.ownerId && !(await ownerActive(tx, { ownerId: row.ownerId, workspaceId }))) {
+        throw pairingInvalid();
+      }
+      await options.check?.(tx, workspaceId);
+      const [spent] = await tx
+        .update(schema.devicePairings)
+        .set({ usedAt: sql`now()` })
+        .where(and(eq(schema.devicePairings.id, row.id), isNull(schema.devicePairings.usedAt)))
+        .returning();
+      if (!spent) throw pairingInvalid();
+      return spent;
+    }),
+  );
+  return { workspaceId, pairing };
+}
+
 const devicePaired = () =>
   new DomainError(409, 'DEVICE_ALREADY_PAIRED', 'This device is paired already');
 
@@ -494,7 +556,7 @@ async function deviceKeyTaken(db: Db, workspaceId: string, publicKey: Uint8Array
  * and the documented "the code is not spent" holds for a refusal. Each step
  * is tried whatever the others do.
  */
-async function undoPairing(
+export async function undoPairing(
   db: Db,
   undo: {
     workspaceId: string;
@@ -584,9 +646,11 @@ async function ownDevice(db: Db, { workspaceId, ownerId }: DeviceOwner, deviceId
  * update, so whatever fails after, nothing can push to it or open a tunnel
  * as it. `device.revoked` goes out then, for the relay adapters to close its
  * streams. Its API key is deleted next, and the API instances are told to
- * close the sockets it opened (api-key-events.ts). Should that delete fail,
- * the row keeps the key's id, and a second `DELETE /devices/{id}` (or
- * `openbots devices revoke`) finishes it rather than answering 404.
+ * close the sockets it opened (api-key-events.ts). A Mac signed in through
+ * the browser holds a session instead, which is deleted the same way. Should
+ * that delete fail, the row keeps the key's (or session's) id, and a second
+ * `DELETE /devices/{id}` (or `openbots devices revoke`) finishes it rather
+ * than answering 404.
  */
 export async function revokeDevice(
   deps: Pick<AppDeps, 'db'> & { infra: Pick<Infra, 'bus'> },
@@ -628,6 +692,21 @@ export async function revokeDevice(
         );
       }
     }
+    if (device.sessionId) {
+      const sessionId = device.sessionId;
+      // A Mac signed in through the browser holds a session, not a key
+      // (services/app-sign-in.ts). Sessions are the directory's (db/scope.ts).
+      await asDirectory(() =>
+        db
+          .delete(schema.sessions)
+          .where(and(eq(schema.sessions.id, sessionId), eq(schema.sessions.userId, owner.ownerId))),
+      );
+      await db
+        .update(schema.devices)
+        .set({ sessionId: null })
+        .where(eq(schema.devices.id, device.id));
+      await announceSessionRevoked(infra.bus, sessionId);
+    }
     if (device.apiKeyId) {
       const keyId = device.apiKeyId;
       // API keys are the directory's (db/scope.ts).
@@ -646,7 +725,10 @@ export async function revokeDevice(
   });
 }
 
-/** The owner's device to revoke: an unrevoked one, or one whose revocation did not delete its key. */
+/**
+ * The owner's device to revoke: an unrevoked one, or one whose revocation
+ * did not delete its key or session.
+ */
 async function revocableDevice(db: Db, { workspaceId, ownerId }: DeviceOwner, deviceId: string) {
   const [row] = await db
     .select()
@@ -656,7 +738,11 @@ async function revocableDevice(db: Db, { workspaceId, ownerId }: DeviceOwner, de
         eq(schema.devices.id, deviceId),
         eq(schema.devices.workspaceId, workspaceId),
         eq(schema.devices.ownerId, ownerId),
-        or(isNull(schema.devices.revokedAt), isNotNull(schema.devices.apiKeyId)),
+        or(
+          isNull(schema.devices.revokedAt),
+          isNotNull(schema.devices.apiKeyId),
+          isNotNull(schema.devices.sessionId),
+        ),
       ),
     );
   if (!row) throw notFound('No such device');
@@ -765,6 +851,42 @@ export async function touchDevice(
       .where(
         and(
           eq(schema.devices.apiKeyId, apiKeyId),
+          isNull(schema.devices.revokedAt),
+          or(isNull(schema.devices.lastSeenAt), lte(schema.devices.lastSeenAt, cutoff)),
+        ),
+      ),
+  );
+}
+
+/**
+ * `touchDevice` for a Mac signed in through the browser, whose device holds
+ * a session: at most once a minute per session (per process here). The
+ * device is found in its own organization, which the session may have
+ * switched away from (sessionDeviceWorkspace), and only as the session's
+ * user's.
+ */
+export async function touchSessionDevice(
+  db: Db,
+  { sessionId, userId }: { sessionId: string; userId: string },
+  now = Date.now(),
+): Promise<void> {
+  const key = `session:${sessionId}`;
+  const last = touched.get(key);
+  if (last !== undefined && now - last < TOUCH_INTERVAL_MS) return;
+  if (touched.size > 10_000) touched.clear();
+  touched.set(key, now);
+  const workspaceId = await sessionDeviceWorkspace(db, sessionId);
+  if (!workspaceId) return;
+  const cutoff = new Date(now - TOUCH_INTERVAL_MS);
+  await inWorkspace(workspaceId, () =>
+    db
+      .update(schema.devices)
+      .set({ lastSeenAt: new Date(now) })
+      .where(
+        and(
+          eq(schema.devices.workspaceId, workspaceId),
+          eq(schema.devices.sessionId, sessionId),
+          eq(schema.devices.ownerId, userId),
           isNull(schema.devices.revokedAt),
           or(isNull(schema.devices.lastSeenAt), lte(schema.devices.lastSeenAt, cutoff)),
         ),
@@ -906,6 +1028,7 @@ const always = () => true;
 export const DEVICE_KEY_RULES: readonly DeviceKeyRule[] = [
   { method: 'POST', path: /^\/api-keys$/ },
   { method: 'POST', path: /^\/devices\/pairings$/ },
+  { method: 'POST', path: /^\/app-sign-in\/codes$/ },
   { method: 'POST', path: /^\/bots\/[^/]+\/endpoints$/ },
   { method: 'POST', path: /^\/endpoints\/[^/]+\/rotate$/ },
   {

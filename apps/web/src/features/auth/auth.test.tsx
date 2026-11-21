@@ -7,7 +7,7 @@ import { EmailSignUp } from './email-sign-up.js';
 import { authErrorMessage } from './messages.js';
 import { OAuthButtons } from './oauth-buttons.js';
 
-function renderButtons(oauth: { github: boolean; google: boolean }) {
+function renderButtons(oauth: { github: boolean; google: boolean; apple?: boolean }) {
   const queryClient = new QueryClient();
   queryClient.setQueryData(capabilitiesQuery.queryKey, { oauth, deployment: 'self_hosted' });
   return renderToString(
@@ -26,6 +26,14 @@ describe('OAuth buttons', () => {
 
   it('renders nothing when no provider is configured', () => {
     expect(renderButtons({ github: false, google: false })).toBe('');
+    expect(renderButtons({ github: false, google: false, apple: false })).toBe('');
+  });
+
+  it('shows Apple only when the server says it is configured', () => {
+    expect(renderButtons({ github: true, google: true })).not.toContain('Apple');
+    const html = renderButtons({ github: false, google: false, apple: true });
+    expect(html).toContain('Continue with Apple');
+    expect(html).not.toContain('GitHub');
   });
 });
 

@@ -141,3 +141,16 @@ describe('deep links', () => {
     expect(deepLinkFromArgv(['/Applications/OpenBots'])).toBeUndefined();
   });
 });
+
+describe('the OpenBots Cloud sign-in answer', () => {
+  it('is its own link, which opens no page of the web app', () => {
+    const raw = 'openbots://app-sign-in#code=abc&state=AAAAAAAAAAAAAAAAAAAA';
+    const link = parseDeepLink(raw);
+    expect(link).toEqual({ kind: 'app-sign-in', link: raw });
+    expect(deepLinkPath(link!)).toBe('/');
+    expect(formatDeepLink(link!)).toBe(raw);
+    expect(parseDeepLink('openbots://app-sign-in')).toBeNull();
+    expect(parseDeepLink('openbots://app-sign-in/settings#code=a')).toBeNull();
+    expect(parseDeepLink('openbots://app-sign-in?code=a#x')).toBeNull();
+  });
+});

@@ -10,6 +10,7 @@ import {
   deviceKeyRule,
   isDeviceKey,
   touchDevice,
+  touchSessionDevice,
 } from '../services/devices.js';
 import { ensureWorkspace, isOrgAdmin, type Role } from '../workspace.js';
 
@@ -186,6 +187,13 @@ export async function authenticateAccount(deps: AuthDeps, headers: Headers): Pro
   // A paired device's key: when it was last seen (services/devices.ts).
   if (apiKeyId && organizationId) {
     await touchDevice(db, { workspaceId: organizationId, apiKeyId }).catch(() => undefined);
+  }
+  // A Mac signed in through the browser: its session is its device's. On the
+  // managed service only, so a self-hosted install's requests do what they did.
+  // The device stays in the organization it was made in, whichever one the
+  // session works in now.
+  if (sessionId && deps.config.deployment === 'managed') {
+    await touchSessionDevice(db, { sessionId, userId: user.id }).catch(() => undefined);
   }
   return {
     id: user.id,

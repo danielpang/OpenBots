@@ -157,11 +157,11 @@ function CloudChoice({
     <ChoiceCard
       labelId="cloud-title"
       icon={<CloudIcon />}
-      title="Sign in to an OpenBots account"
+      title="Sign in to OpenBots Cloud"
       disabled={!cloud.enabled}
       description={
         <span id="cloud-note">
-          {cloud.note ?? 'Sign in or create an account. Nothing to install.'}
+          {cloud.note ?? 'Sign in or create an account in your browser. Nothing to install.'}
         </span>
       }
       facts={[
@@ -171,7 +171,7 @@ function CloudChoice({
       action={
         cloud.enabled ? (
           <Button id="cloud-go" type="button" onClick={() => void flow.welcome.cloud()}>
-            Sign in or sign up
+            Sign in
           </Button>
         ) : (
           <Badge variant="outline" className="text-muted-foreground">
@@ -180,11 +180,15 @@ function CloudChoice({
         )
       }
     >
-      {error && (
+      {error ? (
         <CardPanel>
           <Notice title={error} />
         </CardPanel>
-      )}
+      ) : state.welcome.cloudWaiting ? (
+        <CardPanel>
+          <Notice title="Finish signing in in your browser. OpenBots opens here when you are done." />
+        </CardPanel>
+      ) : null}
     </ChoiceCard>
   );
 }

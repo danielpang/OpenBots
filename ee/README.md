@@ -52,6 +52,15 @@ production) the 6-digit email verification code is in the server's log. For the 
 app with hot reload, `pnpm --filter @openbots/ee-web dev` proxies to the
 server on :3000.
 
+## Sign-in
+
+The hosted service uses the core's sign-in: email, and GitHub, Google and Apple once their settings
+are set, and the iOS and Mac apps signing in through the browser
+([docs/SELF_HOSTING.md](../docs/SELF_HOSTING.md#sign-in-providers)). What this directory adds is who
+may make an account: with `OPENBOTS_SIGNUP_MODE=invite` only the first account and someone with a
+pending invitation for that address, whichever way they sign up, Sign in with Apple included
+(`server/src/sign-up.ts` and `server/src/plugin.ts`).
+
 ## Billing
 
 Plans, the computer hour allowance, overage and the spending limits are in

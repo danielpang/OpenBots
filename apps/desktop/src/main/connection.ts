@@ -37,7 +37,7 @@ export interface ConnectionOptions {
   /** A phone paired with the server (`device.paired`), for the pairing window. */
   onDevicePaired?(device: { name: string; createdAt: string }): void;
   onStatus?(status: WsStatus): void;
-  /** The token was refused: the owner has to sign in again. */
+  /** The server itself refused the token (401 UNAUTHORIZED): the owner has to sign in again. */
   onUnauthorized?(): void;
 }
 
@@ -80,6 +80,24 @@ export function wsUrlFor(baseUrl: string): string {
   return url.toString();
 }
 
+/**
+ * Whether a 401 is the OpenBots server's own refusal of the credential: its
+ * problem answer with code UNAUTHORIZED, sent for an ended session or a
+ * revoked key. A proxy's 401, or one with no code, keeps the token.
+ */
+async function credentialRefused(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.clone().json()) as unknown;
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      (body as { code?: unknown }).code === 'UNAUTHORIZED'
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function createConnection(options: ConnectionOptions): Connection {
   const headers: Record<string, string> =
     options.headers ?? (options.token ? { cookie: cookieHeader(options.token) } : {});
@@ -88,7 +106,7 @@ export function createConnection(options: ConnectionOptions): Connection {
     const request = new Request(input, init);
     for (const [name, value] of Object.entries(headers)) request.headers.set(name, value);
     const response = await baseFetch(request);
-    if (response.status === 401) options.onUnauthorized?.();
+    if (response.status === 401 && (await credentialRefused(response))) options.onUnauthorized?.();
     return response;
   };
   const api = createClient(options.baseUrl, authedFetch);

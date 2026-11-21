@@ -11,6 +11,8 @@
 // Devices, where the menus' "Pair your phone…" goes. `openbots://pair#...`
 // is another server's pairing link (docs/RELAY_PROTOCOL.md 6.1): opened on a
 // Mac, it offers to pair this Mac with that server (./pair-link.ts reads it).
+// `openbots://app-sign-in#...` is the browser coming back from an OpenBots
+// Cloud sign-in this app started (./cloud-sign-in.ts).
 
 export const PROTOCOL = 'openbots';
 
@@ -29,7 +31,9 @@ export type DeepLink =
   /** The home page's office of Bots (View > Show Office Space). */
   | { kind: 'office' }
   /** Another server's pairing link, as it came; ./pair-link.ts checks it before anything uses it. */
-  | { kind: 'pair'; link: string };
+  | { kind: 'pair'; link: string }
+  /** The browser's answer to an OpenBots Cloud sign-in, as it came (./cloud-sign-in.ts reads it). */
+  | { kind: 'app-sign-in'; link: string };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -38,7 +42,7 @@ export function formatDeepLink(link: DeepLink): string {
   if (link.kind === 'connectors') return `${PROTOCOL}://connectors`;
   if (link.kind === 'devices') return `${PROTOCOL}://devices`;
   if (link.kind === 'office') return `${PROTOCOL}://office`;
-  if (link.kind === 'pair') return link.link;
+  if (link.kind === 'pair' || link.kind === 'app-sign-in') return link.link;
   const [kind, id] = link.kind === 'bot' ? ['bot', link.botId] : ['chat', link.chatId];
   const base = `${PROTOCOL}://${kind}/${encodeURIComponent(id)}`;
   const path = link.seq != null ? `${base}/message/${link.seq}` : base;
@@ -61,6 +65,13 @@ export function parseDeepLink(raw: string): DeepLink | null {
     return null;
   }
   if (url.protocol !== `${PROTOCOL}:`) return null;
+  if (url.hostname === 'app-sign-in') {
+    // The fragment holds a one-time code; it never names a path of the web app.
+    const bare = url.pathname === '' && url.search === '' && url.username === '';
+    return bare && url.hash.length > 1 && raw.length <= 4096
+      ? { kind: 'app-sign-in', link: raw }
+      : null;
+  }
   if (url.hostname === 'pair') {
     // The fragment is the link; it never names a path of the web app.
     const bare = url.pathname === '' && url.search === '' && url.username === '';
@@ -111,7 +122,7 @@ export function deepLinkPath(link: DeepLink): string {
   if (link.kind === 'devices') return '/settings/devices';
   if (link.kind === 'office') return '/';
   // A pairing link opens the welcome screen, never a page of the current server.
-  if (link.kind === 'pair') return '/';
+  if (link.kind === 'pair' || link.kind === 'app-sign-in') return '/';
   const base = link.kind === 'bot' ? `/bots/${link.botId}` : `/groups/${link.chatId}`;
   const query = new URLSearchParams();
   if (link.kind === 'bot' && link.chat) query.set('chat', link.chat);

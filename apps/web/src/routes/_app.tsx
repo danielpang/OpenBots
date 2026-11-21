@@ -3,6 +3,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router';
 import { meQuery } from '../app/api.js';
 import { loadAuthMode, loadDeployment } from '../app/deployment.js';
 import { isActive } from '../app/extensions.js';
+import { takePendingAppSignIn } from '../features/auth/app-sign-in.js';
 import { setupQuery, setupRequired } from '../features/setup/api.js';
 import { Shell } from '../app/shell.js';
 
@@ -13,7 +14,8 @@ import { Shell } from '../app/shell.js';
 // and the first-run wizard (providers, then a first Bot) shows until it is done.
 // On the managed service someone with no active organization, or suspended
 // in theirs, goes to /onboarding, which the managed build fills (plan 21.5);
-// every page under here has one.
+// every page under here has one. A sign-in the iOS or Mac app started before
+// the person signed in goes on at /app-sign-in.
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
@@ -25,6 +27,9 @@ export const Route = createFileRoute('/_app')({
         loadDeployment(queryClient),
       ]);
       if (!isActive(me)) throw redirect({ to: '/onboarding' });
+      // The iOS or Mac app asked to be signed in before this person had: back to it.
+      const pending = takePendingAppSignIn();
+      if (pending) throw redirect({ to: '/app-sign-in', search: { ...pending } });
       if (authMode === 'local') {
         // Cached once: the wizard's last step clears it.
         const setup = await setupRequired(() => queryClient.ensureQueryData(setupQuery));

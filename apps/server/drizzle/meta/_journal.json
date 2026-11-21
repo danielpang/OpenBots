@@ -358,6 +358,13 @@
       "when": 1795198286961,
       "tag": "0050_coding_session_log_discarded",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1795233704630,
+      "tag": "0051_app_sign_in",
+      "breakpoints": true
     }
   ]
 }

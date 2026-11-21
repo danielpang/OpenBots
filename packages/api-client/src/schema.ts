@@ -11658,6 +11658,155 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/app-sign-in/codes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Make a one-time code that signs the iOS or Mac app in (a browser session only)
+     * @description The web app calls this at /app-sign-in once the person confirms, then sends the browser to `openbots://app-sign-in#code=...&state=...`. The code lasts 5 minutes, works once, and only with the verifier of `codeChallenge`. API keys answer 403 SESSION_REQUIRED.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['AppSignInCodeRequest'];
+        };
+      };
+      responses: {
+        /** @description The code */
+        201: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['AppSignInCode'];
+          };
+        };
+        /** @description Invalid request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Too many open codes and pairings (TOO_MANY_PAIRINGS) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/app-sign-in/session': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Trade an app sign-in code for a session (the Mac app)
+     * @description No authentication: the code and its PKCE verifier are the credential. Rate-limited per client (10 an hour) and per code (5 tries). Sets the session cookie and makes the Mac a device, which Settings > Devices can revoke. The iOS app trades its code at `POST /devices/pair` instead, with `codeVerifier`.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['AppSessionRequest'];
+        };
+      };
+      responses: {
+        /** @description The device and its owner, with the session cookie set */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['AppSession'];
+          };
+        };
+        /** @description Invalid request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The code is unknown, used, expired, not a Mac app sign-in code, or the verifier is wrong (PAIRING_INVALID) */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description This server signs in from the Mac app only (LOCAL_ONLY) */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Too many attempts */
+        429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -11959,7 +12108,11 @@ export interface components {
       oauth: {
         github: boolean;
         google: boolean;
+        /** @description Sign in with Apple is configured (APPLE_CLIENT_ID and the rest) */
+        apple?: boolean;
       };
+      /** @description The iOS app may sign in with Apple natively (APPLE_APP_BUNDLE_ID is set beside Apple's other settings) */
+      nativeAppleSignIn?: boolean;
       /** @description A computer provider (Docker or a remote agent) is configured */
       computer?: boolean;
       /**
@@ -14985,6 +15138,8 @@ export interface components {
       pushKey: string;
       /** @description The new owner’s name, used only on a server with no owner yet */
       ownerName?: string;
+      /** @description The PKCE verifier, for a code from an app sign-in in the browser (`POST /app-sign-in/codes`); such a code works only with it. Ignored for a QR pairing. */
+      codeVerifier?: string;
     };
     Device: {
       /** Format: uuid */
@@ -15014,6 +15169,44 @@ export interface components {
       since: string | null;
       /** @description Why the last attempt to link failed, while connecting; null otherwise */
       error: string | null;
+    };
+    AppSignInCode: {
+      /** @description The one-time code, base64url; shown only once */
+      code: string;
+      /** Format: date-time */
+      expiresAt: string;
+    };
+    AppSignInCodeRequest: {
+      /**
+       * @description The app being signed in
+       * @enum {string}
+       */
+      platform: 'ios' | 'desktop';
+      /** @description The app's PKCE challenge: base64url SHA-256 of its verifier */
+      codeChallenge: string;
+    };
+    AppSession: {
+      device: {
+        /** Format: uuid */
+        id: string;
+        name: string;
+        /** @enum {string} */
+        platform: 'desktop';
+        /** Format: date-time */
+        createdAt: string;
+      };
+      user: {
+        /** Format: uuid */
+        id: string;
+        name: string;
+      };
+    };
+    AppSessionRequest: {
+      code: string;
+      /** @description The PKCE verifier the challenge was made from */
+      codeVerifier: string;
+      /** @description This Mac's name in Devices */
+      name: string;
     };
   };
   responses: never;
