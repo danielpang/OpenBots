@@ -92,6 +92,32 @@ describe('repos checkout', () => {
     await w.until(() => expect(w.coder.calls.at(-1)?.ended).toBe(true));
   });
 
+  it('ends a command when the git context is cancelled: a checkout lock that was lost', async () => {
+    const [computer] = await w.t.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.id, computerId));
+    const lock = new AbortController();
+    const ctx = {
+      deps: w.t.ownerDeps,
+      agent: agentFor(w.t.ownerDeps, computer!),
+      owner: { id: w.ownerId, workspaceId: w.workspaceId },
+      signal: lock.signal,
+    };
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    w.coder.agent = () => {
+      started();
+    };
+    const operation = runAsRunner(ctx, 'sleep', ['3600']);
+    await running;
+    lock.abort();
+    expect(await operation).toMatchObject({ code: null, error: 'sleep was cancelled' });
+    await w.until(() => expect(w.coder.calls.at(-1)?.ended).toBe(true));
+  });
+
   it('derives paths and urls from the full name or the remote', () => {
     const repo = { fullName: 'acme/relay', remoteUrl: 'https://github.com/acme/relay.git' };
     expect(checkoutPathFor(repo)).toBe(REPO_PATH);

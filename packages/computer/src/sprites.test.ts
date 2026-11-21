@@ -30,6 +30,7 @@ import {
   SpriteRetiredError,
   SPRITES_CUT_CALL_MS,
   SPRITES_INSIDE_CALL_MS,
+  SPRITES_PROVISION_BUDGET_MS,
   SPRITES_RETIRE_INSIDE_MAX_MS,
   SPRITES_RETIRE_MAX_MS,
   PROVISION_LOCK_FILE,
@@ -789,6 +790,36 @@ describe('the sprites provider', () => {
       expect(SPRITES_RETIRE_MAX_MS).toBe(5 * SPRITES_CUT_CALL_MS);
     });
 
+    it('makes at most five calls, a first read that finds nothing included', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      // The first read finds nothing; the next still shows the URL public (a stale read).
+      const get = api.get.bind(api);
+      let reads = 0;
+      api.get = async (name, options) => {
+        reads++;
+        if (reads === 1) return null;
+        const info = await get(name, options);
+        return info && { ...info, urlAuth: 'public' };
+      };
+      api.calls.length = 0;
+      let calls = 0;
+      for (const op of ['setLabels', 'setUrlAuth', 'setNetworkPolicy'] as const) {
+        const inner = api[op].bind(api) as (...args: unknown[]) => Promise<unknown>;
+        (api as unknown as Record<string, unknown>)[op] = (...args: unknown[]) => {
+          calls++;
+          return inner(...args);
+        };
+      }
+      await provider.retire!(ref);
+      api.get = get;
+      expect(reads + calls).toBeLessThanOrEqual(SPRITES_RETIRE_MAX_MS / SPRITES_CUT_CALL_MS);
+      const sprite = api.sprites.get(NAME)!;
+      expect(sprite.labels).toContain(SPRITES_RETIRED_LABEL);
+      expect(sprite.urlAuth).toBe('sprite');
+      expect(sprite.policy).toEqual(SPRITES_DENY_ALL);
+    });
+
     it('a provisioning that a retire overtakes puts the cut back and is refused', async () => {
       const { api, provider } = setup();
       const ref = await provider.create(spec);
@@ -924,5 +955,58 @@ describe('the sprites provider', () => {
       });
       expect((await provider.agent(ref).health()).ok).toBe(true);
     });
+  });
+});
+
+describe('the provisioning time bound', () => {
+  /** Records the limit each call is given: the options it was passed, last. */
+  function limits(api: FakeSpritesApi) {
+    const seen: [string, number | undefined][] = [];
+    const ops = ['get', 'setUrlAuth', 'setNetworkPolicy', 'exec', 'writeFile', 'readFile'] as const;
+    for (const op of ops) {
+      const inner = api[op].bind(api) as (...args: unknown[]) => Promise<unknown>;
+      (api as unknown as Record<string, unknown>)[op] = (...args: unknown[]) => {
+        const last = args.at(-1) as { timeoutMs?: number } | undefined;
+        seen.push([op, typeof last === 'object' && last ? last.timeoutMs : undefined]);
+        return inner(...args);
+      };
+    }
+    return seen;
+  }
+
+  it('gives every call of a make and a start a limit within the budget', async () => {
+    const { api, provider } = setup();
+    agent = await startFakeAgent({ token: spec.agentToken });
+    api.urlFor = () => agent!.url;
+    const seen = limits(api);
+    const ref = await provider.create(spec);
+    // A new version makes the start provision again.
+    api.sprites.get(NAME)!.files.delete(PROVISION_VERSION_FILE);
+    await provider.start(ref);
+    expect(seen.length).toBeGreaterThan(8);
+    for (const [op, ms] of seen) {
+      expect(ms, op).toBeDefined();
+      expect(ms!, op).toBeLessThanOrEqual(SPRITES_PROVISION_BUDGET_MS);
+    }
+  });
+
+  it('starts no call past the budget but the removal of its staging directory', async () => {
+    const { api, provider } = setup();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const writeFile = api.writeFile.bind(api);
+      api.writeFile = async (...args) => {
+        // The first upload takes the whole budget.
+        vi.setSystemTime(Date.now() + SPRITES_PROVISION_BUDGET_MS + 1);
+        return writeFile(...args);
+      };
+      await expect(provider.create(spec)).rejects.toThrow(/ran out of time/);
+    } finally {
+      vi.useRealTimers();
+    }
+    const after = api.calls.slice(api.calls.findIndex((c) => c.op === 'writeFile') + 1);
+    expect(after.map((c) => c.op)).toEqual(['exec']);
+    expect(execs(api).at(-1)).toMatch(/rm -rf/);
+    expect(api.provisions).toHaveLength(0);
   });
 });

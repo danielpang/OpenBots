@@ -154,6 +154,12 @@ export interface ComputerProvider {
    * otherwise (a reset, GH5).
    */
   destroy(ref: ComputerRef, options?: DestroyOptions): Promise<void>;
+  /**
+   * True when `destroy` with `home` and without `state` keeps the machine and
+   * clears its home in place (Sprites), so the server goes on naming it:
+   * its state directory, with the sign-ins, is still there.
+   */
+  readonly keepsMachineOnHomeReset?: boolean;
   status(ref: ComputerRef): Promise<MachineStatus>;
   agent(ref: ComputerRef): ComputerAgentClient;
   /** Fetches the sandbox image ahead of the first `create` (the setup wizard); Docker only. */
