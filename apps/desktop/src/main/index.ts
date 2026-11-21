@@ -51,6 +51,7 @@ import {
 import { devAppIconPath } from './app-icon.js';
 import { glassWindowOptions, supportsLiquidGlass } from './glass.js';
 import { QUICK_ASK_ACCELERATOR, trayMenu, type PendingApproval } from './approvals.js';
+import { CloudSignInError, createCloudSignIn } from './cloud-sign-in.js';
 import { createConnection, type Connection } from './connection.js';
 import { createDeviceKeyStore } from './device-keys.js';
 import {
@@ -840,6 +841,15 @@ async function createMainWindow(profile: ServerProfile): Promise<BrowserWindow> 
     if (path != null && isSignInPath(path)) {
       void showStartPage(window, current, new NotPairedError(current.name).message);
     }
+    // OpenBots Cloud signs in in the browser, never in this window: its sign-in
+    // page means the session ended (signed out, revoked from Devices, expired).
+    const cloudPath =
+      current.kind === 'cloud' && CLOUD_SIGN_IN ? serverPath(url, current.url) : null;
+    if (cloudPath != null && isSignInPath(cloudPath)) {
+      void tokens.clear(current.id);
+      if (activeProfile?.id === current.id) disconnect();
+      void showWelcome(undefined, SIGNED_OUT_OF_CLOUD);
+    }
   };
   contents.on('did-navigate', (_event, url) => relogin(url));
   contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
@@ -930,16 +940,30 @@ const opener = createOpener<BrowserWindow>({
  * session. `pairLink` is a pairing link opened on this Mac, for the choice
  * that pairs with it.
  */
-async function showWelcome(pairLink?: string): Promise<void> {
+async function showWelcome(pairLink?: string, cloudError?: string): Promise<void> {
   const window = mainWindow ?? (await createMainWindow(await profiles.active()));
   await loadAppPage(window, 'index', {
     welcome: '1',
     ...(pairLink ? { pair: pairLink } : {}),
+    ...(cloudError ? { cloudError } : {}),
   }).catch(() => undefined);
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
 }
+
+/** OpenBots Cloud signs in in the default browser (./cloud-sign-in.ts). */
+const CLOUD_SIGN_IN = CLOUD_URL
+  ? createCloudSignIn({
+      cloudUrl: CLOUD_URL,
+      openExternal: (url) => shell.openExternal(url),
+      fetch: (url, init) => fetch(url, init),
+      deviceName: computerName,
+    })
+  : null;
+
+const SIGNED_OUT_OF_CLOUD =
+  'You are signed out of OpenBots Cloud. Sign in again to go on where you left off.';
 
 const launcher = createLauncher({
   profiles,
@@ -947,6 +971,9 @@ const launcher = createLauncher({
   fetch: (url, init) => fetch(url, init),
   cloudUrl: CLOUD_URL,
   pair: pairServer,
+  ...(CLOUD_SIGN_IN
+    ? { cloudSignIn: CLOUD_SIGN_IN, saveToken: (id, token) => tokens.set(id, token) }
+    : {}),
   window: {
     openServer: async (profile, path) => {
       const { window, opened } = await opener.open(profile, path);
@@ -979,6 +1006,23 @@ async function openLink(link?: DeepLink) {
   // Another server's pairing link: the welcome screen offers to pair with it.
   if (link?.kind === 'pair') {
     await showWelcome(link.link);
+    return;
+  }
+  // The browser came back from an OpenBots Cloud sign-in.
+  if (link?.kind === 'app-sign-in') {
+    await launcher.finishCloudSignIn(link.link).catch(async (error: unknown) => {
+      const message =
+        error instanceof CloudSignInError ? error.message : 'Could not sign in to OpenBots Cloud.';
+      await showWelcome(undefined, message);
+    });
+    const window = mainWindow;
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      // The browser is in front; take the focus back from it.
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      window.focus();
+    }
     return;
   }
   await showMainWindow();

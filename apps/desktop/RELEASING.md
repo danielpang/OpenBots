@@ -172,7 +172,9 @@ is valid for five years: when either changes, update the secrets.
 
 ### The OpenBots account server
 
-"Sign in to an OpenBots account" on the welcome screen opens the hosted OpenBots server. Its URL
+"Sign in to OpenBots Cloud" on the welcome screen opens the hosted OpenBots server's sign-in in the
+default browser; the browser comes back to the app through an `openbots://app-sign-in` link, and
+the app keeps the session it is given in the Keychain (`src/main/cloud-sign-in.ts`). Its URL
 is set at build time: `OPENBOTS_CLOUD_URL` (an https origin, such as `https://app.openbots.example`)
 goes through `electron-builder.publish.cjs` into the packaged `package.json` as
 `openbots.cloudUrl`, which the app reads (`src/main/app-config.ts`). The release workflow takes it
