@@ -1237,7 +1237,41 @@ async function stillStopping(deps: AppDeps, row: ComputerRow): Promise<boolean> 
 export const stopTimings = {
   heartbeatMs: STOPPING_HEARTBEAT_MS,
   giveUpMs: STOPPING_GIVE_UP_MS,
+  /** The clock refreshes are timed by; a test steps its own. */
+  now: (): number => Date.now(),
+  /** Arms the give-up `ms` from now; returns what disarms it. A test records it instead. */
+  setTimer: (fn: () => void, ms: number): (() => void) => {
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  },
 };
+
+/**
+ * The give-up of a `stopping` holder: `giveUpMs` from when the last refresh
+ * that landed was sent (`heard(sentAt)`), never moved back by an older one
+ * landing late. The database wrote `status_at` after the refresh was sent, so
+ * the takeover cannot come sooner than that plus `STOPPING_TAKEOVER_MS`,
+ * however long the answer took. Returns the deadline now armed, in the
+ * clock's time; `stop` disarms it.
+ */
+export function stopGiveUp(onGiveUp: () => void) {
+  const { giveUpMs, now, setTimer } = stopTimings;
+  let deadline = 0;
+  let disarm: (() => void) | undefined;
+  return {
+    heard(sentAt: number): number {
+      if (sentAt + giveUpMs <= deadline) return deadline;
+      deadline = sentAt + giveUpMs;
+      disarm?.();
+      disarm = setTimer(onGiveUp, Math.max(0, deadline - now()));
+      return deadline;
+    },
+    stop() {
+      disarm?.();
+    },
+  };
+}
 
 /**
  * Runs `fn` while holding the `stopping` claim on `row`: every
@@ -1254,28 +1288,17 @@ async function holdingStop<T>(
 ): Promise<T> {
   const lost = new AbortController();
   // The give-up counts from when the last refresh that landed was sent, not
-  // from when its answer came: the database wrote `status_at` after it was
-  // sent, so the takeover cannot come sooner than that plus
-  // `STOPPING_TAKEOVER_MS`, however long the answer took.
-  let unheard: ReturnType<typeof setTimeout> | undefined;
-  let deadline = 0;
-  const heard = (sentAt: number) => {
-    if (lost.signal.aborted || sentAt + stopTimings.giveUpMs <= deadline) return;
-    deadline = sentAt + stopTimings.giveUpMs;
-    clearTimeout(unheard);
-    unheard = setTimeout(
-      () => lost.abort(new Error('The computer could not be held: its claim was not refreshed')),
-      Math.max(0, deadline - Date.now()),
-    );
-    unheard.unref?.();
-  };
+  // from when its answer came (`stopGiveUp`).
+  const giveUp = stopGiveUp(() =>
+    lost.abort(new Error('The computer could not be held: its claim was not refreshed')),
+  );
   const refresh = async () => {
-    const sentAt = Date.now();
+    const sentAt = stopTimings.now();
     if (!(await stillStopping(deps, row))) {
       lost.abort(new Error('The computer was taken over meanwhile'));
       return;
     }
-    heard(sentAt);
+    if (!lost.signal.aborted) giveUp.heard(sentAt);
   };
   // Once before the call: the claim is this stop's now, and the give-up
   // counts from now rather than from whenever the caller wrote it.
@@ -1291,7 +1314,7 @@ async function holdingStop<T>(
     return await fn(lost.signal);
   } finally {
     clearInterval(timer);
-    clearTimeout(unheard);
+    giveUp.stop();
   }
 }
 
