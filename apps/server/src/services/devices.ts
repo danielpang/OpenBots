@@ -12,6 +12,7 @@ import {
   devicesExist,
   inWorkspace,
   pairingWorkspace,
+  sessionDeviceWorkspace,
 } from '../db/scope.js';
 import type { DevicePlatform, PairingCreator } from '../db/schema/devices.js';
 import { DomainError, notFound } from '../errors.js';
@@ -845,11 +846,14 @@ export async function touchDevice(
 
 /**
  * `touchDevice` for a Mac signed in through the browser, whose device holds
- * a session: at most once a minute per session (per process here).
+ * a session: at most once a minute per session (per process here). The
+ * device is found in its own organization, which the session may have
+ * switched away from (sessionDeviceWorkspace), and only as the session's
+ * user's.
  */
 export async function touchSessionDevice(
   db: Db,
-  { workspaceId, sessionId }: { workspaceId: string; sessionId: string },
+  { sessionId, userId }: { sessionId: string; userId: string },
   now = Date.now(),
 ): Promise<void> {
   const key = `session:${sessionId}`;
@@ -857,6 +861,8 @@ export async function touchSessionDevice(
   if (last !== undefined && now - last < TOUCH_INTERVAL_MS) return;
   if (touched.size > 10_000) touched.clear();
   touched.set(key, now);
+  const workspaceId = await sessionDeviceWorkspace(db, sessionId);
+  if (!workspaceId) return;
   const cutoff = new Date(now - TOUCH_INTERVAL_MS);
   await inWorkspace(workspaceId, () =>
     db
@@ -864,7 +870,9 @@ export async function touchSessionDevice(
       .set({ lastSeenAt: new Date(now) })
       .where(
         and(
+          eq(schema.devices.workspaceId, workspaceId),
           eq(schema.devices.sessionId, sessionId),
+          eq(schema.devices.ownerId, userId),
           isNull(schema.devices.revokedAt),
           or(isNull(schema.devices.lastSeenAt), lte(schema.devices.lastSeenAt, cutoff)),
         ),

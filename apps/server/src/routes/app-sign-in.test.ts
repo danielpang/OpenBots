@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { pino } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '../db/client.js';
@@ -211,6 +211,42 @@ describe('app sign-in on a self-hosted install', () => {
     expect(devices.items.map((d) => d.id)).not.toContain(device.id);
   });
 
+  it("signs out even when revoking the Mac's device fails, and logs it without the token", async () => {
+    const { verifier, challenge } = pkce();
+    const { code } = await newCode('desktop', challenge);
+    const res = await request(t, 'POST', '/app-sign-in/session', {
+      body: { code, codeVerifier: verifier, name: 'Failing revoke' },
+    });
+    const { device } = await json<{ device: { id: string } }>(res);
+    const mac = sessionCookieOf(res)!;
+    const token = decodeURIComponent(mac.split('=')[1]!).split('.')[0]!;
+    // Revoking a device fails while this trigger is in place.
+    await t.db.execute(sql`create function test_refuse_device_write() returns trigger
+      language plpgsql as $$ begin
+        if new.revoked_at is not null and old.revoked_at is null then
+          raise exception 'refused by the test';
+        end if;
+        return new;
+      end $$`);
+    await t.db.execute(sql`create trigger test_refuse_device_write before update on devices
+      for each row execute function test_refuse_device_write()`);
+    const before = logs.length;
+    try {
+      const out = await request(t, 'POST', '/api/auth/sign-out', { cookie: mac, body: {} });
+      expect(out.status).toBe(200);
+    } finally {
+      await t.db.execute(sql`drop trigger test_refuse_device_write on devices`);
+      await t.db.execute(sql`drop function test_refuse_device_write()`);
+    }
+    expect((await request(t, 'GET', '/me', { cookie: mac })).status).toBe(401);
+    const logged = logs.slice(before).join('');
+    expect(logged).toContain('revoking the device of an ended session failed');
+    expect(logged).not.toContain(token);
+    // The session is gone; the device row stays, unrevoked, for Devices to revoke.
+    const [row] = await t.db.select().from(schema.devices).where(eq(schema.devices.id, device.id));
+    expect(row!.revokedAt).toBeNull();
+  });
+
   it('trades only an app sign-in code for a session, and only with its verifier', async () => {
     const pairing = await json<{ qr: { code: string } }>(
       request(t, 'POST', '/devices/pairings', { cookie, body: {} }),
@@ -409,6 +445,101 @@ describe('app sign-in across organizations', () => {
     expect((await request(t, 'GET', '/me', { cookie: sessionCookieOf(res)! })).status).toBe(200);
     const [row] = await t.db.select().from(schema.devices).where(eq(schema.devices.id, device.id));
     expect(row!.lastSeenAt!.getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  it("keeps finding the Mac's device in its own organization after the session switches", async () => {
+    const home = await t.defaultOrganization();
+    const adaId = await t.userId('ada@example.com');
+    await t.addMember(adaId, other, 'member');
+    try {
+      const { verifier, challenge } = pkce();
+      const { code } = await json<Code>(
+        request(t, 'POST', '/app-sign-in/codes', {
+          cookie: ada,
+          body: { platform: 'desktop', codeChallenge: challenge },
+        }),
+        201,
+      );
+      const res = await request(t, 'POST', '/app-sign-in/session', {
+        body: { code, codeVerifier: verifier, name: 'Switching Mac' },
+      });
+      const { device } = await json<{ device: { id: string } }>(res);
+      const mac = sessionCookieOf(res)!;
+      const old = new Date(Date.now() - 3_600_000);
+      await t.db
+        .update(schema.devices)
+        .set({ lastSeenAt: old })
+        .where(eq(schema.devices.id, device.id));
+      await t.switchOrganization(mac, other);
+
+      // Last seen still moves on.
+      expect((await request(t, 'GET', '/me', { cookie: mac })).status).toBe(200);
+      const [seen] = await t.db
+        .select()
+        .from(schema.devices)
+        .where(eq(schema.devices.id, device.id));
+      expect(seen!.lastSeenAt!.getTime()).toBeGreaterThan(old.getTime());
+
+      // From the other organization the device is not there to revoke (it is
+      // listed and revoked in its own); signing out still revokes it.
+      expect((await request(t, 'DELETE', `/devices/${device.id}`, { cookie: mac })).status).toBe(
+        404,
+      );
+      const out = await request(t, 'POST', '/api/auth/sign-out', { cookie: mac, body: {} });
+      expect(out.status).toBe(200);
+      const [row] = await t.db
+        .select()
+        .from(schema.devices)
+        .where(eq(schema.devices.id, device.id));
+      expect(row!.revokedAt).not.toBeNull();
+      expect(row!.workspaceId).toBe(home);
+      const audit = await t.db
+        .select()
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.action, 'device.revoked'),
+            eq(schema.auditLog.targetId, device.id),
+          ),
+        );
+      expect(audit).toHaveLength(1);
+      expect(audit[0]!.workspaceId).toBe(home);
+      expect(audit[0]!.metadata).toMatchObject({ via: 'session_ended' });
+    } finally {
+      await t.db
+        .delete(schema.workspaceMembers)
+        .where(
+          and(
+            eq(schema.workspaceMembers.userId, adaId),
+            eq(schema.workspaceMembers.workspaceId, other),
+          ),
+        );
+    }
+  });
+
+  it("revokes the Mac's device when its session expires in another organization", async () => {
+    const { verifier, challenge } = pkce();
+    const { code } = await json<Code>(
+      request(t, 'POST', '/app-sign-in/codes', {
+        cookie: ada,
+        body: { platform: 'desktop', codeChallenge: challenge },
+      }),
+      201,
+    );
+    const res = await request(t, 'POST', '/app-sign-in/session', {
+      body: { code, codeVerifier: verifier, name: 'Expiring Mac' },
+    });
+    const { device } = await json<{ device: { id: string } }>(res);
+    const mac = sessionCookieOf(res)!;
+    await t.switchOrganization(mac, other);
+    const token = decodeURIComponent(mac.split('=')[1]!).split('.')[0]!;
+    await t.db
+      .update(schema.sessions)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(schema.sessions.token, token));
+    expect((await request(t, 'GET', '/me', { cookie: mac })).status).toBe(401);
+    const [row] = await t.db.select().from(schema.devices).where(eq(schema.devices.id, device.id));
+    expect(row!.revokedAt).not.toBeNull();
   });
 
   it('refuses a code once its owner is suspended', async () => {

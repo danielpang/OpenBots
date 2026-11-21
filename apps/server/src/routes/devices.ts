@@ -311,6 +311,10 @@ export const deviceRoutes = createRouter()
     }),
     async (c) => {
       const { user } = c.var;
+      // In the caller's active organization only: a Mac whose session has
+      // switched to another organization finds its own device there 404, as
+      // every other organization's row. Its device is revoked in its own
+      // organization when the session ends (auth.ts, revokeSessionDevices).
       await revokeDevice(
         c.var.deps,
         { workspaceId: user.workspaceId, ownerId: user.id },

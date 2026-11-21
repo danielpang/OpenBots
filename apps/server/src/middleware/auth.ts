@@ -190,8 +190,10 @@ export async function authenticateAccount(deps: AuthDeps, headers: Headers): Pro
   }
   // A Mac signed in through the browser: its session is its device's. On the
   // managed service only, so a self-hosted install's requests do what they did.
-  if (sessionId && organizationId && deps.config.deployment === 'managed') {
-    await touchSessionDevice(db, { workspaceId: organizationId, sessionId }).catch(() => undefined);
+  // The device stays in the organization it was made in, whichever one the
+  // session works in now.
+  if (sessionId && deps.config.deployment === 'managed') {
+    await touchSessionDevice(db, { sessionId, userId: user.id }).catch(() => undefined);
   }
   return {
     id: user.id,

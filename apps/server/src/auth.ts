@@ -11,7 +11,7 @@ import { APPLE_ISSUER, appleProvider, type AppleProviderOptions } from './apple.
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
-import { asDirectory, inWorkspace, withScope } from './db/scope.js';
+import { asDirectory, inWorkspace, sessionDeviceWorkspace, withScope } from './db/scope.js';
 import { problem } from './errors.js';
 import type { RateLimiter } from './infra/rate-limit.js';
 import type { Logger } from './logger.js';
@@ -338,8 +338,9 @@ export function createAuth({
         delete: {
           // A Mac app signed in through the browser works with a session; when
           // it ends (sign-out, expiry, revocation) its device is revoked too.
+          // That never stops the session ending: a failure is logged.
           before: async (session) => {
-            await revokeSessionDevices(db, config, session);
+            await revokeSessionDevices(db, logger, session);
           },
           after: async (session, ctx) => {
             // Expiry and revocation delete sessions too; only signing out counts.
@@ -578,48 +579,62 @@ function ownerPlugin(db: Db) {
 }
 
 /**
- * Marks the devices that held this session revoked, in the session's
- * organization (the implicit one on a self-hosted install). The device row
- * keeps its name for the Devices list's history; the foreign key clears its
- * session once the row is gone.
+ * Marks the device that held this session revoked, in the device's own
+ * organization: the one it was made in, whichever the session has switched
+ * to since (openbots_session_device_workspace(), db/scope.ts). Only the
+ * session's own user's device. The device row keeps its name for the Devices
+ * list's history; the foreign key clears its session once the row is gone.
+ *
+ * Never throws: the session ends whatever happens here. A failure is logged
+ * by its kind only, never with the session or its token.
  */
 async function revokeSessionDevices(
   db: Db,
-  config: Config,
+  logger: Logger,
   session: { id: string; userId: string },
 ): Promise<void> {
-  const workspaceId =
-    config.deployment === 'self_hosted'
-      ? (await ensureWorkspace(db)).id
-      : activeOrganizationOf(session);
-  if (!workspaceId) return;
-  await inWorkspace(workspaceId, async () => {
-    const revoked = await db
-      .update(schema.devices)
-      .set({ revokedAt: new Date() })
-      .where(
-        and(
-          eq(schema.devices.workspaceId, workspaceId),
-          eq(schema.devices.sessionId, session.id),
-          isNull(schema.devices.revokedAt),
-        ),
-      )
-      .returning({
-        id: schema.devices.id,
-        name: schema.devices.name,
-        platform: schema.devices.platform,
-      });
-    for (const device of revoked) {
-      await recordAudit(db, {
-        workspaceId,
-        actor: { type: 'user', id: session.userId },
-        action: 'device.revoked',
-        targetType: 'device',
-        targetId: device.id,
-        metadata: { name: device.name, platform: device.platform, via: 'session_ended' },
-      });
-    }
-  });
+  try {
+    const workspaceId = await sessionDeviceWorkspace(db, session.id);
+    if (!workspaceId) return;
+    await inWorkspace(workspaceId, () =>
+      db.transaction(async (tx) => {
+        const revoked = await tx
+          .update(schema.devices)
+          .set({ revokedAt: new Date() })
+          .where(
+            and(
+              eq(schema.devices.workspaceId, workspaceId),
+              eq(schema.devices.sessionId, session.id),
+              eq(schema.devices.ownerId, session.userId),
+              isNull(schema.devices.revokedAt),
+            ),
+          )
+          .returning({
+            id: schema.devices.id,
+            name: schema.devices.name,
+            platform: schema.devices.platform,
+          });
+        for (const device of revoked) {
+          await recordAudit(tx as unknown as Db, {
+            workspaceId,
+            actor: { type: 'user', id: session.userId },
+            action: 'device.revoked',
+            targetType: 'device',
+            targetId: device.id,
+            metadata: { name: device.name, platform: device.platform, via: 'session_ended' },
+          });
+        }
+      }),
+    );
+  } catch (error) {
+    logger.error(
+      {
+        error: error instanceof Error ? error.name : typeof error,
+        code: (error as { code?: unknown } | null)?.code ?? null,
+      },
+      'revoking the device of an ended session failed',
+    );
+  }
 }
 
 /** The session's active organization (the organization plugin's field), if any. */
