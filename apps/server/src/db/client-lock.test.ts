@@ -143,6 +143,77 @@ describe.runIf(process.env.DATABASE_URL)('session locks on Postgres', () => {
     }
   });
 
+  it('a lock is held past the lifetime and idle time the pool is given', async () => {
+    // postgres.js ends a connection once its lifetime (or idle time) is up
+    // and no query is in flight on it. While a holder works, none is on the
+    // lock's connection: the pool's limits must never reach it.
+    let poolClosed!: () => void;
+    const poolClose = new Promise<void>((resolve) => (poolClosed = resolve));
+    const db = createDb(
+      url,
+      { max_lifetime: 0.2, idle_timeout: 0.2, onclose: () => poolClosed() },
+      { lockWaitMs: 2_000 },
+    );
+    const admin = postgres(url, { onnotice: () => {}, max: 1 });
+    try {
+      const key = `test:lock:${randomUUID()}`;
+      const held = await db.withSessionLock(key, async (signal) => {
+        // A pool connection opened after the lock's, with the same limits:
+        // once the pool has closed it, the lock's connection has outlived them too.
+        await db.execute(sql`select 1`);
+        await poolClose;
+        const [row] = await admin<{ held: boolean }[]>`
+          select exists (
+            select 1 from pg_locks
+            where locktype = 'advisory' and granted
+              and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+          ) as held
+        `;
+        return { aborted: signal.aborted, reason: String(signal.reason ?? ''), held: row?.held };
+      });
+      expect(held).toEqual({ aborted: false, reason: '', held: true });
+    } finally {
+      await admin.end();
+      await db.close();
+    }
+  });
+
+  it('after a holder ended as unhealthy, the next holder works and close ends', async () => {
+    // No time to unlock in: every holder's unlock gives no answer in time,
+    // and the holder's connection is terminated, the lock with it.
+    const db = createDb(url, {}, { lockWaitMs: 0 });
+    const admin = postgres(url, { onnotice: () => {}, max: 1 });
+    const heldNow = async (key: string) => {
+      const [row] = await admin<{ held: boolean }[]>`
+        select exists (
+          select 1 from pg_locks
+          where locktype = 'advisory' and granted
+            and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+        ) as held
+      `;
+      return row?.held;
+    };
+    let closed = false;
+    try {
+      const first = `test:lock:${randomUUID()}`;
+      expect(await db.withSessionLock(first, async () => 'first')).toBe('first');
+      // Each next holder's first query runs on a live connection, never the dying one.
+      for (let i = 0; i < 5; i++) {
+        expect(await db.withSessionLock(`test:lock:${randomUUID()}`, async () => i)).toBe(i);
+      }
+      await vi.waitFor(async () => expect(await heldNow(first)).toBe(false), {
+        timeout: 2_000,
+        interval: 20,
+      });
+    } finally {
+      await admin.end();
+      const closing = db.close().then(() => (closed = true));
+      // A close that hangs would hold a shutting down server forever.
+      await Promise.race([closing, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+    }
+    expect(closed).toBe(true);
+  }, 15_000);
+
   it('a wait past its bound fails cleanly, in the process and across processes', async () => {
     const one = createDb(url, {}, { lockWaitMs: 300 });
     const two = createDb(url, {}, { lockWaitMs: 300 });

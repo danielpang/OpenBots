@@ -79,6 +79,8 @@ export type Script = (io: CoderIo) => void | Promise<void>;
 export function defaultGit(args: string[]): GitAnswer {
   const has = (...words: string[]) => words.every((w) => args.includes(w));
   if (has('--is-inside-work-tree')) return { code: 128, stderr: 'fatal: not a git repository' };
+  // HEAD is on a commit; any other ref asked about is not there.
+  if (has('rev-parse', '--verify', 'HEAD')) return { code: 0, stdout: 'abc1234\n' };
   if (has('--verify')) return { code: 1 };
   if (has('rev-parse', '--git-dir')) return { code: 0, stdout: '.git\n' };
   // The checkout is where it was asked for: git's top level is the -C path.
