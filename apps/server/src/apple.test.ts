@@ -114,10 +114,12 @@ describe('the client secret', () => {
 });
 
 describe('sameNonce', () => {
-  it('takes the nonce or its SHA-256 in hex, nothing else', () => {
+  it("takes only the SHA-256 in hex of the nonce sent, never the token's own claim", () => {
     const hashed = createHash('sha256').update('n0nce').digest('hex');
-    expect(sameNonce('n0nce', 'n0nce')).toBe(true);
     expect(sameNonce(hashed, 'n0nce')).toBe(true);
+    // The claim sent back as the nonce: what anyone holding the token could do.
+    expect(sameNonce(hashed, hashed)).toBe(false);
+    expect(sameNonce('n0nce', 'n0nce')).toBe(false);
     expect(sameNonce('other', 'n0nce')).toBe(false);
     expect(sameNonce(undefined, 'n0nce')).toBe(false);
   });
@@ -228,6 +230,27 @@ describe('Sign in with Apple, configured', () => {
       idToken: { token: forged, nonce: 'x' },
     });
     expect(forgedRes.status).toBe(401);
+    expect(await t.db.query.users.findMany()).toEqual([]);
+  });
+
+  it('refuses a native token sent with its own nonce claim', async () => {
+    const token = await idToken('c-nonce');
+    const claim = createHash('sha256').update('c-nonce').digest('hex');
+    const replayed = await post(t, '/api/auth/sign-in/social', {
+      provider: 'apple',
+      idToken: { token, nonce: claim },
+    });
+    expect(replayed.status).toBe(401);
+    expect(await t.db.query.users.findMany()).toEqual([]);
+  });
+
+  it("refuses a native token made for the web's Services ID", async () => {
+    const forWeb = await idToken('c-nonce', { aud: 'com.example.openbots.web' });
+    const webRes = await post(t, '/api/auth/sign-in/social', {
+      provider: 'apple',
+      idToken: { token: forWeb, nonce: 'c-nonce' },
+    });
+    expect(webRes.status).toBe(401);
     expect(await t.db.query.users.findMany()).toEqual([]);
   });
 

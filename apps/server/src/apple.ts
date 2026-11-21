@@ -17,9 +17,13 @@ import type { AppleSignInConfig } from './config.js';
 // - The ID token check, for the iOS app's native sign-in (`POST
 //   /api/auth/sign-in/social` with `idToken`). Done here rather than by
 //   better-auth's default so the keys can be faked in tests: Apple's keys by
-//   default, its issuer, an audience of the Services ID or the app's bundle
-//   ID, an hour's age at most, and the nonce the app made (Apple puts the
-//   SHA-256 of the app's nonce in the token, as hex; the app sends the nonce).
+//   default, its issuer, an audience of the app's bundle ID only (a token
+//   made for the web Services ID is not the app's), an hour's age at most,
+//   and the nonce the app made. The app asks Apple for the SHA-256 of its
+//   nonce, in hex, so that is what the token carries, and it sends the nonce
+//   itself here. Only the hash of what is sent may match the claim: were the
+//   claim itself accepted, anyone holding a token could send its own claim
+//   back as the nonce, and the nonce would stop nothing.
 //
 // The provider's answer is data: the email and name it carries make an
 // account (through the user hooks, which decide whether sign-up is allowed),
@@ -60,16 +64,12 @@ export interface AppleProviderOptions {
   now?: () => number;
 }
 
-/** Whether the nonce in a token is the app's, or its SHA-256 in hex (as Apple puts it). */
+/** Whether the nonce in a token is the SHA-256, in hex, of the nonce the app sent. */
 export function sameNonce(claim: unknown, nonce: string): boolean {
   if (typeof claim !== 'string') return false;
-  const hashed = createHash('sha256').update(nonce).digest('hex');
-  for (const candidate of [nonce, hashed]) {
-    const a = Buffer.from(claim);
-    const b = Buffer.from(candidate);
-    if (a.length === b.length && timingSafeEqual(a, b)) return true;
-  }
-  return false;
+  const a = Buffer.from(claim);
+  const b = Buffer.from(createHash('sha256').update(nonce).digest('hex'));
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /**
@@ -88,7 +88,9 @@ export function appleProvider(config: AppleSignInConfig, options: AppleProviderO
   }
   const now = options.now ?? Date.now;
   const keys = options.keys ?? createRemoteJWKSet(new URL(APPLE_KEYS_URL));
-  const audience = [config.clientId, ...(config.appBundleId ? [config.appBundleId] : [])];
+  // The native sign-in is the app's: the web's Services ID is not accepted
+  // here. Without a bundle ID there is no native sign-in at all.
+  const appAudience = config.appBundleId;
   let current: { secret: string; expiresAt: number } | null = null;
 
   return {
@@ -98,14 +100,14 @@ export function appleProvider(config: AppleSignInConfig, options: AppleProviderO
       if (!current || current.expiresAt - at < DAY_MS) current = appleClientSecret(config, key, at);
       return current.secret;
     },
-    audience,
     ...(config.appBundleId ? { appBundleIdentifier: config.appBundleId } : {}),
     /** The native sign-in's ID token: Apple's, for this app, recent, with the app's nonce. */
     async verifyIdToken(token: string, nonce?: string): Promise<boolean> {
+      if (!appAudience) return false;
       try {
         const { payload } = await jwtVerify(token, keys, {
           issuer: APPLE_ISSUER,
-          audience,
+          audience: appAudience,
           algorithms: ['RS256'],
           maxTokenAge: '1h',
           currentDate: new Date(now()),
