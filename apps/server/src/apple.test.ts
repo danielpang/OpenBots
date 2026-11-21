@@ -25,6 +25,20 @@ const base = { OPENBOTS_MASTER_KEY: generateMasterKey(), DATABASE_URL: 'postgres
 
 const json = (res: Response) => res.json() as Promise<Record<string, unknown>>;
 
+/** Apple's answer to the web sign-in: a cross-site form POST, here with a cookie a CDN set. */
+function applePost(t: TestApp, path: string, form: Record<string, string>) {
+  return t.app.request(path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      origin: APPLE_ISSUER,
+      'sec-fetch-site': 'cross-site',
+      cookie: '__cf_bm=cdn-cookie',
+    },
+    body: new URLSearchParams(form).toString(),
+  });
+}
+
 function post(t: TestApp, path: string, body: unknown) {
   return t.app.request(path, {
     method: 'POST',
@@ -138,6 +152,12 @@ describe('Sign in with Apple, not configured', () => {
     expect(caps.nativeAppleSignIn).toBe(false);
   });
 
+  it("keeps refusing a cross-site POST with a cookie at Apple's callback", async () => {
+    const res = await applePost(t, '/api/auth/callback/apple', { code: 'c', state: 's' });
+    expect(res.status).toBe(403);
+    expect(await json(res)).toMatchObject({ code: 'ORIGIN_NOT_ALLOWED' });
+  });
+
   it('cannot be started', async () => {
     const res = await post(t, '/api/auth/sign-in/social', {
       provider: 'apple',
@@ -194,6 +214,43 @@ describe('Sign in with Apple, configured', () => {
     expect(url.origin).toBe(APPLE_ISSUER);
     expect(url.searchParams.get('client_id')).toBe('com.example.openbots.web');
     expect(url.searchParams.get('response_mode')).toBe('form_post');
+  });
+
+  it("takes Apple's cross-site form POST with a cookie, and only redirects it to the GET callback", async () => {
+    const res = await applePost(t, '/api/auth/callback/apple', {
+      code: 'apple-code',
+      state: 'not-a-state',
+    });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get('location')!);
+    expect(location.origin + location.pathname).toBe(`${ORIGIN}/api/auth/callback/apple`);
+    expect(Object.fromEntries(location.searchParams)).toEqual({
+      code: 'apple-code',
+      state: 'not-a-state',
+    });
+    expect(res.headers.getSetCookie()).toEqual([]);
+    // The GET callback is where the state is checked: this one is refused.
+    const get = await t.app.request(location.pathname + location.search);
+    expect(get.status).toBe(302);
+    expect(get.headers.get('location')).toMatch(/error=/);
+    expect(
+      get.headers
+        .getSetCookie()
+        .some((c) => c.includes('session_token=') && !c.includes('Max-Age=0')),
+    ).toBe(false);
+    expect(await t.db.query.users.findMany()).toEqual([]);
+  });
+
+  it('still refuses a cross-site POST with a cookie anywhere else', async () => {
+    for (const path of [
+      '/api/auth/callback/github',
+      '/api/auth/callback/apple/',
+      '/api/auth/sign-out',
+      '/api/v1/devices/pairings',
+    ]) {
+      const res = await applePost(t, path, { code: 'c', state: 's' });
+      expect(res.status, path).toBe(403);
+    }
   });
 
   it('refuses a native ID token for another app, without the nonce, or not signed by Apple', async () => {
