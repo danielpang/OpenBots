@@ -59,6 +59,20 @@ describe('affected CI selection', () => {
     expect(selected(['apps/desktop/src/main/index.ts'])).toEqual(['check']);
   });
 
+  it('runs only the general checks, which hold its own suite, for edge Worker changes', () => {
+    expect(
+      selected(['apps/artifact-worker/src/worker.ts', 'apps/artifact-worker/wrangler.toml']),
+    ).toEqual(['check']);
+    // `check` runs turbo's lint, typecheck and test for the workspace, so the Worker must
+    // define them, or a change there would be selected and still go untested.
+    const worker = JSON.parse(
+      readFileSync(join(root, 'apps/artifact-worker/package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    expect(Object.keys(worker.scripts)).toEqual(
+      expect.arrayContaining(['lint', 'test', 'typecheck']),
+    );
+  });
+
   it('runs real database, browser and image checks for server changes', () => {
     for (const path of ['apps/server/src/db/schema.ts', 'ee/server/src/main.ts']) {
       expect(selected([path])).toEqual(['browser', 'check', 'images', 'postgres', 'standalone']);
