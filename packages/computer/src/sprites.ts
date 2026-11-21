@@ -458,22 +458,31 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
   }
 
   /** Our holds on the Sprite (Tasks API tasks with our prefix); none unless it runs. */
-  async function holds(name: string): Promise<string[]> {
+  async function holds(name: string, signal?: AbortSignal): Promise<string[]> {
     const info = await api.get(name);
     // A retired Sprite has none (`retire` dropped them), and a call would wake it.
     if (info?.status !== 'running' || isRetired(info)) return [];
-    const out = await run(name, tasksCurl('GET', '/v1/tasks'), 'Listing holds');
+    signal?.throwIfAborted();
+    const out = await run(
+      name,
+      tasksCurl('GET', '/v1/tasks'),
+      'Listing holds',
+      undefined,
+      signal ? { signal } : {},
+    );
     const listed = (JSON.parse(out || '{}') as { tasks?: { name?: string }[] }).tasks ?? [];
     return listed
       .map((task) => task.name ?? '')
       .filter((task) => task.startsWith(SPRITES_HOLD_PREFIX));
   }
 
-  async function deleteTask(name: string, task: string) {
+  async function deleteTask(name: string, task: string, signal?: AbortSignal) {
     const out = await run(
       name,
       [...tasksCurl('DELETE', `/v1/tasks/${task}`), '-o', '/dev/null', '-w', '%{http_code}'],
       'Releasing the hold',
+      undefined,
+      signal ? { signal } : {},
     );
     if (out !== '204' && out !== '200' && out !== '404') {
       throw new Error(`Releasing the hold failed: HTTP ${out}`);
@@ -563,11 +572,18 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       await waitForAgent(provider.agent(ref), b.limit(readyTimeoutMs), pollMs);
     },
     // A Sprite pauses itself once idle, so there is nothing to stop; only our
-    // holds go, which would otherwise keep it running for up to an hour.
-    async stop(ref) {
+    // holds go, which would otherwise keep it running for up to an hour. A
+    // caller that no longer holds the computer (its signal) releases none
+    // after that: they may be the holds of a use that has just begun.
+    async stop(ref, stopOptions) {
       const name = nameOf(ref);
       if (!name) return;
-      for (const task of await holds(name)) await deleteTask(name, task);
+      const signal = stopOptions?.signal;
+      signal?.throwIfAborted();
+      for (const task of await holds(name, signal)) {
+        signal?.throwIfAborted();
+        await deleteTask(name, task, signal);
+      }
     },
     // The home lives on the Sprite's own disk, not a volume. `home` and
     // `state` both: the Sprite is deleted, every file and checkpoint with it.
@@ -591,7 +607,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
         const signal = destroyOptions.signal;
         if (isRetired(await api.get(name))) throw new SpriteRetiredError(name);
         signal?.throwIfAborted();
-        await provider.stop(ref);
+        await provider.stop(ref, signal ? { signal } : {});
         signal?.throwIfAborted();
         // The agent and what it started go first, as removing the container
         // ends them, so nothing writes into the home while it is cleared.

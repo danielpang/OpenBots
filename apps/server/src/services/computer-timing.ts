@@ -34,9 +34,14 @@ export const STOPPING_TAKEOVER_MS = 4 * STOPPING_HEARTBEAT_MS;
  * How long a holder of `stopping` goes on with no refresh landing (the
  * database unreachable) before it ends its own provider call: past this its
  * claim may soon be taken over, and the call must be over before then. The
- * call ends at most `SPRITES_EXEC_KILL_MS` after its signal.
+ * call ends at most `SPRITES_EXEC_KILL_MS` after its signal. Counted from
+ * when the last refresh that landed was sent (computer.ts `holdingStop`):
+ * its write, and so the takeover's start, came no sooner, and an answer
+ * that was slow to come back uses none of the margin.
  */
 export const STOPPING_GIVE_UP_MS = 2 * STOPPING_HEARTBEAT_MS;
+/** Slack for a give-up timer that fires late on a busy event loop. */
+export const STOPPING_GIVE_UP_SLACK_MS = 5_000;
 
 /** The longest a reset's own work on the record takes: the cut, then its undo. */
 export const RESET_RETIRE_MAX_MS = SPRITES_RETIRE_MAX_MS + SPRITES_UNRETIRE_MAX_MS;
@@ -106,9 +111,11 @@ check(
   STOPPING_TAKEOVER_MS >= 3 * STOPPING_HEARTBEAT_MS,
   'STOPPING_TAKEOVER_MS must allow for two missed heartbeats',
 );
+// Both sides counted from the same moment: the takeover from the last
+// refresh's write, the give-up from its sending, which came first.
 check(
-  STOPPING_GIVE_UP_MS + SPRITES_EXEC_KILL_MS + 5_000 <= STOPPING_TAKEOVER_MS,
-  'a holder that cannot refresh its stop must end its call before the stop can be taken over',
+  STOPPING_GIVE_UP_MS + SPRITES_EXEC_KILL_MS + STOPPING_GIVE_UP_SLACK_MS <= STOPPING_TAKEOVER_MS,
+  'a holder that cannot refresh its stop must end its call before the stop can be taken over, counted from when its last refresh was sent',
 );
 check(
   STOPPING_GIVE_UP_MS > STOPPING_HEARTBEAT_MS,

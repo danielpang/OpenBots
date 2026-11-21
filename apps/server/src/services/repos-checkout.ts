@@ -287,6 +287,19 @@ export async function git(ctx: GitContext, args: string[], options?: RunnerOptio
 }
 
 /**
+ * `runGit` for a question whose answer decides what happens to work: git's
+ * exit code and output, any code, but only once git ran to its end. A run
+ * that was cancelled (the checkout's lock lost), took too long or never
+ * started has no answer, and this throws a `GitError` for it rather than
+ * let a missing answer read as "nothing there".
+ */
+export async function askGit(ctx: GitContext, args: string[], options?: RunnerOptions) {
+  const run = await runGit(ctx, args, options);
+  if (run.code === null || run.error) throw new GitError(args, run);
+  return run;
+}
+
+/**
  * `owner/name` and the host of a remembered repository: its stored full
  * name, on the host its remote names (`parseRepoUrl`), github.com when the
  * remote cannot be read. Throws when neither says which repository it is.
@@ -783,7 +796,7 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         .where(eq(schema.repos.id, repo.id));
     }
     const head = (await git(ctx, ['-C', path, 'rev-parse', 'HEAD'])).trim();
-    const counts = await runGit(ctx, [
+    const counts = await askGit(ctx, [
       '-C',
       path,
       'rev-list',
@@ -955,11 +968,14 @@ export function parseWorktreeList(stdout: string): { path: string; branch: strin
   return out;
 }
 
-/** The sessions' worktrees of a checkout: every worktree but the main one. */
+/**
+ * The sessions' worktrees of a checkout: every worktree but the main one.
+ * Throws when git cannot list them: no list is not an empty one.
+ */
 export async function worktreesOf(ctx: GitContext, path: string) {
-  const list = await runGit(ctx, ['-C', path, 'worktree', 'list', '--porcelain'], {
+  const list = await askGit(ctx, ['-C', path, 'worktree', 'list', '--porcelain'], {
     timeoutMs: SHORT_MS,
   });
-  if (list.code !== 0) return [];
+  if (list.code !== 0) throw new GitError(['-C', path, 'worktree', 'list'], list);
   return parseWorktreeList(list.stdout).filter((w) => posix.normalize(w.path) !== path);
 }
