@@ -7,18 +7,18 @@ import { outsideScope, rowsOf } from '../db/scope.js';
 import { bestEffort } from './best-effort.js';
 
 // The fence a reset puts around the machine it took away (computer-retire.ts,
-// computer.ts `destroyComputer`). Once the machine is out of reach, nothing in
-// any process may talk to its agent again: not a request or job that read the
-// computer's row before the reset, not an open terminal or screen socket, not
-// a sign-in still running in a worker.
+// computer.ts `destroyComputer`). Once the machine is off the computer,
+// nothing in any process may talk to its agent again, while it is being
+// deleted and after: not a request or job that read the computer's row before
+// the reset, not an open terminal or screen socket, not a sign-in still
+// running in a worker, not a use's hold.
 //
 // The fence is the row's sealed agent token as it was (its SHA-256: the
 // ciphertext is unique to the machine's provisioning). A row read before the
 // reset still carries it, and `isFenced` refuses it; the computer's next
-// machine is provisioned with a new token, so the fence never has to be lifted,
-// even when an operator restores the old machine.
+// machine is provisioned with a new token, so the fence never has to be lifted.
 //
-// The database is where a fence lives: the record of the retired machine
+// The database is where a fence lives: the record of the old machine
 // (`retired_computers.fence`) is written in the same transaction that takes
 // the machine off the computer's row. Every process reads the fences from
 // there when it starts listening and then every `FENCE_POLL_MS`
@@ -41,17 +41,17 @@ export interface ComputerFence {
 }
 
 /**
- * Fences this process knows of, each with when it may be forgotten: past the
- * longest a retired machine is kept (`FENCE_HISTORY_MS` after its record).
- * Only an expired one is ever dropped, so no number of resets can push a
- * live fence out.
+ * Fences this process knows of, each with when it may be forgotten
+ * (`FENCE_HISTORY_MS` after its record), far past any read of a row made
+ * before the reset. Only an expired one is ever dropped, so no number of
+ * resets can push a live fence out.
  */
 const fenced = new Map<string, number>();
 /** How often each process reads the fences recorded since its last read. */
 export const FENCE_POLL_MS = 10_000;
 /** How far back a read reaches past the last one: a record committed late is still seen. */
 const FENCE_POLL_OVERLAP_MS = 10 * 60_000;
-/** How far back the first read reaches, and how long a fence is kept: longer than any machine is kept. */
+/** How far back the first read reaches, and how long a fence is kept. */
 export const FENCE_HISTORY_MS = 8 * 24 * 60 * 60_000;
 /** How often the expired fences are looked for. */
 const FENCE_PRUNE_MS = 60 * 60_000;
@@ -188,10 +188,8 @@ export function watchFences(watcher: (fence: ComputerFence) => void): () => void
 }
 
 /**
- * Fences the machine `row` had in this process only, at once (no I/O): what a
- * reset does before anything else once its record committed, so nothing here
- * talks to the old agent while the cut runs. The message, or null when the
- * row had no token.
+ * Fences the machine `row` had in this process only, at once (no I/O). The
+ * message, or null when the row had no token.
  */
 export function fenceHere(row: {
   id: string;

@@ -48,11 +48,9 @@ export interface ComputerSpec {
   timezone?: string;
   /**
    * What names the machine where the provider names it (Sprites), instead of
-   * `computerId`. A full reset that keeps the old machine for a while
-   * (`retire`) gives the computer a new key, so its next machine is a new one
-   * and the old one is left alone. Absent on computers never reset that way.
-   * It may also be the provider's own name of an existing machine (the one an
-   * operator restored), which then names exactly that machine.
+   * `computerId`. A full reset gives the computer a new key, so its next
+   * machine is a new one while the old one is being deleted. Absent on
+   * computers never fully reset there.
    */
   machineKey?: string;
   /**
@@ -72,15 +70,6 @@ export interface StartOptions {
 export interface StopOptions {
   /** As `ComputerSpec.signal`. */
   signal?: AbortSignal;
-}
-
-/** What `ComputerProvider.retireInside` takes besides the machine. */
-export interface RetireInsideOptions {
-  /**
-   * Called before each step that changes the machine; throws when the caller
-   * no longer holds it (its claim on the record ran out), which ends the call.
-   */
-  check?: () => Promise<void>;
 }
 
 /** What skips the egress proxy unless `noProxy` says otherwise: the computer itself. */
@@ -113,10 +102,7 @@ export interface DestroyOptions {
   signal?: AbortSignal;
 }
 
-/**
- * What the provider sees; the server's own status adds `creating`, `starting`, `stopping`, `error`.
- * A retired machine reads `missing`: it serves nothing until it is put back.
- */
+/** What the provider sees; the server's own status adds `creating`, `starting`, `stopping`, `error`. */
 export type MachineStatus = 'running' | 'stopped' | 'missing';
 
 /**
@@ -172,6 +158,14 @@ export interface ComputerProvider {
    * its state directory, with the sign-ins, is still there.
    */
   readonly keepsMachineOnHomeReset?: boolean;
+  /**
+   * True when the provider names a machine by `ComputerSpec.machineKey`
+   * (Sprites): a full reset gives the computer a new key and deletes the old
+   * machine by its name afterwards, retried until it is gone, so the member
+   * can start the new one at once. Without it (Docker), a full reset removes
+   * the machine before it answers.
+   */
+  readonly machineKeyed?: boolean;
   status(ref: ComputerRef): Promise<MachineStatus>;
   agent(ref: ComputerRef): ComputerAgentClient;
   /** Fetches the sandbox image ahead of the first `create` (the setup wizard); Docker only. */
@@ -205,42 +199,6 @@ export interface ComputerProvider {
   listCheckpoints?(ref: ComputerRef): Promise<ComputerCheckpoint[]>;
   /** Replaces what the machine may reach. Sprites only. */
   applyEgressPolicy?(ref: ComputerRef, policy: EgressPolicy): Promise<void>;
-  /**
-   * Takes a machine a full reset replaces out of reach, at once and without
-   * waking it: from then on no request from outside reaches it (its URL is
-   * private), it reaches nothing (its egress policy denies everything), and
-   * every call on it but `status`, `listCheckpoints`, `restore`,
-   * `retireInside`, `unretire` and `destroy` is refused. Only metadata calls,
-   * no command inside it, so it works on a machine that will not wake. Its
-   * disk and checkpoints are kept, so an operator can bring it back
-   * (`unretire`) until the server deletes it with `destroy` (home and state).
-   * Safe to call again. A provider that has it keeps a machine through a full
-   * reset; one without it (Docker) removes it as before. Sprites only.
-   */
-  retire?(ref: ComputerRef): Promise<void>;
-  /**
-   * What the provider itself says of the machine, from metadata that does
-   * not wake it: `retired` (every part of the cut read back as `retire`
-   * leaves it: label, private URL, an egress policy that denies everything),
-   * `in_service`, or `gone`. For a check that must not take the server's
-   * record on trust.
-   */
-  retiredState?(ref: ComputerRef): Promise<'retired' | 'in_service' | 'gone'>;
-  /**
-   * The rest of a retire, inside the machine (it wakes it): its holds are
-   * dropped so it pauses, a hold racing with this one is refused, and its
-   * agent is stopped and removed and its agent token deleted. Refused on a
-   * machine `retire` did not take out of reach first, checked again before
-   * each step, as is `options.check`. Its time is bounded (Sprites:
-   * `SPRITES_RETIRE_INSIDE_MAX_MS`). Safe to call again.
-   */
-  retireInside?(ref: ComputerRef, options?: RetireInsideOptions): Promise<void>;
-  /**
-   * Puts a retired machine back in service as far as the provider goes: its
-   * URL and egress policy as configured. Its agent comes back with the next
-   * `create` for the same machine, which provisions it with a new token.
-   */
-  unretire?(ref: ComputerRef): Promise<void>;
 }
 
 // The computer's paths and the coding agents' users, paths and environment
