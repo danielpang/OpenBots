@@ -7670,6 +7670,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "app_platform": {
+          "name": "app_platform",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",

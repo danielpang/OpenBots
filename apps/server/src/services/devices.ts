@@ -196,6 +196,8 @@ export interface CreatePairingInput {
    * works only with the app's verifier.
    */
   codeChallenge?: string;
+  /** With `codeChallenge`: the app the code is for, and so the one route that takes it. */
+  appPlatform?: 'ios' | 'desktop';
 }
 
 /**
@@ -259,6 +261,7 @@ export async function createPairing(input: CreatePairingInput): Promise<CreatedP
           expiresAt,
           createdBy,
           codeChallenge: input.codeChallenge ?? null,
+          appPlatform: input.codeChallenge ? (input.appPlatform ?? null) : null,
         })
         .returning();
       return row!;
@@ -335,6 +338,8 @@ export async function completePairing(input: CompletePairingInput): Promise<Pair
 
   const { workspaceId, pairing } = await spendPairing(db, code, {
     codeVerifier: body.codeVerifier,
+    // A QR code has no challenge and pairs any device; an app sign-in's only the iOS app.
+    appPlatform: 'ios',
     check: async (tx, ws) => {
       if (await deviceKeyTaken(tx, ws, publicKey)) throw devicePaired();
     },
@@ -467,6 +472,9 @@ export function verifierMatches(verifier: string | undefined, challenge: string)
  * then the code is marked used with a conditional update, so two callers
  * racing for one code cannot both win. Every refusal of the code is the same
  * 401 PAIRING_INVALID. `requireChallenge` takes only an app sign-in's code.
+ * `appPlatform` is the app the calling route serves: an app sign-in's code
+ * made for the other app is refused like any other, and stays unspent (the
+ * route has already counted the try against the code's limit).
  */
 export async function spendPairing(
   db: Db,
@@ -474,8 +482,9 @@ export async function spendPairing(
   options: {
     codeVerifier?: string;
     requireChallenge?: boolean;
+    appPlatform: 'ios' | 'desktop';
     check?: (tx: Db, workspaceId: string) => Promise<void>;
-  } = {},
+  },
 ): Promise<{ workspaceId: string; pairing: PairingRow }> {
   const hash = pairingCodeHash(code);
   const workspaceId = await pairingWorkspace(db, hash);
@@ -500,6 +509,11 @@ export async function spendPairing(
         throw pairingInvalid();
       }
       if (options.requireChallenge && row.codeChallenge === null) throw pairingInvalid();
+      // An app sign-in's code is for one app: the iOS app's never makes a web
+      // session, the Mac app's never a device key.
+      if (row.codeChallenge !== null && row.appPlatform !== options.appPlatform) {
+        throw pairingInvalid();
+      }
       // An owner suspended or removed since the link was made pairs nothing.
       if (row.ownerId && !(await ownerActive(tx, { ownerId: row.ownerId, workspaceId }))) {
         throw pairingInvalid();

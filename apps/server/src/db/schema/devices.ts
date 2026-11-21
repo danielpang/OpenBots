@@ -90,6 +90,12 @@ export const devicePairings = pgTable(
      * Null for a QR pairing.
      */
     codeChallenge: text('code_challenge'),
+    /**
+     * The app an app sign-in's code is for: `ios` trades it at
+     * `POST /devices/pair`, `desktop` at `POST /app-sign-in/session`, and
+     * neither at the other's route. Null for a QR pairing.
+     */
+    appPlatform: text('app_platform').$type<'ios' | 'desktop'>(),
     expiresAt: timestamptz('expires_at').notNull(),
     usedAt: timestamptz('used_at'),
     createdBy: text('created_by').$type<PairingCreator>().notNull(),

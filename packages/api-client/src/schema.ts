@@ -11772,7 +11772,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description The code is unknown, used, expired, not an app sign-in code, or the verifier is wrong (PAIRING_INVALID) */
+        /** @description The code is unknown, used, expired, not a Mac app sign-in code, or the verifier is wrong (PAIRING_INVALID) */
         401: {
           headers: {
             [name: string]: unknown;

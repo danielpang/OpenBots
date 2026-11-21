@@ -121,7 +121,7 @@ export const appSignInRoutes = createRouter()
         },
         400: problemResponse('Invalid request'),
         401: problemResponse(
-          'The code is unknown, used, expired, not an app sign-in code, or the verifier is wrong (PAIRING_INVALID)',
+          'The code is unknown, used, expired, not a Mac app sign-in code, or the verifier is wrong (PAIRING_INVALID)',
         ),
         403: problemResponse('This server signs in from the Mac app only (LOCAL_ONLY)'),
         429: problemResponse('Too many attempts'),

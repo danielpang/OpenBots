@@ -83,6 +83,7 @@ export async function createAppSignInCode(input: {
     createdBy: 'app',
     actor: userActor(user),
     codeChallenge,
+    appPlatform: platform,
   });
   return { code: pairing.qr.code, expiresAt: pairing.expiresAt };
 }
@@ -115,6 +116,7 @@ export async function completeAppSession(input: {
   const { workspaceId, pairing } = await spendPairing(db, code, {
     codeVerifier: body.codeVerifier,
     requireChallenge: true,
+    appPlatform: 'desktop',
   });
 
   let sessionId: string | null = null;

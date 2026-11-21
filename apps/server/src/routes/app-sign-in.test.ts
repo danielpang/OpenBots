@@ -307,6 +307,53 @@ describe('app sign-in on a self-hosted install', () => {
     expect(await viaDevice.json()).toMatchObject({ code: 'DEVICE_KEY_NOT_ALLOWED' });
   });
 
+  it("takes each app's code at its own route only, and leaves a mismatched code unspent", async () => {
+    // The iOS app's code makes no web session...
+    const ios = pkce();
+    const { code: iosCode } = await newCode('ios', ios.challenge);
+    const asSession = await request(t, 'POST', '/app-sign-in/session', {
+      body: { code: iosCode, codeVerifier: ios.verifier, name: 'Not a Mac' },
+    });
+    expect(asSession.status).toBe(401);
+    expect(sessionCookieOf(asSession)).toBeUndefined();
+    expect(await asSession.json()).toMatchObject({ code: 'PAIRING_INVALID' });
+    // ...and is still good where it belongs.
+    await json(
+      request(t, 'POST', '/devices/pair', {
+        body: pairBody(iosCode, { codeVerifier: ios.verifier }),
+      }),
+    );
+
+    // The Mac app's code makes no device key...
+    const mac = pkce();
+    const { code: macCode } = await newCode('desktop', mac.challenge);
+    const asPair = await request(t, 'POST', '/devices/pair', {
+      body: pairBody(macCode, { codeVerifier: mac.verifier }),
+    });
+    expect(asPair.status).toBe(401);
+    expect(await asPair.json()).toMatchObject({ code: 'PAIRING_INVALID' });
+    // ...and is still good where it belongs.
+    const res = await request(t, 'POST', '/app-sign-in/session', {
+      body: { code: macCode, codeVerifier: mac.verifier, name: 'Right route' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("counts a try at the other app's route against the code's limit", async () => {
+    const mac = pkce();
+    const { code } = await newCode('desktop', mac.challenge);
+    for (let i = 0; i < 5; i++) {
+      const res = await request(t, 'POST', '/devices/pair', {
+        body: pairBody(code, { codeVerifier: mac.verifier }),
+      });
+      expect(res.status).toBe(401);
+    }
+    const late = await request(t, 'POST', '/app-sign-in/session', {
+      body: { code, codeVerifier: mac.verifier, name: 'Too late' },
+    });
+    expect(late.status).toBe(429);
+  });
+
   it('limits tries per client', async () => {
     const peer = '192.0.2.77';
     const statuses: number[] = [];
