@@ -11959,7 +11959,11 @@ export interface components {
       oauth: {
         github: boolean;
         google: boolean;
+        /** @description Sign in with Apple is configured (APPLE_CLIENT_ID and the rest) */
+        apple?: boolean;
       };
+      /** @description The iOS app may sign in with Apple natively (APPLE_APP_BUNDLE_ID is set beside Apple's other settings) */
+      nativeAppleSignIn?: boolean;
       /** @description A computer provider (Docker or a remote agent) is configured */
       computer?: boolean;
       /**

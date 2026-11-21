@@ -5,7 +5,11 @@ import { auth, capabilitiesQuery } from '../../app/api.js';
 import { webExtensions } from '../../app/extensions.js';
 import { afterAuthUrl } from './after-auth.js';
 
-const LABELS: Record<SocialProvider, string> = { github: 'GitHub', google: 'Google' };
+const LABELS: Record<SocialProvider, string> = {
+  github: 'GitHub',
+  google: 'Google',
+  apple: 'Apple',
+};
 
 /** One button per sign-in provider the server has configured; nothing otherwise. */
 export function OAuthButtons({

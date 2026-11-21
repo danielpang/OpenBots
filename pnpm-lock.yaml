@@ -925,6 +925,9 @@ importers:
       ioredis:
         specifier: 'catalog:'
         version: 5.11.1(supports-color@10.2.2)
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
       linkedom:
         specifier: ^0.18.13
         version: 0.18.13

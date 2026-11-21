@@ -6,6 +6,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { DEFAULT_CAPABILITIES } from '@openbots/shared';
 import { and, eq } from 'drizzle-orm';
 import { createApp, type App } from './app.js';
+import type { AppleProviderOptions } from './apple.js';
 import { createAuth } from './auth.js';
 import { loadConfig, type Config } from './config.js';
 import type { AppDeps } from './context.js';
@@ -101,11 +102,13 @@ export interface TestAppOptions {
   rateLimit?: boolean;
   /** The managed build's extensions (ee/server tests). */
   extensions?: ServerExtensions;
+  /** Apple's signing keys and clock, for Sign in with Apple tests (apple.ts). */
+  apple?: AppleProviderOptions;
 }
 
 export async function createTestApp(
   env: Record<string, string> = {},
-  { rateLimit = false, extensions }: TestAppOptions = {},
+  { rateLimit = false, extensions, apple }: TestAppOptions = {},
 ): Promise<TestApp> {
   const testDb = await createTestDb();
   const ownFilesDir = env.OPENBOTS_FILES_DIR
@@ -137,6 +140,7 @@ export async function createTestApp(
     limiter: infra.limiter,
     rateLimit,
     plugins: extensions?.authPlugins?.({ config, db, logger, infra }) ?? [],
+    apple,
   });
   const deps: AppDeps = { config, db, logger, infra, auth, ...(extensions ? { extensions } : {}) };
   const app = createApp(deps, { webDist: '' });

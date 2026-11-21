@@ -64,6 +64,7 @@
     "hono": "catalog:",
     "imapflow": "^2.4.3",
     "ioredis": "catalog:",
+    "jose": "6.2.12",
     "linkedom": "^0.18.13",
     "nodemailer": "^10.2.1",
     "pino": "catalog:",

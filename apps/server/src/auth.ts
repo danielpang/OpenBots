@@ -7,6 +7,7 @@ import { setSessionCookie } from 'better-auth/cookies';
 import { symmetricEncrypt } from 'better-auth/crypto';
 import { and, asc, eq, isNotNull, or } from 'drizzle-orm';
 import { z } from 'zod';
+import { APPLE_ISSUER, appleProvider, type AppleProviderOptions } from './apple.js';
 import { CLIENT_IP_HEADER } from './client-ip.js';
 import type { Config } from './config.js';
 import { schema, type Db } from './db/client.js';
@@ -18,8 +19,9 @@ import { parseMasterKey } from './secrets.js';
 import { recordAudit } from './services/audit.js';
 import { ensureWorkspace, lockWorkspace } from './workspace.js';
 
-// better-auth (plan section 3): email and password, optional GitHub and Google
-// sign-in, cookie sessions, and API keys (U4). Mounted at `/api/auth/*`.
+// better-auth (plan section 3): email and password, optional GitHub, Google and
+// Apple sign-in (apple.ts), cookie sessions, and API keys (U4). Mounted at
+// `/api/auth/*`.
 //
 // Organizations (plan section 21): a self-hosted install (OPENBOTS_DEPLOYMENT)
 // is one person's, in one implicit organization. Its first account is the
@@ -164,6 +166,7 @@ export function createAuth({
   limiter,
   rateLimit = true,
   plugins = [],
+  apple: appleOptions,
 }: {
   config: Config;
   db: Db;
@@ -173,9 +176,12 @@ export function createAuth({
   rateLimit?: boolean;
   /** better-auth plugins from the managed build (`ServerExtensions.authPlugins`). */
   plugins?: BetterAuthPlugin[];
+  /** Apple's keys and the clock, for tests (apple.ts). */
+  apple?: AppleProviderOptions;
 }): Auth {
   const origin = new URL(config.publicUrl).origin;
   const { github, google } = config.oauth;
+  const apple = config.oauth.apple ? appleProvider(config.oauth.apple, appleOptions) : undefined;
   // Read at each call: tests turn an install self-hosted while it runs.
   const selfHosted = () => config.deployment === 'self_hosted';
 
@@ -184,7 +190,8 @@ export function createAuth({
     baseURL: config.publicUrl,
     basePath: '/api/auth',
     secret: authSecret(config.masterKey),
-    trustedOrigins: [origin],
+    // Apple answers its sign-in with a form POST from its own origin.
+    trustedOrigins: apple ? [origin, APPLE_ISSUER] : [origin],
     // better-auth's own queries are the directory's (db/scope.ts).
     database: drizzleAdapter(withScope(db, { directory: true }), {
       provider: 'pg',
@@ -196,6 +203,7 @@ export function createAuth({
     socialProviders: {
       ...(github && { github }),
       ...(google && { google }),
+      ...(apple && { apple }),
     },
     rateLimit: {
       enabled: rateLimit,

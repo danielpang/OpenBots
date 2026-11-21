@@ -227,6 +227,25 @@ const envSchema = z.object({
   GITHUB_CLIENT_SECRET: optional(z.string()),
   GOOGLE_CLIENT_ID: optional(z.string()),
   GOOGLE_CLIENT_SECRET: optional(z.string()),
+  // Sign in with Apple (apple.ts). Checked together below.
+  APPLE_CLIENT_ID: optional(
+    z.string().regex(/^[A-Za-z0-9.-]{1,155}$/, "must be the Services ID, such as com.example.web"),
+  ),
+  APPLE_TEAM_ID: optional(z.string().regex(/^[A-Z0-9]{10}$/, 'must be the 10 character Team ID')),
+  APPLE_KEY_ID: optional(z.string().regex(/^[A-Z0-9]{10}$/, 'must be the 10 character Key ID')),
+  APPLE_PRIVATE_KEY: optional(
+    z
+      .string()
+      // One line in .env, with \n for each line break.
+      .transform((pem) => pem.replace(/\\n/g, '\n').trim())
+      .refine(
+        (pem) => /^-----BEGIN PRIVATE KEY-----\n[\s\S]+\n-----END PRIVATE KEY-----$/.test(pem),
+        { message: 'must be the .p8 key Apple generated for Sign in with Apple' },
+      ),
+  ),
+  APPLE_APP_BUNDLE_ID: optional(
+    z.string().regex(/^[A-Za-z0-9.-]{1,155}$/, "must be the iOS app's bundle ID"),
+  ),
   // The managed service's shared GitHub App (GH1, I17). Checked together below.
   GITHUB_APP_ID: optional(z.string().regex(/^\d{1,20}$/, 'must be the App ID, digits')),
   GITHUB_APP_SLUG: optional(
@@ -256,6 +275,22 @@ const envSchema = z.object({
 export type Deployment = 'self_hosted' | 'managed';
 export type StorageConfig = { driver: 'local' } | S3StorageConfig;
 export type StdioRunner = 'host' | 'computer';
+
+/**
+ * Sign in with Apple (apple.ts), when APPLE_CLIENT_ID, APPLE_TEAM_ID,
+ * APPLE_KEY_ID and APPLE_PRIVATE_KEY are all set. `appBundleId` lets the
+ * iOS app sign in natively too.
+ */
+export interface AppleSignInConfig {
+  /** The Services ID the web sign-in names. */
+  clientId: string;
+  teamId: string;
+  keyId: string;
+  /** The .p8 key, PEM, that signs the client secret. */
+  privateKey: string;
+  /** The iOS app's bundle ID, the audience of its native sign-in. */
+  appBundleId?: string;
+}
 
 export interface OAuthClient {
   clientId: string;
@@ -470,6 +505,7 @@ export interface Config {
   oauth: {
     github?: OAuthClient;
     google?: OAuthClient;
+    apple?: AppleSignInConfig;
   };
   /**
    * The managed service's shared GitHub App, when GITHUB_APP_ID, _SLUG,
@@ -554,6 +590,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`invalid configuration:\n  ${(error as Error).message}`, { cause: error });
   }
   const githubApp = githubAppFrom(e);
+  const apple = appleFrom(e);
   const artifactHost = artifactHostFrom(e);
   const storage = storageFrom(e);
   const raw = e as Record<string, unknown>;
@@ -636,6 +673,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oauth: {
       github: oauthClient(e.GITHUB_CLIENT_ID, e.GITHUB_CLIENT_SECRET),
       google: oauthClient(e.GOOGLE_CLIENT_ID, e.GOOGLE_CLIENT_SECRET),
+      ...(apple ? { apple } : {}),
     },
     ...(githubApp ? { githubApp } : {}),
     limits: resolveLimits(limitOverrides),
@@ -802,6 +840,40 @@ function githubAppFrom(e: z.infer<typeof envSchema>): GithubAppConfig | undefine
       ? { clientId: e.GITHUB_APP_CLIENT_ID, clientSecret: e.GITHUB_APP_CLIENT_SECRET! }
       : {}),
     webhookSecret: e.GITHUB_APP_WEBHOOK_SECRET!,
+  };
+}
+
+const APPLE_REQUIRED = [
+  'APPLE_CLIENT_ID',
+  'APPLE_TEAM_ID',
+  'APPLE_KEY_ID',
+  'APPLE_PRIVATE_KEY',
+] as const;
+
+/**
+ * Sign in with Apple: all four required variables or none. Unset, nothing
+ * about Apple shows anywhere. The bundle ID alone means nothing.
+ */
+function appleFrom(e: z.infer<typeof envSchema>): AppleSignInConfig | undefined {
+  const missing = APPLE_REQUIRED.filter((name) => !e[name]);
+  if (missing.length === APPLE_REQUIRED.length) {
+    if (e.APPLE_APP_BUNDLE_ID) {
+      throw new Error(
+        'invalid configuration:\n  APPLE_APP_BUNDLE_ID: set only with APPLE_CLIENT_ID, APPLE_TEAM_ID, APPLE_KEY_ID and APPLE_PRIVATE_KEY',
+      );
+    }
+    return undefined;
+  }
+  if (missing.length) {
+    const problems = missing.map((name) => `  ${name}: needed with the other APPLE_ variables`);
+    throw new Error(`invalid configuration:\n${problems.join('\n')}`);
+  }
+  return {
+    clientId: e.APPLE_CLIENT_ID!,
+    teamId: e.APPLE_TEAM_ID!,
+    keyId: e.APPLE_KEY_ID!,
+    privateKey: e.APPLE_PRIVATE_KEY!,
+    ...(e.APPLE_APP_BUNDLE_ID ? { appBundleId: e.APPLE_APP_BUNDLE_ID } : {}),
   };
 }
 

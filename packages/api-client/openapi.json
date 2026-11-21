@@ -889,9 +889,17 @@
               },
               "google": {
                 "type": "boolean"
+              },
+              "apple": {
+                "type": "boolean",
+                "description": "Sign in with Apple is configured (APPLE_CLIENT_ID and the rest)"
               }
             },
             "required": ["github", "google"]
+          },
+          "nativeAppleSignIn": {
+            "type": "boolean",
+            "description": "The iOS app may sign in with Apple natively (APPLE_APP_BUNDLE_ID is set beside Apple's other settings)"
           },
           "computer": {
             "type": "boolean",

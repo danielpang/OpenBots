@@ -4,7 +4,7 @@ import { ApiError } from './client.js';
 // OpenAPI document, so these few calls are written by hand. Errors keep
 // better-auth's `{ code, message }` shape and surface as `ApiError`.
 
-export type SocialProvider = 'github' | 'google';
+export type SocialProvider = 'github' | 'google' | 'apple';
 export type AuthClient = ReturnType<typeof createAuthClient>;
 
 export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetch) {
@@ -56,6 +56,19 @@ export function createAuthClient(baseUrl: string, fetchImpl: typeof fetch = fetc
       callbackURL: string;
       errorCallbackURL?: string;
     }) => (await post<{ url: string }>('/sign-in/social', input)).url,
+    /**
+     * Signs in with an ID token the provider gave a native app (Sign in with
+     * Apple on iOS), with the nonce the app made. Sets the session cookie.
+     */
+    signInIdToken: (input: { provider: 'apple'; token: string; nonce: string; name?: string }) =>
+      post<unknown>('/sign-in/social', {
+        provider: input.provider,
+        idToken: {
+          token: input.token,
+          nonce: input.nonce,
+          ...(input.name ? { user: { name: { firstName: input.name } } } : {}),
+        },
+      }),
     signOut: () => post<unknown>('/sign-out', {}),
     /** Changes the signed-in user's own name. */
     updateUser: (input: { name: string }) => post<unknown>('/update-user', input),
