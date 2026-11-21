@@ -1184,17 +1184,19 @@ const clockOf = (at?: Date) => (at ? sql`${at.toISOString()}::timestamptz` : sql
 /**
  * A `stopping` row that nobody holds: its holder's heartbeat (`status_at`,
  * the database's clock) is older than `STOPPING_TAKEOVER_MS`, and no reset's
- * retirement of its machine is still open (not settled, not given up). A
- * retirement holds the computer `stopping` until it is settled
- * (`audited_at`), by the reset or its job, whatever its age
- * (computer-retire.ts): a start in between would make the new machine while
- * the reset could still be undone, and its cleanup could then land on it.
+ * retirement of its machine is still open (not settled). A retirement holds
+ * the computer `stopping` until it is settled (`audited_at`), by the reset,
+ * its job, or the job giving up on it, whatever its age (computer-retire.ts):
+ * a start in between would make the new machine while the reset could still
+ * be undone, and its cleanup could then land on it. Settling releases the
+ * computer in the same transaction as the cleanup, so this never lets go of
+ * one whose reset has not cleaned up.
  */
 function abandonedStop(at?: Date): SQL {
   return and(
     eq(schema.computers.status, 'stopping'),
     sql`${schema.computers.statusAt} < ${clockOf(at)} - ${STOPPING_TAKEOVER_MS} * interval '1 millisecond'`,
-    sql`not exists (select 1 from ${schema.retiredComputers} r where r.computer_id = "computers"."id" and r.status in ('retiring', 'deleting') and r.audited_at is null and r.gave_up_at is null)`,
+    sql`not exists (select 1 from ${schema.retiredComputers} r where r.computer_id = "computers"."id" and r.status in ('retiring', 'deleting') and r.audited_at is null)`,
   )!;
 }
 
