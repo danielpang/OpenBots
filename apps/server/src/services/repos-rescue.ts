@@ -17,6 +17,7 @@ import {
   askGit,
   assertRunnable,
   branchSlug,
+  commitOf,
   dirtyLines,
   git,
   gitContextOn,
@@ -26,6 +27,7 @@ import {
   withCheckoutLock,
   worktreesOf,
   type CheckoutRow,
+  type ListedWorktree,
   type GitContext,
   type RepoRow,
   type RunningComputer,
@@ -146,41 +148,59 @@ async function rescueOne(
   // Every answer below decides whether work is saved: one git did not give
   // (the checkout's lock lost, a command that took too long) is reported as
   // work that could not be checked, never as nothing to save.
-  let sessions: { path: string; branch: string | null }[];
+  let sessions: ListedWorktree[];
   try {
     sessions = await worktreesOf(ctx, main);
   } catch (error) {
     return [result(null, false, `${COULD_NOT_CHECK}: ${said(error, true)}`)];
   }
-  const worktrees = [{ path: main, branch: null as string | null, isMain: true }].concat(
-    sessions.map((w) => ({ ...w, isMain: false })),
-  );
+  const worktrees: (ListedWorktree & { isMain: boolean })[] = [
+    { path: main, branch: null, isMain: true },
+    ...sessions.map((w) => ({ ...w, isMain: false })),
+  ];
   const out: RepoRescueResult[] = [];
   for (const worktree of worktrees) {
-    const at = ['-C', worktree.path];
     if (!worktree.isMain && busy.has(posix.normalize(worktree.path))) {
       const on = worktree.branch ? ` on ${worktree.branch}` : '';
       out.push(result(null, false, `Left alone${on}: a coding session is working there`));
       continue;
     }
+    // A worktree whose directory was removed by hand has no files, so no
+    // uncommitted changes, and nothing to run git in. Its branch, if it had
+    // one, is still in the checkout: its commits are read and saved from there.
+    if (worktree.prunable && !worktree.branch) continue;
+    const at = ['-C', worktree.prunable ? main : worktree.path];
+    const tip = worktree.prunable ? `refs/heads/${worktree.branch}` : 'HEAD';
     let branch: string | null;
     let commits: number;
     let dirty: boolean;
     try {
       // Exits 1 on a detached HEAD: an answer.
-      const head = await askGit(ctx, [...at, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
-      branch = worktree.branch ?? (head.code === 0 ? head.stdout.trim() : null);
-      const logArgs = [...at, 'log', 'HEAD', '--not', '--remotes', '--oneline'];
-      const log = await askGit(ctx, logArgs);
-      if (log.code !== 0) throw new GitError(logArgs, log);
-      commits = log.stdout.split('\n').filter((l) => l.trim()).length;
-      const statusArgs = [...at, 'status', '--porcelain'];
-      const status = await askGit(ctx, statusArgs);
-      if (status.code !== 0) throw new GitError(statusArgs, status);
-      const lines = status.stdout;
-      dirty =
-        (worktree.isMain ? dirtyLines(lines) : lines.split('\n').filter((l) => l.trim())).length >
-        0;
+      const head = worktree.prunable
+        ? null
+        : await askGit(ctx, [...at, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+      branch = worktree.branch ?? (head?.code === 0 ? head.stdout.trim() : null);
+      // An unborn HEAD (no commits yet), or a branch since deleted, has no
+      // commits to lose; `git log` would fail on it, so it is asked first.
+      if (await commitOf(ctx, at[1]!, tip)) {
+        const logArgs = [...at, 'log', tip, '--not', '--remotes', '--oneline'];
+        const log = await askGit(ctx, logArgs);
+        if (log.code !== 0) throw new GitError(logArgs, log);
+        commits = log.stdout.split('\n').filter((l) => l.trim()).length;
+      } else {
+        commits = 0;
+      }
+      if (worktree.prunable) {
+        dirty = false;
+      } else {
+        const statusArgs = [...at, 'status', '--porcelain'];
+        const status = await askGit(ctx, statusArgs);
+        if (status.code !== 0) throw new GitError(statusArgs, status);
+        const lines = status.stdout;
+        dirty =
+          (worktree.isMain ? dirtyLines(lines) : lines.split('\n').filter((l) => l.trim())).length >
+          0;
+      }
     } catch (error) {
       const on = worktree.branch ? ` on ${worktree.branch}` : '';
       out.push(result(null, false, `${COULD_NOT_CHECK}${on}: ${said(error, true)}`));
@@ -207,7 +227,7 @@ async function rescueOne(
       if (stash && /^[0-9a-f]{40,64}$/.test(stash)) {
         await git(ctx, [...at, 'update-ref', `refs/heads/${name}`, stash]);
       } else if (commits) {
-        await git(ctx, [...at, 'branch', name, 'HEAD']);
+        await git(ctx, [...at, 'branch', name, tip]);
       } else {
         out.push(
           result(null, false, `Not saved${where}: only new files, which rescue does not save`),

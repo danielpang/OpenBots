@@ -299,6 +299,20 @@ export async function askGit(ctx: GitContext, args: string[], options?: RunnerOp
 }
 
 /**
+ * The commit `ref` names in the repository at `at`, or null when it names
+ * none: an unborn HEAD (a repository with no commits yet, or a fresh clone
+ * of one) or a branch that is not there. `rev-parse --verify --quiet` exits
+ * 1 for those, an answer; any other exit, or no answer, throws.
+ */
+export async function commitOf(ctx: GitContext, at: string, ref = 'HEAD'): Promise<string | null> {
+  const args = ['-C', at, 'rev-parse', '--verify', '--quiet', ref];
+  const run = await askGit(ctx, args);
+  if (run.code === 1) return null;
+  if (run.code !== 0) throw new GitError(args, run);
+  return run.stdout.trim() || null;
+}
+
+/**
  * `owner/name` and the host of a remembered repository: its stored full
  * name, on the host its remote names (`parseRepoUrl`), github.com when the
  * remote cannot be read. Throws when neither says which repository it is.
@@ -773,7 +787,7 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         .set({ defaultBranch: detected, updatedAt: new Date() })
         .where(eq(schema.repos.id, repo.id));
     }
-    const head = (await git(ctx, ['-C', path, 'rev-parse', 'HEAD'])).trim();
+    const head = await commitOf(ctx, path);
     const counts = await askGit(ctx, [
       '-C',
       path,
@@ -791,7 +805,7 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         state: dirty ? 'dirty' : behind > 0 ? 'behind' : 'ready',
         ahead: Number.isFinite(ahead) ? ahead : 0,
         behind: Number.isFinite(behind) ? behind : 0,
-        headSha: head || null,
+        headSha: head,
         lastFetchAt: new Date(),
         error: null,
         updatedAt: new Date(),
@@ -931,12 +945,26 @@ export async function onDisk(ctx: GitContext, path: string): Promise<boolean> {
   return run.code === 0;
 }
 
-/** `git worktree list --porcelain`: each worktree's path and branch (null when detached). */
-export function parseWorktreeList(stdout: string): { path: string; branch: string | null }[] {
-  const out: { path: string; branch: string | null }[] = [];
+/** A worktree `git worktree list` names. */
+export interface ListedWorktree {
+  path: string;
+  /** Null when detached. */
+  branch: string | null;
+  /**
+   * Its directory is gone (removed by hand): git still lists it until
+   * `git worktree prune`, but there are no files there to read.
+   */
+  prunable?: true;
+}
+
+/** `git worktree list --porcelain`: each worktree's path and branch, and whether it is gone. */
+export function parseWorktreeList(stdout: string): ListedWorktree[] {
+  const out: ListedWorktree[] = [];
   for (const line of stdout.split('\n')) {
     if (line.startsWith('worktree ')) out.push({ path: line.slice(9).trim(), branch: null });
-    else if (line.startsWith('branch ') && out.length) {
+    else if ((line === 'prunable' || line.startsWith('prunable ')) && out.length) {
+      out[out.length - 1]!.prunable = true;
+    } else if (line.startsWith('branch ') && out.length) {
       out[out.length - 1]!.branch = line
         .slice(7)
         .trim()
@@ -947,10 +975,11 @@ export function parseWorktreeList(stdout: string): { path: string; branch: strin
 }
 
 /**
- * The sessions' worktrees of a checkout: every worktree but the main one.
- * Throws when git cannot list them: no list is not an empty one.
+ * The sessions' worktrees of a checkout: every worktree but the main one,
+ * those whose directory is gone (`prunable`) included. Throws when git
+ * cannot list them: no list is not an empty one.
  */
-export async function worktreesOf(ctx: GitContext, path: string) {
+export async function worktreesOf(ctx: GitContext, path: string): Promise<ListedWorktree[]> {
   const list = await askGit(ctx, ['-C', path, 'worktree', 'list', '--porcelain'], {
     timeoutMs: SHORT_MS,
   });

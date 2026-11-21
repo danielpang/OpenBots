@@ -9,6 +9,7 @@ import {
   REPO_PATH,
   type CoderWorld,
 } from './__fixtures__/coders/setup.js';
+import { realRepo } from './__fixtures__/coders/real-git.js';
 import { agentFor } from './computer.js';
 import {
   checkoutPathFor,
@@ -349,6 +350,26 @@ describe('repos checkout', () => {
         : defaultGit(args);
     const row = await w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId));
     expect(row.state).toBe('dirty');
+  });
+
+  it('makes a checkout of an empty repository, with no head yet', async () => {
+    // A repository with no commits: HEAD is unborn, origin has no branch.
+    const repo = realRepo({ empty: true });
+    try {
+      w.coder.git = (args) =>
+        repo.answer(args, args.includes('-C') ? args[args.indexOf('-C') + 1] : undefined) ??
+        defaultGit(args);
+      const row = await w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId));
+      expect(row).toMatchObject({
+        state: 'ready',
+        headSha: null,
+        ahead: 0,
+        behind: 0,
+        error: null,
+      });
+    } finally {
+      repo.remove();
+    }
   });
 
   it('never marks a checkout ready when git gives no answer about origin', async () => {
