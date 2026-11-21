@@ -976,6 +976,482 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/billing': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** The organization's plan, this period's usage and the spending limits */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Billing */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Billing'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/billing/settings': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Set what happens past the allowance, and the spending limit on overage
+     * @description `ceilingUsd` null goes back to the default, the monthly seat total. Takes effect for new work.
+     */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['BillingSettings'];
+        };
+      };
+      responses: {
+        /** @description Billing */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Billing'];
+          };
+        };
+        /** @description Invalid settings */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not an admin */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    trace?: never;
+  };
+  '/api/v1/billing/members/{id}/cap': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Cap a member's computer hours a period
+     * @description null removes the cap. A personal limit above a new cap counts as the cap.
+     */
+    put: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['MemberCap'];
+        };
+      };
+      responses: {
+        /** @description The member */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['MemberUsage'];
+          };
+        };
+        /** @description Invalid hours */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not an admin */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such member */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/billing/limit': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Set your own limit on computer hours a period
+     * @description null removes it. Never above the cap an owner or admin set (400 `ABOVE_MEMBER_CAP`).
+     */
+    put: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['PersonalLimit'];
+        };
+      };
+      responses: {
+        /** @description You */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['MemberUsage'];
+          };
+        };
+        /** @description Invalid hours, or above your cap */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/billing/checkout': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Start a trial or a plan, or change the plan
+     * @description Without a subscription: a Stripe Checkout address (`url`) for the plan, with a card and, the first time, a 14 day trial. With one: the subscription changes to the plan at once (`changed`) and a trial ends now. A change that raises the price is charged prorated, and one back up to what this period already paid for costs nothing more; a change that lowers it gives no credit, the lower price starts at renewal, and the hours already granted stay until then. The overage policy chosen here is saved first.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['BillingCheckout'];
+        };
+      };
+      responses: {
+        /** @description Go to `url`, or the plan changed */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['BillingCheckoutResult'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not an admin */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The subscription waits for a payment (`SUBSCRIPTION_UNPAID`) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Stripe did not answer as expected */
+        502: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Payments are not set up on this server (`BILLING_NOT_CONFIGURED`) */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/billing/portal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Stripe's billing portal: cards, invoices, cancelling */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Go to `url` */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['BillingPortal'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not an admin */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No payment details yet (`NO_BILLING_ACCOUNT`) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Payments are not set up on this server (`BILLING_NOT_CONFIGURED`) */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/billing/webhook': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Stripe's webhook
+     * @description Signature checked on the raw body (`Stripe-Signature`). The only place a purchase is recorded; a repeated event changes nothing.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Received */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': {
+              received: boolean;
+            };
+          };
+        };
+        /** @description No signature, or a wrong one */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The webhook is not set up on this server */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1085,6 +1561,117 @@ export interface components {
       invitedBy: string | null;
       /** Format: date-time */
       expiresAt: string;
+    };
+    Billing: {
+      plan: {
+        /** @enum {string} */
+        kind: 'none' | 'trial' | 'paid' | 'inactive';
+        id: components['schemas']['BillingPlanId'];
+        name: string;
+        /** @description Stripe's subscription status */
+        status: string | null;
+        /** Format: date-time */
+        trialEndsAt: string | null;
+      };
+      seats: {
+        active: number;
+        billed: number | null;
+        perSeatUsd: number | null;
+        /** @description The next invoice, before overage */
+        monthlyTotalUsd: number | null;
+      };
+      period: {
+        /** Format: date-time */
+        start: string;
+        /** Format: date-time */
+        end: string;
+      };
+      usage: {
+        allowanceHours: number;
+        usedHours: number;
+        overageHours: number;
+        /** @description What the overage comes to so far */
+        overageUsd: number;
+        /**
+         * @description What stops new work now, if anything
+         * @enum {string|null}
+         */
+        stopped: 'trial' | 'allowance' | 'ceiling' | 'inactive' | 'none' | null;
+      };
+      overage: {
+        policy: components['schemas']['OveragePolicy'];
+        usdPerHour: number;
+        ceilingUsd: number;
+        /** @description The monthly seat total */
+        ceilingIsDefault: boolean;
+      };
+      me: components['schemas']['MemberUsage'];
+      /** @description Every member for owners and admins; the caller alone otherwise */
+      members: components['schemas']['MemberUsage'][];
+      activity: {
+        activity: string;
+        fromPlan: string | null;
+        toPlan: string | null;
+        amountTotal: number | null;
+        currency: string | null;
+        /** Format: date-time */
+        occurredAt: string;
+      }[];
+      catalog: {
+        id: components['schemas']['BillingPlanId'];
+        name: string;
+        perSeatUsd: number;
+        minimumSeats: number;
+        hoursPerSeat: number;
+        summary: string;
+        /** @description For the active members now */
+        monthlyTotalUsd: number;
+      }[];
+      trial: {
+        days: number;
+        hours: number;
+        available: boolean;
+      };
+      canManage: boolean;
+      /** @description Checkout and the portal work on this server */
+      stripe: boolean;
+      /** @description False only on a development server */
+      enforced: boolean;
+    };
+    /** @enum {string|null} */
+    BillingPlanId: 'pro' | 'team' | null;
+    /** @enum {string} */
+    OveragePolicy: 'stop' | 'allow';
+    MemberUsage: {
+      /** Format: uuid */
+      userId: string;
+      name: string | null;
+      usedHours: number;
+      /** @description Set by an owner or admin */
+      capHours: number | null;
+      /** @description Set by the member */
+      personalHours: number | null;
+    };
+    BillingSettings: {
+      overagePolicy?: components['schemas']['OveragePolicy'];
+      ceilingUsd?: number | null;
+    };
+    MemberCap: {
+      capHours: number | null;
+    };
+    PersonalLimit: {
+      personalHours: number | null;
+    };
+    BillingCheckoutResult: {
+      url?: string;
+      changed?: boolean;
+    };
+    BillingCheckout: {
+      plan: components['schemas']['BillingPlanId'];
+      overagePolicy?: components['schemas']['OveragePolicy'];
+    };
+    BillingPortal: {
+      url: string;
     };
   };
   responses: never;

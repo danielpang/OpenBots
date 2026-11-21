@@ -81,6 +81,7 @@ import {
   shownFailure,
   startComputer,
 } from './computer.js';
+import { admitComputerWork } from './computer-admission.js';
 import { fenceOf, watchFences } from './computer-fence.js';
 import type { ComputerUse } from './computer-use.js';
 import { resolveGitCredential } from './git-credentials.js';
@@ -477,6 +478,16 @@ class SessionRunner {
     }
     this.repo = repo;
 
+    // Asked again here: a session can wait in the queue, and the organization
+    // may have run out of hours since it was asked to start.
+    await admitComputerWork(deps, {
+      workspaceId: session.workspaceId,
+      ownerId: session.ownerId,
+      kind: 'coding_session',
+      botId: bot.id,
+      sessionId: session.id,
+      ...(session.runId ? { runId: session.runId } : {}),
+    });
     const { computer } = await startComputer(deps, this.owner, { type: 'bot', id: bot.id });
     this.computerId = computer.id;
     this.fence = fenceOf(computer.agentToken);

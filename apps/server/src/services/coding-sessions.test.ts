@@ -360,6 +360,33 @@ describe('coding agents', () => {
       await t.db.delete(schema.coderLogins);
     });
 
+    it('refuses a session the managed build will not admit, before making it', async () => {
+      await signIn('claude');
+      const run = await waitingRun();
+      const before = (await t.db.select().from(schema.codingSessions)).length;
+      t.deps.extensions = {
+        admitComputerWork: () => ({
+          code: 'MEMBER_CAP_REACHED',
+          message: 'You have used the 10 computer hours your admin set for you this period.',
+        }),
+      };
+      try {
+        await expect(
+          t.inOrganization(async () =>
+            (await services(run.id)).start({
+              agent: 'claude',
+              repo: 'acme/relay',
+              prompt: 'Fix it',
+              mode: 'edit',
+            }),
+          ),
+        ).rejects.toMatchObject({ status: 402, code: 'MEMBER_CAP_REACHED' });
+      } finally {
+        delete t.deps.extensions;
+      }
+      expect(await t.db.select().from(schema.codingSessions)).toHaveLength(before);
+    });
+
     it('posts the session widget with the run waiting, and enqueues the runner', async () => {
       await signIn('claude');
       const run = await waitingRun();

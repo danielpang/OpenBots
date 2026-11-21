@@ -346,8 +346,10 @@ describe('a full reset deletes the old computer', () => {
     const status = (await (
       await m.call('GET', `/computer/reset/${await m.prepare()}`)
     ).json()) as Record<string, unknown>;
+    // `errorCode` (a rescue the managed service refused) is newer than the
+    // released apps, which ignore it.
     expect(Object.keys(status).sort()).toEqual(
-      ['error', 'expiresAt', 'results', 'runningSessions', 'status', 'unsaved'].sort(),
+      ['error', 'errorCode', 'expiresAt', 'results', 'runningSessions', 'status', 'unsaved'].sort(),
     );
     const soft = await m.call('POST', '/computer/reset', {
       requestId: await m.prepare(),

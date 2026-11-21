@@ -423,6 +423,7 @@ export async function signOutCoder(
   agent: CoderAgent,
 ): Promise<CoderAccountInfo> {
   if (computerAvailable(deps)) {
+    // Not asked of the managed build on purpose (computer-admission.ts).
     const { computer } = await startComputer(deps, owner);
     const done = await runAsCoder(agentFor(deps, computer), 'node', [SUBSCRIPTION_SIGN_OUT, agent]);
     if (done.code !== 0) {
@@ -480,6 +481,8 @@ export async function checkCoderSignIn(
   if (!computerAvailable(deps)) {
     throw new DomainError(503, 'COMPUTER_UNAVAILABLE', 'There is no computer to check on');
   }
+  // Not asked of the managed build on purpose (computer-admission.ts): a
+  // member at a limit must still be able to check a sign-in.
   const { computer } = await startComputer(deps, owner);
   const client = agentFor(deps, computer);
   const config = CODER_CONFIG_DIRS[agent];

@@ -7,6 +7,7 @@ import {
   APP_ROLE,
   DIRECTORY_ROLE,
   asDirectory,
+  billingCustomerWorkspace,
   deviceWorkspaces,
   devicesExist,
   dueRoutineWorkspaces,
@@ -328,6 +329,41 @@ describe('row-level security between organizations', () => {
     );
     expect((ids as { workspace_id: string }[]).length).toBe(2);
     await t.db.delete(schema.gitConnections);
+  });
+
+  it("finds a Stripe customer's organization, and keeps billing rows to their organization", async () => {
+    await t.db.insert(schema.organizationBilling).values([
+      { workspaceId: orgA, plan: 'pro', stripeCustomerId: 'cus_a', ceilingUsd: 40 },
+      { workspaceId: orgB, plan: 'team', stripeCustomerId: 'cus_b' },
+    ]);
+    // Without an organization in scope nothing shows; the lookup still answers.
+    expect(await t.deps.db.select().from(schema.organizationBilling)).toEqual([]);
+    expect(await billingCustomerWorkspace(t.deps.db, 'cus_b')).toBe(orgB);
+    expect(await billingCustomerWorkspace(t.deps.db, 'cus_none')).toBeNull();
+    const inA = await inWorkspace(orgA, () =>
+      t.deps.db.select({ plan: schema.organizationBilling.plan }).from(schema.organizationBilling),
+    );
+    expect(inA).toEqual([{ plan: 'pro' }]);
+    // The function's owner reads the two columns it needs, and no other.
+    const ceiling = await failure(t.db, (tx) =>
+      as(tx, 'openbots_system', null, (q) => q(sql`select ceiling_usd from organization_billing`)),
+    );
+    expect(ceiling).toMatch(/permission denied/);
+    // Another organization's period cannot be written from A.
+    const written = await failure(t.db, (tx) =>
+      as(tx, APP_ROLE, orgA, (q) =>
+        q(sql`insert into billing_periods (workspace_id, period_start, period_end, plan, base_seats, paid_seats, allowance_seconds)
+              values (${orgB}, now(), now(), 'pro', 1, 1, 360000)`),
+      ),
+    );
+    expect(written).toMatch(/row-level security/);
+    const [fn] = rowsOf<{ definer: boolean; owner: string }>(
+      await t.db.execute(sql`
+        select p.prosecdef as definer, pg_get_userbyid(p.proowner) as owner
+        from pg_proc p where p.proname = 'openbots_billing_customer_workspace'`),
+    );
+    expect(fn).toEqual({ definer: true, owner: 'openbots_system' });
+    await t.db.delete(schema.organizationBilling);
   });
 
   it('lets the app role keep used GitHub flow nonces with no organization set', async () => {

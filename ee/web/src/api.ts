@@ -15,6 +15,14 @@ export type Member = components['schemas']['OrganizationMember'];
 export type Invitation = components['schemas']['OrganizationInvitation'];
 export type Role = components['schemas']['OrganizationRole'];
 export type AuditEntry = components['schemas']['AuditEntry'];
+export type Billing = components['schemas']['Billing'];
+export type BillingPlanId = components['schemas']['BillingPlanId'];
+export type MemberUsage = components['schemas']['MemberUsage'];
+
+export const billingQuery = queryOptions({
+  queryKey: ['billing'],
+  queryFn: () => unwrap(orgApi.GET('/api/v1/billing')),
+});
 
 export const organizationsQuery = queryOptions({
   queryKey: ['organizations'],

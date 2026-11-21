@@ -30,6 +30,7 @@ import {
   type ComputerRow,
   type ScreenRow,
 } from '../services/computer.js';
+import { admitComputerWork } from '../services/computer-admission.js';
 import { prepareReset, resetComputer, resetStatus } from '../services/computer-reset.js';
 import { fileTooLarge, uploadLimit } from '../services/files.js';
 
@@ -122,6 +123,10 @@ const ResetStatusSchema = z
       .string()
       .nullable()
       .openapi({ description: 'Set when the rescue failed outright: what it saved is unknown' }),
+    errorCode: z.string().nullable().openapi({
+      description:
+        'Set with `error` when the managed service would not start the computer for the rescue (its stable code, such as `PLAN_ALLOWANCE_REACHED`): nothing was checked, and POST /computer/reset answers 402 with this code until a rescue can run',
+    }),
     runningSessions: z
       .array(
         z.object({
@@ -223,9 +228,22 @@ const computerResponse = (description: string) => ({
 const unavailable = problemResponse(
   'No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)',
 );
+const refused = problemResponse(
+  'New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words',
+);
 const settingUp = computerResponse(
   'Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
 );
+
+/** The member's own start, restart or wake is new work (services/computer-admission.ts). */
+function admitManual(c: Context<AppEnv>) {
+  const { deps, user } = c.var;
+  return admitComputerWork(deps, {
+    workspaceId: user.workspaceId,
+    ownerId: user.id,
+    kind: 'manual',
+  });
+}
 
 /**
  * A start that a provisioning job finishes in the background (Sprites)
@@ -327,10 +345,14 @@ export const computerRoutes = createRouter()
         200: computerResponse('Running'),
         202: settingUp,
         ...authProblems,
+        402: refused,
         503: unavailable,
       },
     }),
-    async (c) => started(c, startComputer(c.var.deps, c.var.user)),
+    async (c) => {
+      await admitManual(c);
+      return started(c, startComputer(c.var.deps, c.var.user));
+    },
   )
   .openapi(
     createRoute({
@@ -348,11 +370,13 @@ export const computerRoutes = createRouter()
           content: { 'application/json': { schema: ComputerStateSchema } },
         },
         ...authProblems,
+        402: refused,
       },
     }),
     async (c) => {
       const { deps, user } = c.var;
-      await wakeComputer(deps, user, { create: true });
+      await admitManual(c);
+      await wakeComputer(deps, user, { create: true, admitted: true });
       const row = await getComputer(deps, user);
       return c.json(
         { available: computerAvailable(deps), computer: row ? await computerOut(c, row) : null },
@@ -393,6 +417,7 @@ export const computerRoutes = createRouter()
         200: computerResponse('Running'),
         202: settingUp,
         ...authProblems,
+        402: refused,
         404: problemResponse('The account has no computer yet'),
         503: unavailable,
       },
@@ -400,6 +425,7 @@ export const computerRoutes = createRouter()
     async (c) => {
       const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
+      await admitManual(c);
       return started(c, restartComputer(c.var.deps, c.var.user, row));
     },
   )
@@ -454,7 +480,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again. A rescue the managed service refused to start the computer for (`errorCode` on the status) refuses it too (402 with that code): nothing on the computer was checked, so nothing is removed.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -479,6 +505,9 @@ export const computerRoutes = createRouter()
       responses: {
         202: computerResponse('Reset: stopped with no machine; the next start makes a fresh one'),
         ...authProblems,
+        402: problemResponse(
+          'The rescue could not run because the managed service would not start the computer (the code says why): nothing was reset, and the prepare stays',
+        ),
         403: problemResponse(
           '`resetSignIns` from an API key: only a person may fully reset a computer (`PERSON_REQUIRED`)',
         ),
@@ -571,6 +600,7 @@ export const computerRoutes = createRouter()
           content: { 'application/json': { schema: ScreenSchema } },
         },
         ...authProblems,
+        402: refused,
         404: problemResponse('No such Bot, or (hand back) no screen yet'),
         503: unavailable,
       },

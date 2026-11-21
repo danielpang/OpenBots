@@ -2,6 +2,7 @@
 import type { WsClient } from '@openbots/api-client';
 import {
   COMPUTER_IDLE_CLOSE_CODE,
+  COMPUTER_REFUSED_CLOSE_CODE,
   COMPUTER_OFF_CLOSE_CODE,
   type WsEvent,
   type WsEventOf,
@@ -136,7 +137,7 @@ class FakeSocket {
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
+  onclose: ((event: { code: number; reason?: string }) => void) | null = null;
   listeners: ((event: { code: number }) => void)[] = [];
   constructor(readonly url: string) {
     FakeSocket.sockets.push(this);
@@ -819,6 +820,16 @@ describe('the Computer page', () => {
     expect(FakeSocket.sockets).toHaveLength(2);
   });
 
+  it('shows why a terminal was refused as new work, in the words the server sent', async () => {
+    render(<ComputerPage />);
+    await until(() => FakeSocket.sockets.length === 1, 'the terminal socket');
+    const reason = 'You have used the 25 computer hours your admin set for you this period.';
+    act(() => FakeSocket.sockets[0]!.onclose?.({ code: COMPUTER_REFUSED_CLOSE_CODE, reason }));
+    expect(host.textContent).toContain(reason);
+    click(button('Reconnect'));
+    expect(FakeSocket.sockets).toHaveLength(2);
+  });
+
   it('shows no idle time for a computer that sleeps on its own (Sprites)', async () => {
     state = {
       available: true,
@@ -1013,6 +1024,47 @@ describe('Reset computer', () => {
     click(button('Check again'));
     await until(() => posts('/api/v1/computer/reset/prepare').length === 2, 'a new check');
   });
+
+  it(
+    'says why nothing was checked when the computer could not start, and offers no reset',
+    { timeout: 15_000 },
+    async () => {
+      const handle = server.handle;
+      server.handle = async (request) => {
+        const { pathname } = new URL(request.url, 'http://localhost');
+        if (pathname === '/api/v1/computer/reset/prepare') {
+          return Response.json({ requestId: 'r1' }, { status: 202 });
+        }
+        if (pathname === '/api/v1/computer/reset/r1') {
+          return Response.json({
+            status: 'done',
+            results: [],
+            unsaved: [],
+            runningSessions: [],
+            error:
+              'This organization has used the 100 computer hours its plan includes this period.',
+            errorCode: 'PLAN_ALLOWANCE_REACHED',
+          });
+        }
+        if (pathname === '/api/v1/repos') return Response.json({ repos: [] });
+        return handle(request);
+      };
+      render(<ComputerPage />);
+      await until(() => !!button('Reset computer'), 'Reset computer');
+      click(button('Reset computer'));
+      await until(() => !!document.querySelector('[data-reset="checked"]'), 'the results');
+      const dialog = document.querySelector('[data-reset]')!;
+      expect(dialog.querySelector('[data-reset-error]')!.textContent).toBe(
+        'Unpushed work could not be checked, so the computer cannot be reset yet. This organization has used the 100 computer hours its plan includes this period.',
+      );
+      // Never the reassurance that everything was pushed.
+      expect(dialog.querySelector('[data-reset-clean]')).toBeNull();
+      expect(dialog.textContent).not.toMatch(/[–—]| - /);
+      expect(button('Reset')!.disabled).toBe(true);
+      click(button('Check again'));
+      await until(() => posts('/api/v1/computer/reset/prepare').length === 2, 'a new check');
+    },
+  );
 });
 
 describe('terminal attach (CA7, I15)', () => {

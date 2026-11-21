@@ -65,6 +65,7 @@ import {
   type UseReason,
 } from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
+import { admitComputerWork, computerWorkRefusal } from './computer-admission.js';
 import {
   computerBusy,
   computerChanged,
@@ -1154,7 +1155,9 @@ export type Wake =
   /** A start, an update or a stop is under way: left to finish. */
   | 'busy'
   /** A start began in the background. */
-  | 'starting';
+  | 'starting'
+  /** The managed build refused new computer work (computer-admission.ts): nothing started. */
+  | 'refused';
 
 export interface WakeOptions {
   /** Creates the computer on first use (the Mac app's launch); a message never does. */
@@ -1162,6 +1165,8 @@ export interface WakeOptions {
   /** Marks a running computer used: a message is activity, the app's launch is not. */
   touch?: boolean;
   by?: AuditActor;
+  /** The caller asked `admitComputerWork` already (the wake route). */
+  admitted?: boolean;
 }
 
 /** Statuses a wake leaves alone. */
@@ -1315,7 +1320,12 @@ async function holdingStop<T>(
 export async function wakeComputer(
   deps: AppDeps,
   owner: Owner,
-  { create = false, touch: used = false, by = { type: 'user', id: owner.id } }: WakeOptions = {},
+  {
+    create = false,
+    touch: used = false,
+    by = { type: 'user', id: owner.id },
+    admitted = false,
+  }: WakeOptions = {},
 ): Promise<Wake> {
   if (!computerAvailable(deps)) return 'unavailable';
   if (starting.has(startKey(owner))) return 'busy';
@@ -1326,6 +1336,18 @@ export async function wakeComputer(
     return 'running';
   }
   if (row && BUSY.has(row.status)) return 'busy';
+  // A start is new work: a message does not start a computer the managed
+  // build would refuse (computer-admission.ts).
+  if (
+    !admitted &&
+    (await computerWorkRefusal(deps, {
+      workspaceId: owner.workspaceId,
+      ownerId: owner.id,
+      kind: 'manual',
+    }))
+  ) {
+    return 'refused';
+  }
   startComputer(deps, owner, by).catch((error: unknown) =>
     deps.logger.warn(
       { err: error, ownerId: owner.id, workspaceId: owner.workspaceId },
@@ -1442,16 +1464,22 @@ export function beginComputerUse(
 export interface ComputerUseScope {
   /** Begins the use on the first call; later calls do nothing. */
   begin(row: ComputerRow): void;
+  /** When the use began (ms since the epoch), or null before the first call. */
+  since(): number | null;
   end(): Promise<void>;
 }
 
 export function computerUseScope(deps: AppDeps, reason: UseReason): ComputerUseScope {
   let use: ComputerUse | null = null;
+  let since: number | null = null;
   let ended = false;
   return {
     begin(row) {
-      if (!ended) use ??= beginComputerUse(deps, row, reason);
+      if (ended || use) return;
+      use = beginComputerUse(deps, row, reason);
+      since = Date.now();
     },
+    since: () => since,
     async end() {
       ended = true;
       const current = use;
@@ -2300,6 +2328,18 @@ export async function setScreenControl(
   await assertBotOwner(deps.db, user, botId);
   let screen = await screenOf(deps, botId);
   if (take) {
+    // Taking the screen of a computer that is not running starts it, which
+    // is the member's own new work (computer-admission.ts). On a running
+    // computer it is not asked: a run waiting for the owner's sign-in (K8)
+    // is work under way.
+    if ((await getComputer(deps, user))?.status !== 'running') {
+      await admitComputerWork(deps, {
+        workspaceId: user.workspaceId,
+        ownerId: user.id,
+        kind: 'manual',
+        botId,
+      });
+    }
     const { computer } = await startComputer(deps, user);
     const agent = agentFor(deps, computer);
     screen = await ensureScreen(
@@ -2438,6 +2478,17 @@ export function computerServices(deps: AppDeps, options: ComputerRunOptions): Co
   // Calls in one step share a start; it is logged once.
   const logged = new WeakSet<Started>();
   const ready = async () => {
+    // New work is asked before it starts the computer; the run's later calls
+    // only about the run's own length (computer-admission.ts).
+    const since = options.use?.since() ?? null;
+    await admitComputerWork(deps, {
+      workspaceId: bot.workspaceId,
+      ownerId: bot.ownerId,
+      kind: 'run',
+      botId: bot.id,
+      runId,
+      ...(since === null ? {} : { continuingSince: new Date(since) }),
+    });
     const started = await startComputer(deps, owner, { type: 'bot', id: bot.id });
     const { computer, durationMs, updated } = started;
     if (durationMs !== null && !logged.has(started)) {

@@ -149,8 +149,11 @@ const toEntry = (row: AuditListing['items'][number]) => ({
   createdAt: iso(row.createdAt),
 });
 
-export function organizationRoutes(email: EmailOptions) {
-  const deps = (c: Context<AppEnv>): OrganizationsDeps => ({ ...c.var.deps, email });
+export function organizationRoutes(
+  email: EmailOptions,
+  hooks: Pick<OrganizationsDeps, 'seatsChanged'> = {},
+) {
+  const deps = (c: Context<AppEnv>): OrganizationsDeps => ({ ...c.var.deps, email, ...hooks });
   const id = z.object({ id: z.uuid() });
 
   return createRouter()

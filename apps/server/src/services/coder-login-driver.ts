@@ -101,6 +101,8 @@ export async function runCoderLogin(deps: AppDeps, loginId: string): Promise<voi
 
   let computer;
   try {
+    // Not asked of the managed build on purpose (computer-admission.ts): a
+    // member at a limit must still be able to sign in.
     ({ computer } = await startComputer(deps, owner, SYSTEM_ACTOR));
   } catch (error) {
     await endLogin(deps, row, 'failed', {

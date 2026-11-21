@@ -26,7 +26,18 @@ const COMPOSE_VARS = [
 ];
 
 /** Read by the managed build (ee/server), not by the core server. */
-const MANAGED_VARS = ['RESEND_API_KEY', 'OPENBOTS_EMAIL_FROM', 'OPENBOTS_DEV_LOG_EMAIL_LINKS'];
+const MANAGED_VARS = [
+  'RESEND_API_KEY',
+  'OPENBOTS_EMAIL_FROM',
+  'OPENBOTS_DEV_LOG_EMAIL_LINKS',
+  'STRIPE_SECRET_KEY',
+  'STRIPE_WEBHOOK_SECRET',
+  'STRIPE_PRICE_PRO',
+  'STRIPE_PRICE_TEAM',
+  'STRIPE_PRICE_OVERAGE',
+  'STRIPE_METER_EVENT',
+  'OPENBOTS_BILLING',
+];
 
 describe('.env.example', () => {
   const example = parseEnv(readFileSync(EXAMPLE, 'utf8'));

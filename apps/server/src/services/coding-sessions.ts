@@ -41,6 +41,7 @@ import { publishSessionUpdated } from './coding-session-view.js';
 import { SESSION_KIND, sessionEffect } from './coder-widget-actions.js';
 import type { BotRow } from './bots.js';
 import { agentFor, startComputer } from './computer.js';
+import { admitComputerWork } from './computer-admission.js';
 import { announceMessage, storeMessage } from './messages.js';
 import {
   assertRunnable,
@@ -259,6 +260,16 @@ export async function startCodingSession(
 
   const [chat] = await deps.db.select().from(schema.chats).where(eq(schema.chats.id, run.chatId));
   if (!chat) throw notFound('Chat not found');
+  // A coding session is new work on the computer (computer-admission.ts):
+  // refused before it is made, so the Bot reads why.
+  await admitComputerWork(deps, {
+    workspaceId: owner.workspaceId,
+    ownerId: owner.id,
+    kind: 'coding_session',
+    botId: bot.id,
+    runId: run.runId,
+    ...(previous ? { sessionId: previous.id } : {}),
+  });
 
   const done = await deps.db.transaction(async (tx) => {
     // One session per Bot: two calls at once see each other.

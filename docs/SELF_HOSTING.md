@@ -183,6 +183,13 @@ the reset cancels it. A stop under way holds it up while the process doing it is
 whose process died is taken over a minute later, and the worker finishes a stop or a start that a
 stopped process left behind. Docker computers are deleted before the reset answers.
 
+### Billing (managed service)
+
+The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
+`OPENBOTS_BILLING` in `.env.example`; [ee/README.md](../ee/README.md#billing) says how to set them
+up). A self-hosted install has no billing and leaves them empty: every computer start and run goes
+ahead as before.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the

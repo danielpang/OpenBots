@@ -725,6 +725,29 @@ describe('coder runner', () => {
     expect((await resumedWith(runId)).status).toBe('failed');
   });
 
+  it('fails a queued session the managed build refuses, without starting the computer', async () => {
+    const { sessionId, runId } = await w.newSession({});
+    const asked: unknown[] = [];
+    w.t.deps.extensions = {
+      admitComputerWork: (request) => {
+        asked.push(request);
+        return {
+          code: 'PLAN_ALLOWANCE_REACHED',
+          message: 'Your organization has used the computer hours its plan includes.',
+        };
+      },
+    };
+    try {
+      await start(sessionId);
+      const row = await ended(sessionId, 'failed');
+      expect(row.error).toContain('computer hours its plan includes');
+      expect(asked).toEqual([expect.objectContaining({ kind: 'coding_session', sessionId })]);
+      expect((await resumedWith(runId)).status).toBe('failed');
+    } finally {
+      delete w.t.deps.extensions;
+    }
+  });
+
   it('stops when the owner says stop', async () => {
     w.coder.agent = async (io) => {
       io.stdout(

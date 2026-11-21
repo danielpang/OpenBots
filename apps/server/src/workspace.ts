@@ -146,12 +146,14 @@ type SettingsDeps = { db: Db; config: Config; extensions?: ServerExtensions };
  * admins may only lower their organization's limits under it. A self-hosted
  * owner is the operator and has none.
  */
-export function limitsCeiling(
-  deps: Pick<SettingsDeps, 'config' | 'extensions'>,
+export async function limitsCeiling(
+  deps: SettingsDeps,
   workspace: Workspace,
-): Limits | null {
+): Promise<Limits | null> {
   if (deps.config.deployment !== 'managed') return null;
-  return deps.extensions?.limitsCeiling?.(workspace, deps.config) ?? deps.config.limits;
+  return (
+    (await deps.extensions?.limitsCeiling?.(workspace, deps.config, deps.db)) ?? deps.config.limits
+  );
 }
 
 /** The settings in effect for an organization, under its ceiling (see `effectiveSettings`). */
@@ -160,7 +162,7 @@ export async function organizationSettings(
   workspaceId: string,
 ): Promise<Settings> {
   const workspace = await getOrganization(deps.db, workspaceId);
-  return effectiveSettings(deps.config, workspace, limitsCeiling(deps, workspace));
+  return effectiveSettings(deps.config, workspace, await limitsCeiling(deps, workspace));
 }
 
 export function storedSettings(workspace: Workspace): StoredSettings {

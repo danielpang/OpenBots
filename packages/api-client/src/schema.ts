@@ -5116,6 +5116,15 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
         /** @description No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`) */
         503: {
           headers: {
@@ -5166,6 +5175,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
           headers: {
             [name: string]: unknown;
           };
@@ -5283,6 +5301,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
           headers: {
             [name: string]: unknown;
           };
@@ -5461,7 +5488,7 @@ export interface paths {
     put?: never;
     /**
      * Reset the computer: a fresh home, after the rescue
-     * @description Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.
+     * @description Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again. A rescue the managed service refused to start the computer for (`errorCode` on the status) refuses it too (402 with that code): nothing on the computer was checked, so nothing is removed.
      */
     post: {
       parameters: {
@@ -5487,6 +5514,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The rescue could not run because the managed service would not start the computer (the code says why): nothing was reset, and the prepare stays */
+        402: {
           headers: {
             [name: string]: unknown;
           };
@@ -5661,6 +5697,15 @@ export interface paths {
         };
         /** @description Not signed in */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description New computer work is refused for now (402): the code says why, such as a spending limit on the managed service, and the detail says it in words */
+        402: {
           headers: {
             [name: string]: unknown;
           };
@@ -13244,6 +13289,8 @@ export interface components {
       }[];
       /** @description Set when the rescue failed outright: what it saved is unknown */
       error: string | null;
+      /** @description Set with `error` when the managed service would not start the computer for the rescue (its stable code, such as `PLAN_ALLOWANCE_REACHED`): nothing was checked, and POST /computer/reset answers 402 with this code until a rescue can run */
+      errorCode: string | null;
       /** @description Coding sessions a reset would stop; warn before confirming */
       runningSessions: {
         /** Format: uuid */

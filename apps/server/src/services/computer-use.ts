@@ -44,7 +44,7 @@ export const USE_HOLD_NAME = `use-${randomBytes(4).toString('hex')}`;
 /** What a use is for; the interval it opens keeps the first one's. */
 export type UseReason = 'run' | 'coding_session' | 'exec' | 'terminal' | 'screen';
 
-type Deps = Pick<AppDeps, 'db' | 'logger' | 'extensions'>;
+type Deps = Pick<AppDeps, 'db' | 'logger' | 'extensions' | 'config' | 'infra'>;
 
 /** The computer a use is of, and what the provider offers for it. */
 export interface UseTarget extends UsageTarget {

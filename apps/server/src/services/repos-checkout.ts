@@ -8,6 +8,7 @@ import type { AppDeps } from '../context.js';
 import { schema, sessionLockOf, type Db } from '../db/client.js';
 import { SYSTEM_ACTOR } from './audit.js';
 import { agentFor, computerOff, shownFailure, startComputer } from './computer.js';
+import { computerRefused, computerWorkRefusal } from './computer-admission.js';
 import { fenceOf, isFenced } from './computer-fence.js';
 import { parseRepoUrl, type ParsedRepoUrl } from './repos.js';
 import {
@@ -680,7 +681,8 @@ export type Checkout = CheckoutRow & { defaultBranch: string };
  * checkout. A clone the owner asked for (`action` `clone`: the picker, Add
  * by URL, Clone) starts a stopped computer, as a session does; reconcile
  * passes `startStopped: false`, since it runs on a running one only.
- * Throws with git's message when it fails, after recording `error`.
+ * Throws with git's message when it fails, after recording `error`; a start
+ * the managed build refuses records its words and throws its 402 and code.
  */
 export async function ensureCheckout(
   deps: CheckoutDeps,
@@ -697,6 +699,26 @@ export async function ensureCheckout(
     .where(eq(schema.computers.id, computerId));
   if (!computer) throw new Error('The computer is gone');
   if (startStopped && computer.status !== 'running') {
+    // A start is new work (computer-admission.ts): refused, the checkout
+    // fails with the refusal's words, as a failed clone does, and nothing starts.
+    const refusal = await computerWorkRefusal(deps, {
+      workspaceId: computer.workspaceId,
+      ownerId: computer.ownerId,
+      kind: 'repository',
+    });
+    if (refusal) {
+      const refused = computerRefused(refusal);
+      await deps.db
+        .update(schema.repoCheckouts)
+        .set({ state: 'error', error: refused.message.slice(0, 2_000), updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.repoCheckouts.repoId, repoId),
+            eq(schema.repoCheckouts.computerId, computerId),
+          ),
+        );
+      throw refused;
+    }
     computer = (
       await startComputer(
         deps,

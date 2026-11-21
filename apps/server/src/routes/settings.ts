@@ -56,8 +56,8 @@ const settingsResponse = {
 };
 
 /** The settings in effect for the organization, with the ceilings its limits stay under. */
-function settingsOf(deps: AppDeps, workspace: Workspace) {
-  const ceilings = limitsCeiling(deps, workspace);
+async function settingsOf(deps: AppDeps, workspace: Workspace) {
+  const ceilings = await limitsCeiling(deps, workspace);
   return { ...effectiveSettings(deps.config, workspace, ceilings), ceilings };
 }
 
@@ -77,7 +77,10 @@ export const settingsRoutes = createRouter()
     }),
     async (c) => {
       const { db } = c.var.deps;
-      return c.json(settingsOf(c.var.deps, await getOrganization(db, c.var.user.workspaceId)), 200);
+      return c.json(
+        await settingsOf(c.var.deps, await getOrganization(db, c.var.user.workspaceId)),
+        200,
+      );
     },
   )
   .openapi(
@@ -134,7 +137,7 @@ export const settingsRoutes = createRouter()
         );
       }
       const current = await getOrganization(db, c.var.user.workspaceId);
-      const ceilings = limitsCeiling(c.var.deps, current);
+      const ceilings = await limitsCeiling(c.var.deps, current);
       for (const [key, value] of Object.entries(patch.limits ?? {})) {
         const ceiling = ceilings?.[key as keyof Limits];
         if (ceiling !== undefined && value > ceiling) {
@@ -156,6 +159,6 @@ export const settingsRoutes = createRouter()
       });
       // Their calls are refused from now on; their running children stop too (S-1).
       if (patch.customStdioEnabled === false) await stopCustomStdio(c.var.deps, workspace.id);
-      return c.json(settingsOf(c.var.deps, workspace), 200);
+      return c.json(await settingsOf(c.var.deps, workspace), 200);
     },
   );
