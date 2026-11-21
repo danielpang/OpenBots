@@ -12,11 +12,13 @@ import { enqueueCoderJob } from './coder-jobs.js';
 import { shownFailure } from './computer.js';
 import { postMessage } from './messages.js';
 import {
+  askGit,
   assertRunnable,
   dirtyLines,
   ensureCheckout,
   git,
   gitContextOn,
+  GitError,
   onDisk,
   remoteDefaultBranch,
   runAsRunner,
@@ -118,7 +120,9 @@ async function refreshOne(
     await git(ctx, ['-C', path, 'fetch', '--prune', 'origin']);
     const detected = await remoteDefaultBranch(ctx, path);
     const branch = detected ?? repo.defaultBranch;
-    const counts = await runGit(ctx, [
+    // Answers that decide the state: one git did not give fails the refresh,
+    // never reads as clean or up to date.
+    const counts = await askGit(ctx, [
       '-C',
       path,
       'rev-list',
@@ -132,8 +136,10 @@ async function refreshOne(
     await pruneWorktrees(deps, ctx, repo, path, branch);
     let dirty = dirtyLines(await git(ctx, ['-C', path, 'status', '--porcelain'])).length > 0;
     for (const worktree of dirty ? [] : await worktreesOf(ctx, path)) {
-      const status = await runGit(ctx, ['-C', worktree.path, 'status', '--porcelain']);
-      if (status.code === 0 && status.stdout.trim()) {
+      const statusArgs = ['-C', worktree.path, 'status', '--porcelain'];
+      const status = await askGit(ctx, statusArgs);
+      if (status.code !== 0) throw new GitError(statusArgs, status);
+      if (status.stdout.trim()) {
         dirty = true;
         break;
       }
@@ -221,6 +227,8 @@ async function pruneWorktrees(
           `refs/remotes/origin/${defaultBranch}`,
         ])
       ).code === 0;
+    // `--verify --quiet` exits 1 for a ref that is not there; anything else
+    // (a run cut short) is no answer, and the worktree stays.
     const gone =
       sessions.some((s) => s.pushAllowed) &&
       (
@@ -232,7 +240,7 @@ async function pruneWorktrees(
           '--quiet',
           `refs/remotes/origin/${worktree.branch}`,
         ])
-      ).code !== 0;
+      ).code === 1;
     if (!merged && !gone) continue;
     const done = await runGit(ctx, ['-C', path, 'worktree', 'remove', worktree.path]);
     if (done.code !== 0) continue;

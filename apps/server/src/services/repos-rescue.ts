@@ -19,11 +19,13 @@ import {
   computerWorkRefusal,
 } from './computer-admission.js';
 import {
+  askGit,
   assertRunnable,
   branchSlug,
   dirtyLines,
   git,
   gitContextOn,
+  GitError,
   onDisk,
   runGit,
   withCheckoutLock,
@@ -158,8 +160,17 @@ async function rescueOne(
   // What the remote has now, so commits already pushed are not saved twice.
   await runGit(ctx, ['-C', main, 'fetch', '--prune', 'origin']);
   const short = repo.fullName.split('/').pop() ?? 'repo';
+  // Every answer below decides whether work is saved: one git did not give
+  // (the checkout's lock lost, a command that took too long) is reported as
+  // work that could not be checked, never as nothing to save.
+  let sessions: { path: string; branch: string | null }[];
+  try {
+    sessions = await worktreesOf(ctx, main);
+  } catch (error) {
+    return [result(null, false, `${COULD_NOT_CHECK}: ${said(error, true)}`)];
+  }
   const worktrees = [{ path: main, branch: null as string | null, isMain: true }].concat(
-    (await worktreesOf(ctx, main)).map((w) => ({ ...w, isMain: false })),
+    sessions.map((w) => ({ ...w, isMain: false })),
   );
   const out: RepoRescueResult[] = [];
   for (const worktree of worktrees) {
@@ -169,14 +180,29 @@ async function rescueOne(
       out.push(result(null, false, `Left alone${on}: a coding session is working there`));
       continue;
     }
-    const head = await runGit(ctx, [...at, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
-    const branch = worktree.branch ?? (head.code === 0 ? head.stdout.trim() : null);
-    const log = await runGit(ctx, [...at, 'log', 'HEAD', '--not', '--remotes', '--oneline']);
-    const commits = log.code === 0 ? log.stdout.split('\n').filter((l) => l.trim()).length : 0;
-    const status = await runGit(ctx, [...at, 'status', '--porcelain']);
-    const lines = status.code === 0 ? status.stdout : '';
-    const dirty =
-      (worktree.isMain ? dirtyLines(lines) : lines.split('\n').filter((l) => l.trim())).length > 0;
+    let branch: string | null;
+    let commits: number;
+    let dirty: boolean;
+    try {
+      // Exits 1 on a detached HEAD: an answer.
+      const head = await askGit(ctx, [...at, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+      branch = worktree.branch ?? (head.code === 0 ? head.stdout.trim() : null);
+      const logArgs = [...at, 'log', 'HEAD', '--not', '--remotes', '--oneline'];
+      const log = await askGit(ctx, logArgs);
+      if (log.code !== 0) throw new GitError(logArgs, log);
+      commits = log.stdout.split('\n').filter((l) => l.trim()).length;
+      const statusArgs = [...at, 'status', '--porcelain'];
+      const status = await askGit(ctx, statusArgs);
+      if (status.code !== 0) throw new GitError(statusArgs, status);
+      const lines = status.stdout;
+      dirty =
+        (worktree.isMain ? dirtyLines(lines) : lines.split('\n').filter((l) => l.trim())).length >
+        0;
+    } catch (error) {
+      const on = worktree.branch ? ` on ${worktree.branch}` : '';
+      out.push(result(null, false, `${COULD_NOT_CHECK}${on}: ${said(error, true)}`));
+      continue;
+    }
     if (!commits && !dirty) continue;
     const name = `${prefix}/${branchSlug(short)}/${branchSlug(branch ?? 'detached')}`;
     const what = [
@@ -219,6 +245,7 @@ async function rescueOne(
 
 const NOT_ON_COMPUTER = 'Not on the computer';
 const NOTHING_TO_SAVE = 'Nothing to save: everything is pushed';
+const COULD_NOT_CHECK = 'Could not check for unsaved work';
 
 /**
  * The results whose work a lost home would take with it: everything not

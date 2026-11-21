@@ -68,6 +68,12 @@ export interface StartOptions {
   signal?: AbortSignal;
 }
 
+/** What `ComputerProvider.stop` takes besides the machine. */
+export interface StopOptions {
+  /** As `ComputerSpec.signal`. */
+  signal?: AbortSignal;
+}
+
 /** What `ComputerProvider.retireInside` takes besides the machine. */
 export interface RetireInsideOptions {
   /**
@@ -148,7 +154,13 @@ export interface ComputerProvider {
   create(spec: ComputerSpec): Promise<ComputerRef>;
   /** Starts the machine and resolves once its control agent answers. */
   start(ref: ComputerRef, options?: StartOptions): Promise<void>;
-  stop(ref: ComputerRef): Promise<void>;
+  /**
+   * Stops the machine. Its signal ends the stop at the next call that could
+   * still change the machine (Sprites: before each hold it releases), for a
+   * caller that no longer holds it; a provider that cannot stop part way
+   * (Docker) ignores it.
+   */
+  stop(ref: ComputerRef, options?: StopOptions): Promise<void>;
   /**
    * Removes the machine; the home volume is kept (K7) unless `options` says
    * otherwise (a reset, GH5).

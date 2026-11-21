@@ -115,7 +115,10 @@ import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 // it runs out. A failure is retried with backoff, up to
 // `RETIRED_MAX_ATTEMPTS`; then the row records that the job gave up
 // (`gave_up_at`, an error in the log) and waits for an operator
-// (`openbots computers retry`). A machine that is a member's current
+// (`openbots computers retry`). Giving up on a record its reset never
+// settled settles it in the same transaction (`settleRetire`): the member's
+// computer is let go with the reset's cleanup and audit done, once, and a
+// later retry settles nothing again. A machine that is a member's current
 // computer, in any organization, is never deleted. A Sprite already gone
 // counts as deleted. Retire, restore and deletion are audited.
 //
@@ -468,16 +471,22 @@ async function settleRetire(tx: Db, row: RetiredRow): Promise<ComputerRow | null
         )
         .returning()
     : [];
-  const reset = context?.reset
-    ? {
-        ...context.reset,
-        checkouts: await cleanupAfterReset(
-          tx,
-          { id: row.computerId, workspaceId: row.workspaceId, ownerId: row.ownerId },
-          context.reset.signIns,
-        ),
-      }
-    : null;
+  // The reset's cleanup and its audit happen only while it still holds the
+  // member's computer: in the transaction that releases it. A computer that
+  // moved on (a row from before a give-up settled its record) is the member's
+  // new one, and nothing of it is the reset's to clear.
+  const holds = row.computerId === null || computer !== undefined;
+  const reset =
+    context?.reset && holds
+      ? {
+          ...context.reset,
+          checkouts: await cleanupAfterReset(
+            tx,
+            { id: row.computerId, workspaceId: row.workspaceId, ownerId: row.ownerId },
+            context.reset.signIns,
+          ),
+        }
+      : null;
   await recordAudit(tx, {
     workspaceId: row.workspaceId,
     actor: by,
@@ -1049,12 +1058,25 @@ async function failed(
           lastError: errorText(error),
         }
     : { status, claim, nextAttemptAt: retryAt, lastError: errorText(error) };
-  const [updated] = await deps.db
-    .update(schema.retiredComputers)
-    .set({ ...set, attempts, lastAttemptAt: now })
-    .where(held(row, from))
-    .returning();
-  if (!updated) return;
+  // Giving up on a record its reset never settled releases the member's
+  // computer, so the reset is settled in the same transaction: the member's
+  // choice (sign-ins forgotten, checkouts and worktrees cleared) and its audit
+  // land now, while the reset still holds the computer, and never later on
+  // what the member does next.
+  const settle = giveUp && !row.auditedAt;
+  const result = await deps.db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(schema.retiredComputers)
+      .set({ ...set, attempts, lastAttemptAt: now })
+      .where(held(row, from))
+      .returning();
+    if (!updated) return null;
+    const computer = settle ? await settleRetire(tx as unknown as Db, updated) : null;
+    return { updated, computer };
+  });
+  if (!result) return;
+  const { updated } = result;
+  if (settle) await announceSettled(deps, updated, result.computer);
   if (giveUp) {
     deps.logger.error(
       { err: error, retiredId: row.id, attempts, sealed },
@@ -1205,9 +1227,9 @@ export async function runRetiredComputerJob(
   if (!row) return;
   // A provider this install does not have (not configured, or another one):
   // a failed attempt like any other, retried with backoff and then given up
-  // for an operator (`gave_up_at`, `computers retired --gave-up`), which also
-  // lets the member's computer go (computer.ts `abandonedStop`). Never left
-  // waiting without a count.
+  // for an operator (`gave_up_at`, `computers retired --gave-up`); giving up
+  // settles the reset, which lets the member's computer go (`failed`). Never
+  // left waiting without a count.
   if (!machines || machines.name !== row.provider || !retainsOnReset(machines)) {
     await failed(
       deps,

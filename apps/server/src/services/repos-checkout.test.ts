@@ -351,6 +351,16 @@ describe('repos checkout', () => {
     expect(row.state).toBe('dirty');
   });
 
+  it('never marks a checkout ready when git gives no answer about origin', async () => {
+    // The count against origin is killed before it says anything.
+    w.coder.git = (args) =>
+      args.includes('rev-list') ? { code: null as unknown as number } : defaultGit(args);
+    await expect(
+      w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId)),
+    ).rejects.toThrow(/git rev-list failed/);
+    expect(await checkoutRow()).toMatchObject({ state: 'error' });
+  });
+
   it("records git's error and throws", async () => {
     w.coder.git = (args) =>
       args.includes('fetch')
