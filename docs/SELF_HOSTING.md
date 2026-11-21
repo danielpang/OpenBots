@@ -197,6 +197,66 @@ The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
 up). A self-hosted install has no billing and leaves them empty: every computer start and run goes
 ahead as before.
 
+### Sign-in providers
+
+People sign in with an email and a password. GitHub, Google and Apple sign-in are each off until
+their settings are set, and a provider that is off shows nowhere: no button on the web, nothing in
+`/api/v1/capabilities`, and nothing in the apps.
+
+- GitHub: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, with the callback
+  `<OPENBOTS_PUBLIC_URL>/api/auth/callback/github`.
+- Google: `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, with the callback
+  `<OPENBOTS_PUBLIC_URL>/api/auth/callback/google`.
+- Apple: all four of `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID` and `APPLE_PRIVATE_KEY`.
+  The server refuses to start with only some of them. `APPLE_APP_BUNDLE_ID` adds native Sign in
+  with Apple in the iOS app, and needs the other four.
+
+A self-hosted install still has one account: whichever provider makes the first account, it is the
+owner, and every later sign-up is refused. On the managed service, `OPENBOTS_SIGNUP_MODE` decides
+who may make an account, for every provider alike: with `invite`, only the very first account and
+someone who brings an invitation for that address.
+
+#### Setting up Sign in with Apple
+
+In the Apple developer account (Certificates, Identifiers and Profiles):
+
+1. On the App ID of the web service, or a new one, turn on the Sign in with Apple capability. For
+   native sign-in in the iOS app, turn it on for the app's own App ID too (its bundle ID is
+   `OPENBOTS_IOS_BUNDLE_ID`, `dev.openbots.mobile` by default), and group the two as one primary
+   App ID so a person is the same Apple user on both.
+2. Make a Services ID (for example `com.example.openbots.web`). That is `APPLE_CLIENT_ID`. Turn on
+   Sign in with Apple for it, choose the primary App ID, add the server's domain (the host of
+   `OPENBOTS_PUBLIC_URL`, with no scheme) and the Return URL
+   `<OPENBOTS_PUBLIC_URL>/api/auth/callback/apple`. Apple needs https and a public domain; it does
+   not accept localhost.
+3. Make a key with Sign in with Apple turned on, for the same primary App ID, and download its
+   `.p8` file (Apple lets you download it once). Its Key ID is `APPLE_KEY_ID`; the account's Team
+   ID (top right of the developer account) is `APPLE_TEAM_ID`; the file's text is
+   `APPLE_PRIVATE_KEY`, on one line with `\n` for each line break, or as `APPLE_PRIVATE_KEY_FILE`.
+4. For native sign-in, set `APPLE_APP_BUNDLE_ID` to the iOS app's bundle ID, and build the app with
+   `OPENBOTS_IOS_APPLE_SIGN_IN=1` ([apps/mobile/README.md](../apps/mobile/README.md)).
+5. If Apple's private email relay will send mail to people (invitations, codes), register the
+   sending domain under Sign in with Apple for Email Communication, or that mail does not arrive.
+
+The server makes the client secret Apple asks for from the key itself, and makes a new one before
+it ends, so nothing needs renewing by hand. It checks an ID token from the iOS app against Apple's
+published keys, its issuer, the Services ID or the bundle ID, an age of an hour at most and the
+nonce the app made. A person who hides their email from Apple signs in with an address under
+`privaterelay.appleid.com`, which does not match an invitation sent to their real address, so on
+an invite-only service they sign up with email, GitHub or Google and can add Apple later.
+
+### App sign-in
+
+The iOS and Mac apps sign in to a server through the browser, with no QR code: the OpenBots Cloud
+choice in each app does this with the hosted service. The app opens `<server>/app-sign-in` with a
+PKCE challenge; the person signs in or up there and confirms; the browser goes back to the app
+with a one-time code (5 minutes, once), and only the app's own verifier turns that code into a
+credential. The iOS app gets a device key, as a paired phone does. The Mac app gets a session, so
+the web app it shows works as it does in a browser. Either way the app is listed in Settings >
+Devices, where revoking it signs it out at once; signing out in the app, or the Mac's session
+ending, revokes it too. The apps take the server from their build (`OPENBOTS_CLOUD_URL` for the
+Mac, `EXPO_PUBLIC_OPENBOTS_CLOUD_URL` for iOS). A server needs no setting for this.
+
 ### Shared Artifacts
 
 Sharing an Artifact with the organization or making it public, and opening one in a browser, is
@@ -543,7 +603,7 @@ the last one finished. A backup made before a rotation needs the key it was made
 ### Secrets in files
 
 Each secret setting (`OPENBOTS_MASTER_KEY`, `OPENBOTS_MASTER_KEY_PREVIOUS`, `DATABASE_URL`,
-`REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
+`REDIS_URL`, the provider API keys, the OAuth client secrets, `APPLE_PRIVATE_KEY`, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
 `OPENBOTS_METRICS_TOKEN`, `OPENBOTS_ARTIFACT_EDGE_SECRET` and the object storage keys
 `OPENBOTS_S3_ACCESS_KEY_ID` and `OPENBOTS_S3_SECRET_ACCESS_KEY`) can be given as `NAME_FILE` instead: the path of a file holding the value,
 such as a Docker or Kubernetes secret. Set one or the other, not both.
