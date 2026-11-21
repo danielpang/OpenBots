@@ -25,6 +25,7 @@ import {
   RETIRED_MAX_ATTEMPTS,
   restoreRetiredComputer,
   runRetiredComputerJob,
+  sweepRetiredComputers,
 } from './computer-retire.js';
 import { runRescueJob } from './repos-rescue.js';
 
@@ -473,6 +474,33 @@ describe('retired computers, fourth review', () => {
       // Given up, it no longer holds the member's computer.
       await inEveryOrganization(t.deps, () => recoverStaleComputers(t.deps));
       expect((await m.row()).status).toBe('stopped');
+    });
+  });
+
+  // On PGlite the database's clock is this process's, so only real Postgres
+  // can run a worker whose clock differs from the database's.
+  describe.runIf(process.env.DATABASE_URL)('9. leases on the database’s clock', () => {
+    it('a lease taken by a worker whose clock runs behind is not cut short', async () => {
+      const m = await member('slow-clock@example.com');
+      await m.reset(true);
+      await isolate(m.ownerId);
+      const [record] = await retiredOf(m.ownerId);
+      // Due for its job.
+      await t.db
+        .update(schema.retiredComputers)
+        .set({ status: 'retiring', claim: null, nextAttemptAt: null })
+        .where(eq(schema.retiredComputers.id, record!.id));
+      const sweep = () => inEveryOrganization(t.deps, () => sweepRetiredComputers(t.deps));
+      // This worker's clock runs six minutes behind the database's: it claims the record.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() - 6 * 60_000);
+      try {
+        expect(await sweep()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+      // A worker on time leaves the claim alone: its lease has not run out.
+      expect(await sweep()).toBe(0);
     });
   });
 });

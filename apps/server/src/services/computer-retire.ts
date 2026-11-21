@@ -6,7 +6,19 @@ import {
   type CoderControl,
   type JobHandler,
 } from '@openbots/shared';
-import { and, desc, eq, inArray, isNotNull, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { inWorkspace, rowsOf } from '../db/scope.js';
@@ -198,6 +210,19 @@ function errorText(error: unknown) {
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 500 ? `${text.slice(0, 500)}...` : text;
 }
+
+/**
+ * When a claim's lease ends, on the database's clock: the sweep reads it on
+ * that clock too (`dueBy`), so two processes whose own clocks differ never
+ * cut a lease short. A caller that names the time (a test, a sweep run for a
+ * given moment) gets it from that time instead.
+ */
+const leaseEnd = (ms: number, at?: Date): Date | SQL =>
+  at ? new Date(at.getTime() + ms) : sql`clock_timestamp() + ${ms} * interval '1 millisecond'`;
+
+/** The moment a claim is compared with: the database's, or the caller's. */
+const clockAt = (at?: Date) =>
+  at ? sql`${at.toISOString()}::timestamptz` : sql`clock_timestamp()`;
 
 function isUniqueViolation(error: unknown): boolean {
   for (let e = error as { code?: string; cause?: unknown } | undefined; e;) {
@@ -504,12 +529,13 @@ export async function retireMachine(
   deps: Deps,
   machines: ComputerProvider,
   row: ComputerRow,
-  { checkpointId, by, reason, reset, deleteNow = false, now = new Date() }: RetireOptions,
+  { checkpointId, by, reason, reset, deleteNow = false, now: at }: RetireOptions,
 ): Promise<{ computer: ComputerRow; retired: RetiredRow }> {
   if (!retainsOnReset(machines)) {
     throw new Error(`The ${machines.name} provider cannot retire a machine`);
   }
   if (!row.containerId) throw new Error('The computer has no machine to retire');
+  const now = at ?? new Date();
   const ref = machineRef(row);
   const key = randomUUID();
   const claim = randomUUID();
@@ -564,7 +590,7 @@ export async function retireMachine(
           deleteAfter: deleteNow ? now : new Date(now.getTime() + RETIRED_COMPUTER_DAYS * DAY_MS),
           // Claimed by this call; the sweep takes it only once the lease runs out.
           claim,
-          nextAttemptAt: new Date(now.getTime() + RETIRE_LEASE_MS),
+          nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at),
           fence: fenceOf(row.agentToken),
           context,
         })
@@ -588,7 +614,7 @@ export async function retireMachine(
   try {
     await machines.retire!(ref);
   } catch (error) {
-    return undoRetire(deps, machines, row, switched, claim, error, now);
+    return undoRetire(deps, machines, row, switched, claim, error, at);
   }
   const next = randomUUID();
   let done: { computer: ComputerRow | null; retired: RetiredRow } | null;
@@ -603,13 +629,13 @@ export async function retireMachine(
                 sealedAt: sealed,
                 status: 'deleting',
                 claim: next,
-                nextAttemptAt: new Date(sealed.getTime() + RETIRED_LEASE_MS),
+                nextAttemptAt: leaseEnd(RETIRED_LEASE_MS, at),
                 lastError: null,
               }
             : {
                 sealedAt: sealed,
                 claim: next,
-                nextAttemptAt: new Date(sealed.getTime() + RETIRE_LEASE_MS),
+                nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at),
                 lastError: null,
               },
         )
@@ -740,7 +766,7 @@ async function undoRetire(
   switched: { computer: ComputerRow; retired: RetiredRow },
   claim: string,
   error: unknown,
-  now: Date,
+  at: Date | undefined,
 ): Promise<never> {
   deps.logger.error(
     { err: error, computerId: row.id, retiredId: switched.retired.id },
@@ -758,7 +784,7 @@ async function undoRetire(
   try {
     const [taken] = await deps.db
       .update(schema.retiredComputers)
-      .set({ claim: undo, nextAttemptAt: new Date(now.getTime() + RETIRE_LEASE_MS) })
+      .set({ claim: undo, nextAttemptAt: leaseEnd(RETIRE_LEASE_MS, at) })
       .where(
         and(
           eq(schema.retiredComputers.id, id),
@@ -848,14 +874,14 @@ class UndoLost extends Error {}
  * job of an earlier claim does nothing. Rows the job gave up on are left to
  * an operator.
  */
-export async function sweepRetiredComputers(deps: SweepDeps, now = new Date()): Promise<number> {
-  const lease = new Date(now.getTime() + RETIRED_LEASE_MS);
-  const retireLease = new Date(now.getTime() + RETIRE_LEASE_MS);
+export async function sweepRetiredComputers(deps: SweepDeps, at?: Date): Promise<number> {
+  const now = at ?? new Date();
+  const lease = leaseEnd(RETIRED_LEASE_MS, at);
+  const retireLease = leaseEnd(RETIRE_LEASE_MS, at);
   const fresh = sql`gen_random_uuid()`;
-  const due = or(
-    isNull(schema.retiredComputers.nextAttemptAt),
-    lte(schema.retiredComputers.nextAttemptAt, now),
-  );
+  // A claim runs out on the clock it was written on (`leaseEnd`).
+  const ranOut = sql`${schema.retiredComputers.nextAttemptAt} <= ${clockAt(at)}`;
+  const due = or(isNull(schema.retiredComputers.nextAttemptAt), ranOut);
   const tried = isNull(schema.retiredComputers.gaveUpAt);
   const deleting = await deps.db
     .update(schema.retiredComputers)
@@ -872,10 +898,7 @@ export async function sweepRetiredComputers(deps: SweepDeps, now = new Date()): 
             due,
           ),
           // A claim whose job never finished (lost with its process).
-          and(
-            eq(schema.retiredComputers.status, 'deleting'),
-            lte(schema.retiredComputers.nextAttemptAt, now),
-          ),
+          and(eq(schema.retiredComputers.status, 'deleting'), ranOut),
         ),
       ),
     )
@@ -1077,6 +1100,7 @@ async function finishRetire(
   machines: ComputerProvider,
   row: RetiredRow,
   now: Date,
+  at: Date | undefined,
 ): Promise<void> {
   const ref = machineRef(row);
   const check = claimCheck(deps, row, 'retiring');
@@ -1097,7 +1121,7 @@ async function finishRetire(
                   sealedAt,
                   status: 'deleting',
                   claim: next,
-                  nextAttemptAt: new Date(now.getTime() + RETIRED_LEASE_MS),
+                  nextAttemptAt: leaseEnd(RETIRED_LEASE_MS, at),
                 }
               : { sealedAt },
           )
@@ -1107,11 +1131,12 @@ async function finishRetire(
       });
       if (!sealed) return;
       if (row.deleteNow) {
-        await runRetiredComputerJob(deps, machines, {
-          retiredId: row.id,
-          kind: 'delete',
-          claim: next,
-        });
+        await runRetiredComputerJob(
+          deps,
+          machines,
+          { retiredId: row.id, kind: 'delete', claim: next },
+          at,
+        );
         return;
       }
       row = sealed;
@@ -1151,8 +1176,9 @@ export async function runRetiredComputerJob(
   deps: Deps,
   machines: ComputerProvider | null,
   job: Pick<RetiredComputerJob, 'retiredId' | 'kind' | 'claim'>,
-  now = new Date(),
+  at?: Date,
 ): Promise<void> {
+  const now = at ?? new Date();
   const [found] = await deps.db
     .select()
     .from(schema.retiredComputers)
@@ -1166,9 +1192,7 @@ export async function runRetiredComputerJob(
     .update(schema.retiredComputers)
     .set({
       claim: randomUUID(),
-      nextAttemptAt: new Date(
-        now.getTime() + (job.kind === 'retire' ? RETIRE_LEASE_MS : RETIRED_LEASE_MS),
-      ),
+      nextAttemptAt: leaseEnd(job.kind === 'retire' ? RETIRE_LEASE_MS : RETIRED_LEASE_MS, at),
     })
     .where(
       and(
@@ -1213,7 +1237,7 @@ export async function runRetiredComputerJob(
     await announceSettled(deps, row, settled.computer);
   }
   if (job.kind === 'retire') {
-    await finishRetire(deps, machines, row, now);
+    await finishRetire(deps, machines, row, now, at);
     return;
   }
   const ref = machineRef(row);
@@ -1338,19 +1362,18 @@ export async function purgeRetiredComputers(
       .set({
         status: 'deleting',
         claim: sql`gen_random_uuid()`,
-        nextAttemptAt: new Date(now.getTime() + RETIRED_LEASE_MS),
+        nextAttemptAt: leaseEnd(RETIRED_LEASE_MS),
       })
       .where(
         and(owned, inArray(schema.retiredComputers.status, ['retiring', 'retired', 'deleting'])),
       )
       .returning();
     for (const row of claimed) {
-      await runRetiredComputerJob(
-        deps,
-        machines,
-        { retiredId: row.id, kind: 'delete', claim: row.claim! },
-        now,
-      );
+      await runRetiredComputerJob(deps, machines, {
+        retiredId: row.id,
+        kind: 'delete',
+        claim: row.claim!,
+      });
     }
     const left = await deps.db
       .select({ id: schema.retiredComputers.id })
@@ -1476,7 +1499,7 @@ export async function restoreRetiredComputer(
   machines: ComputerProvider,
   scope: { workspaceId: string; retiredId: string },
   operator: string,
-  now = new Date(),
+  at?: Date,
 ): Promise<Restored> {
   const by = SYSTEM_ACTOR;
   const [found] = await deps.db
@@ -1501,7 +1524,7 @@ export async function restoreRetiredComputer(
   const machineKey = found.providerRef;
   // Claimed, with a lease: the deletion job leaves it alone, and the sweep
   // takes it back if this process dies before the end.
-  const lease = new Date(now.getTime() + RESTORE_LEASE_MS);
+  const lease = leaseEnd(RESTORE_LEASE_MS, at);
   const claim = randomUUID();
   const [retired] = await deps.db
     .update(schema.retiredComputers)
