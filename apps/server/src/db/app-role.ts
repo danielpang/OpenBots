@@ -38,7 +38,7 @@ export function appDatabaseUrl(url: string, password: string): string {
  */
 export async function openAppDb(
   owner: Db & { close(): Promise<void> },
-  config: Pick<Config, 'databaseUrl' | 'dbAppPassword'>,
+  config: Pick<Config, 'databaseUrl' | 'databaseDirectUrl' | 'dbAppPassword'>,
   logger: Pick<Logger, 'warn'>,
 ): Promise<Db & { close(): Promise<void> }> {
   if (!config.dbAppPassword) {
@@ -49,5 +49,13 @@ export async function openAppDb(
   }
   await prepareAppRole(owner, config.dbAppPassword);
   await owner.close();
-  return scopedDb(createDb(appDatabaseUrl(config.databaseUrl, config.dbAppPassword)));
+  return scopedDb(
+    createDb(
+      appDatabaseUrl(config.databaseUrl, config.dbAppPassword),
+      {},
+      config.databaseDirectUrl
+        ? { sessionUrl: appDatabaseUrl(config.databaseDirectUrl, config.dbAppPassword) }
+        : {},
+    ),
+  );
 }

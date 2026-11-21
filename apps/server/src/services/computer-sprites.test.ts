@@ -20,6 +20,7 @@ import {
   provisionComputer,
   provisionHandler,
   provisionTimings,
+  STOPPING_TAKEOVER_MS,
   recoverProvisioning,
   sweepIdleComputers,
   type ComputerRow,
@@ -423,12 +424,20 @@ describe('Sprite provisioning off the request path', () => {
 
   it('starts again after a restart cut a stop short', async () => {
     // A stop (a restart, a reset) died between `stopping` and `stopped`. A
-    // start only waits on `stopping`, and the idle sweep skips Sprites.
+    // start only waits on `stopping` while its holder still beats, and the
+    // idle sweep skips Sprites.
     await t.db
       .update(schema.computers)
       .set({ status: 'stopping' })
       .where(eq(schema.computers.ownerId, ownerId));
     expect((await start()).status).toBe(202);
+    // A stop still held (its heartbeat is fresh) is left to its holder.
+    expect(await inEveryOrganization(t.deps, () => recoverProvisioning(t.deps))).toBe(0);
+    // Its holder died: no heartbeat since.
+    await t.db
+      .update(schema.computers)
+      .set({ statusAt: new Date(Date.now() - STOPPING_TAKEOVER_MS - 1) })
+      .where(eq(schema.computers.ownerId, ownerId));
     expect(await inEveryOrganization(t.deps, () => recoverProvisioning(t.deps))).toBe(1);
     await until(async () => expect((await row()).status).toBe('running'));
     expect((await start()).status).toBe(200);
@@ -519,6 +528,8 @@ describe('Sprite provisioning off the request path', () => {
           .update(schema.computers)
           .set({
             status: 'starting',
+            // No word from its job since `at` (queued then, never started).
+            statusAt: at,
             spec: { provision: { attempt: crypto.randomUUID(), at: at.toISOString() } },
           })
           .where(eq(schema.computers.ownerId, ownerId));
@@ -530,7 +541,7 @@ describe('Sprite provisioning off the request path', () => {
       expect(enqueue).not.toHaveBeenCalled();
       expect((await row()).status).toBe('starting');
 
-      // Queued longer ago than any provisioning takes: its job is gone.
+      // Not heard from for longer than a job ever goes silent: it is gone.
       const starts = provisions();
       await waiting(new Date(Date.now() - provisionTimings.staleMs - 1));
       expect([200, 202]).toContain((await start()).status);

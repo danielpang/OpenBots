@@ -4,6 +4,7 @@ import { createAgentClient } from './agent-client.js';
 import { waitForAgent } from './docker.js';
 import {
   createSpritesApi,
+  SPRITES_EXEC_KILL_MS,
   SPRITES_MAX_WRITE_BYTES,
   type SpriteEgressPolicy,
   type SpriteInfo,
@@ -51,6 +52,13 @@ export const PROVISION_VERSION_FILE = '/opt/openbots/provision.version';
 export const PROVISION_STAGING_DIR = '/var/tmp/openbots-provision';
 /** provision.sh's exit code when another provisioning holds its lock past the wait. */
 export const PROVISION_LOCKED_EXIT = 75;
+/**
+ * provision.sh's exit code when the Sprite is marked retired
+ * (`SPRITES_RETIRED_MARKER`): it registers no agent on a retired machine.
+ */
+export const PROVISION_RETIRED_EXIT = 76;
+/** Where provision.sh takes its lock; `retireInside` takes it too before it removes the agent. */
+export const PROVISION_LOCK_FILE = '/opt/openbots/provision.lock';
 /**
  * How long a provisioning may run on once the connection to it is gone: as
  * short as the API takes. Nobody reads its output then, no retry can attach
@@ -130,6 +138,33 @@ export const SPRITES_DENY_ALL: SpriteEgressPolicy = { rules: [{ domain: '*', act
  */
 export const SPRITES_AGENT_TOKEN_FILES = ['/etc/openbots/agent-token', '/var/lib/openbots/token'];
 
+/**
+ * The time limit of each API call that cuts a Sprite's reach or puts it back
+ * (`retire`, `unretire`): short, so the longest either can take is known
+ * (`SPRITES_RETIRE_MAX_MS`, `SPRITES_UNRETIRE_MAX_MS`) and the server's claim
+ * on the record outlasts it. A call past it is ended, not left running.
+ */
+export const SPRITES_CUT_CALL_MS = 15_000;
+/** The longest `retire` takes: five metadata calls at most. */
+export const SPRITES_RETIRE_MAX_MS = 5 * SPRITES_CUT_CALL_MS;
+/**
+ * The longest `unretire` takes: four metadata calls and a command, which is
+ * ended at its limit and may take `SPRITES_EXEC_KILL_MS` more to be gone.
+ */
+export const SPRITES_UNRETIRE_MAX_MS = 5 * SPRITES_CUT_CALL_MS + SPRITES_EXEC_KILL_MS;
+/** The time limit of each call `retireInside` makes. */
+export const SPRITES_INSIDE_CALL_MS = 30_000;
+/** What `retireInside` may spend: it starts no call past it, and each call ends by it. */
+const SPRITES_INSIDE_BUDGET_MS = 2 * 60_000;
+/**
+ * The longest `retireInside` takes: its budget, then the last call's end
+ * (`SPRITES_EXEC_KILL_MS`). The server's claim on the record outlasts a cut
+ * and this together.
+ */
+export const SPRITES_RETIRE_INSIDE_MAX_MS = SPRITES_INSIDE_BUDGET_MS + SPRITES_EXEC_KILL_MS;
+/** How long the agent's removal waits for a provisioning that holds the lock. */
+const SPRITES_LOCK_WAIT_S = 20;
+
 /** Thrown for a call on a retired Sprite. */
 export class SpriteRetiredError extends Error {
   constructor(name: string) {
@@ -140,6 +175,15 @@ export class SpriteRetiredError extends Error {
 
 const isRetired = (info: SpriteInfo | null) =>
   info?.labels?.includes(SPRITES_RETIRED_LABEL) ?? false;
+
+/** A policy that lets nothing out: a deny of everything, and no rule that allows. */
+export const deniesAll = (policy: SpriteEgressPolicy | null) =>
+  !!policy &&
+  policy.rules.some((rule) => rule.domain === '*' && rule.action === 'deny') &&
+  policy.rules.every((rule) => rule.action === 'deny' && !rule.include);
+
+/** Whether the API answered that there is no such Sprite (404), as opposed to failing. */
+const notFound = (error: unknown) => (error as { status?: unknown } | null)?.status === 404;
 
 /** A domain rule the Sprites network policy accepts: a host, `*.host`, or `*`. */
 export function isEgressDomain(domain: string): boolean {
@@ -232,8 +276,17 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     options.readLocalFile ?? (async (path: string) => new Uint8Array(await readFile(path)));
 
   /** Runs a command that must succeed; the error carries its output. */
-  async function run(name: string, argv: string[], what: string, stdin?: string) {
-    const result = await api.exec(name, argv, stdin === undefined ? {} : { stdin });
+  async function run(
+    name: string,
+    argv: string[],
+    what: string,
+    stdin?: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ) {
+    const result = await api.exec(name, argv, {
+      ...(stdin === undefined ? {} : { stdin }),
+      ...options,
+    });
     if (result.exitCode !== 0) {
       throw new Error(`${what} failed (exit ${result.exitCode}): ${tail(result)}`);
     }
@@ -269,9 +322,15 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
    * token. The token goes on stdin, not in the exec's query string, which
    * the API may log. Idempotent: the script is written to be run again.
    */
-  async function provision(name: string, agentToken: string, timezone: string) {
+  async function provision(
+    name: string,
+    agentToken: string,
+    timezone: string,
+    signal?: AbortSignal,
+  ) {
     const setup = options.provision;
     if (!setup) return;
+    signal?.throwIfAborted();
     const [script, bundle] = await Promise.all([
       readLocal(setup.scriptPath),
       readLocal(setup.bundlePath),
@@ -281,10 +340,15 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     const bundlePath = `${staging}/agent-bundle.tgz`;
     // Neither file holds a secret (the token goes on stdin), and the API may
     // write them as another user than the one exec runs as: readable by all.
-    await run(name, asRoot(prepareStaging(staging)), 'Preparing the provisioning');
+    await run(name, asRoot(prepareStaging(staging)), 'Preparing the provisioning', undefined, {
+      ...(signal ? { signal } : {}),
+    });
     try {
+      signal?.throwIfAborted();
       await upload(name, scriptPath, script, 0o644);
+      signal?.throwIfAborted();
       await upload(name, bundlePath, bundle, 0o644);
+      signal?.throwIfAborted();
       const result = await api.exec(
         name,
         [
@@ -303,8 +367,11 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
           },
           timeoutMs: provisionTimeoutMs,
           maxRunAfterDisconnect: PROVISION_MAX_RUN_AFTER_DISCONNECT,
+          ...(signal ? { signal } : {}),
         },
       );
+      // Marked retired meanwhile (a reset took it): the script registered no agent.
+      if (result.exitCode === PROVISION_RETIRED_EXIT) throw new SpriteRetiredError(name);
       if (result.exitCode === PROVISION_LOCKED_EXIT) {
         throw new Error(
           `Another provisioning of the Sprite is still running; try again once it ends: ${tail(result)}`,
@@ -359,8 +426,7 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
    */
   const isOwnName = (key: string) =>
     key.startsWith(`${prefix}-`) && /^[a-z0-9]+$/.test(key.slice(prefix.length + 1));
-  /** Sprites this process retired; `agent` refuses them without a call. */
-  const retiredHere = new Set<string>();
+  const cut = { timeoutMs: SPRITES_CUT_CALL_MS };
   const nameOf = (ref: ComputerRef) =>
     ref.provider === 'sprites' && ref.containerId ? ref.containerId : null;
   const required = (ref: ComputerRef) => {
@@ -385,12 +451,25 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       // A Sprite left from an earlier row (same id), or kept by a reset that
       // kept the sign-ins: made ready again, files kept. A retired one is
       // put back with `unretire` first, never here by accident.
+      const signal = spec.signal;
+      signal?.throwIfAborted();
       let info = await api.get(name);
       if (isRetired(info)) throw new SpriteRetiredError(name);
+      signal?.throwIfAborted();
       if (!info) info = await api.create(name, { urlAuth });
       else if (info.urlAuth !== urlAuth) await api.setUrlAuth(name, urlAuth);
+      signal?.throwIfAborted();
       await api.setNetworkPolicy(name, egress);
-      await provision(name, spec.agentToken, spec.timezone ?? options.timezone ?? 'UTC');
+      // A retire that began after the read above (a reset that cancelled
+      // this provisioning) labels the Sprite before it cuts anything, so a
+      // label here means the two calls above may have landed after its cut:
+      // the cut is put back, and the Sprite is refused.
+      if (isRetired(await api.get(name))) {
+        await api.setUrlAuth(name, 'sprite', cut);
+        await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
+        throw new SpriteRetiredError(name);
+      }
+      await provision(name, spec.agentToken, spec.timezone ?? options.timezone ?? 'UTC', signal);
       return {
         provider: 'sprites',
         containerId: name,
@@ -399,13 +478,16 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
         volumeName: null,
       };
     },
-    async start(ref) {
+    async start(ref, startOptions) {
+      const signal = startOptions?.signal;
       const name = await serving(ref);
       // Reading the version wakes a paused Sprite.
       const setup = options.provision;
+      signal?.throwIfAborted();
       if (setup && (await installedVersion(name)) !== setup.version) {
-        await provision(name, ref.agentToken, options.timezone ?? 'UTC');
+        await provision(name, ref.agentToken, options.timezone ?? 'UTC', signal);
       }
+      signal?.throwIfAborted();
       await waitForAgent(provider.agent(ref), readyTimeoutMs, pollMs);
     },
     // A Sprite pauses itself once idle, so there is nothing to stop; only our
@@ -434,13 +516,18 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       if (!destroyOptions.state) {
         // Clearing the home wakes the Sprite and needs its agent stopped; a
         // retired one is only ever deleted.
+        const signal = destroyOptions.signal;
         if (isRetired(await api.get(name))) throw new SpriteRetiredError(name);
+        signal?.throwIfAborted();
         await provider.stop(ref);
+        signal?.throwIfAborted();
         // The agent and what it started go first, as removing the container
         // ends them, so nothing writes into the home while it is cleared.
         // The service stays stopped until the next `create` provisions the
         // Sprite again and registers it anew with the new token.
-        await run(name, asRoot(clearHome()), 'Clearing the home');
+        await run(name, asRoot(clearHome()), 'Clearing the home', undefined, {
+          ...(signal ? { signal } : {}),
+        });
         return;
       }
       await api.delete(name);
@@ -463,17 +550,17 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
       const info = await api.get(name);
       return info && !isRetired(info) ? 'running' : 'missing';
     },
-    agent: (ref) => {
-      // A Sprite this process retired is refused without a call; the server
-      // also refuses the reference itself (its fence), in every process.
-      const name = nameOf(ref);
-      if (name && retiredHere.has(name)) throw new SpriteRetiredError(name);
-      return createAgentClient({
+    // Whether a machine is retired is not this process's to remember: an
+    // operator's restore in another process puts the same Sprite back. The
+    // server refuses a retired machine's reference itself (its fence, from
+    // the database), and the Sprite refuses the request (its URL is private
+    // and its agent and token are gone).
+    agent: (ref) =>
+      createAgentClient({
         url: ref.agentUrl,
         token: ref.agentToken,
         ...(urlAuth === 'sprite' ? { proxyToken: options.token } : {}),
-      });
-    },
+      }),
     async hold(ref, holdName, seconds) {
       const name = await serving(ref);
       const task = holdTask(holdName);
@@ -503,52 +590,117 @@ export function createSpritesProvider(options: SpritesProviderOptions): Computer
     // nor run anything inside it: the label (from then on a hold, a start or
     // a create is refused), the URL private (no request from outside reaches
     // the agent), and the egress policy that denies everything. Each step is
-    // safe to repeat. A Sprite already gone has nothing to retire.
+    // safe to repeat. A Sprite already gone has nothing to retire, but only
+    // the API's own 404 says it is gone: a read that finds nothing is checked
+    // with a write, and anything else is a failure, never a success. Each
+    // call is limited to SPRITES_CUT_CALL_MS.
     async retire(ref) {
       const name = required(ref);
-      const info = await api.get(name);
-      if (!info) return;
-      retiredHere.add(name);
+      let info = await api.get(name, cut);
+      if (!info) {
+        try {
+          await api.setUrlAuth(name, 'sprite', cut);
+        } catch (error) {
+          if (notFound(error)) return;
+          throw error;
+        }
+        info = await api.get(name, cut);
+        if (!info) throw new Error(`The Sprite ${name} could not be read`);
+      }
       const labels = info.labels ?? [];
       if (!labels.includes(SPRITES_RETIRED_LABEL)) {
-        await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL]);
+        await api.setLabels(name, [...labels, SPRITES_RETIRED_LABEL], cut);
       }
-      if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite');
-      await api.setNetworkPolicy(name, SPRITES_DENY_ALL);
+      if (info.urlAuth !== 'sprite') await api.setUrlAuth(name, 'sprite', cut);
+      await api.setNetworkPolicy(name, SPRITES_DENY_ALL, cut);
+    },
+    // Every part of the cut, read back: the label, the private URL and the
+    // policy that denies everything.
+    async retiredState(ref) {
+      const name = required(ref);
+      const info = await api.get(name, cut);
+      if (!info) return 'gone';
+      if (!isRetired(info) || info.urlAuth !== 'sprite') return 'in_service';
+      return deniesAll(await api.getNetworkPolicy(name, cut)) ? 'retired' : 'in_service';
     },
     // Then, inside it (exec goes through the Sprites API, not the Sprite's
     // own network, so the deny-all policy does not stop it): the marker that
     // turns away a racing hold, our holds, so it pauses, and the agent and
     // its token, so nothing that knew the token reaches anything even if the
-    // URL were opened again. Only on a Sprite `retire` labelled.
-    async retireInside(ref) {
+    // URL were opened again. Only on a Sprite `retire` labelled, read again
+    // before each step (an operator's restore may have put it back meanwhile),
+    // and after the caller's own check (`check`: that it still holds the
+    // machine). Each call is limited, and the whole within
+    // SPRITES_RETIRE_INSIDE_MAX_MS. The agent is removed under provision.sh's
+    // lock, so a provisioning that began before the mark either ends first
+    // (and its agent is removed) or finds the mark and registers none.
+    async retireInside(ref, insideOptions) {
       const name = required(ref);
-      const info = await api.get(name);
-      if (!info) return;
-      if (!isRetired(info)) throw new Error(`The Sprite ${name} is not retired`);
-      await run(name, asRoot(markRetired()), 'Marking the Sprite retired');
+      const deadline = Date.now() + SPRITES_INSIDE_BUDGET_MS;
+      const limit = (ms: number) => {
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error(`Retiring ${name} inside ran out of time`);
+        return Math.min(ms, left);
+      };
+      /** False when the Sprite is gone; throws unless it is still retired. */
+      const step = async () => {
+        await insideOptions?.check?.();
+        const info = await api.get(name, { timeoutMs: limit(SPRITES_CUT_CALL_MS) });
+        if (!info) return false;
+        if (!isRetired(info)) throw new Error(`The Sprite ${name} is not retired`);
+        return true;
+      };
+      const inside = (argv: string[], what: string) =>
+        run(name, argv, what, undefined, { timeoutMs: limit(SPRITES_INSIDE_CALL_MS) });
+      if (!(await step())) return;
+      await inside(asRoot(markRetired()), 'Marking the Sprite retired');
+      if (!(await step())) return;
       // `holds` skips a retired Sprite, so these are listed directly.
-      const out = await run(name, tasksCurl('GET', '/v1/tasks'), 'Listing holds');
+      const out = await inside(tasksCurl('GET', '/v1/tasks'), 'Listing holds');
       const listed = (JSON.parse(out || '{}') as { tasks?: { name?: string }[] }).tasks ?? [];
       for (const task of listed) {
-        if (task.name?.startsWith(SPRITES_HOLD_PREFIX)) await deleteTask(name, task.name);
+        if (!task.name?.startsWith(SPRITES_HOLD_PREFIX)) continue;
+        if (!(await step())) return;
+        const code = (
+          await inside(
+            [
+              ...tasksCurl('DELETE', `/v1/tasks/${task.name}`),
+              '-o',
+              '/dev/null',
+              '-w',
+              '%{http_code}',
+            ],
+            'Releasing the hold',
+          )
+        ).trim();
+        if (code !== '204' && code !== '200' && code !== '404') {
+          throw new Error(`Releasing the hold failed: HTTP ${code}`);
+        }
       }
-      await run(name, asRoot(disableAgent()), 'Stopping the retired agent');
+      if (!(await step())) return;
+      await inside(asRoot(disableAgent()), 'Stopping the retired agent');
     },
     // The label goes last: until then the Sprite is still refused.
     async unretire(ref) {
       const name = required(ref);
-      const info = await api.get(name);
+      const info = await api.get(name, cut);
       if (!info) throw new Error(`The Sprite ${name} is gone`);
-      await api.setUrlAuth(name, urlAuth);
-      await api.setNetworkPolicy(name, egress);
-      await run(name, asRoot(`rm -f -- ${SPRITES_RETIRED_MARKER}`), 'Clearing the retired mark');
-      retiredHere.delete(name);
+      await api.setUrlAuth(name, urlAuth, cut);
+      await api.setNetworkPolicy(name, egress, cut);
+      const cleared = await api.exec(name, asRoot(`rm -f -- ${SPRITES_RETIRED_MARKER}`), {
+        timeoutMs: SPRITES_CUT_CALL_MS,
+      });
+      if (cleared.exitCode !== 0) {
+        throw new Error(
+          `Clearing the retired mark failed (exit ${cleared.exitCode}): ${tail(cleared)}`,
+        );
+      }
       const labels = info.labels ?? [];
       if (labels.includes(SPRITES_RETIRED_LABEL)) {
         await api.setLabels(
           name,
           labels.filter((label) => label !== SPRITES_RETIRED_LABEL),
+          cut,
         );
       }
     },
@@ -628,6 +780,9 @@ function clearHome(): string {
  */
 function disableAgent(): string {
   return [
+    // Under provision.sh's lock: a provisioning running now ends first.
+    `exec 9>>${PROVISION_LOCK_FILE}`,
+    `flock -w ${SPRITES_LOCK_WAIT_S} 9 || { echo 'a provisioning holds the lock' >&2; exit ${PROVISION_LOCKED_EXIT}; }`,
     `sprite-env services stop ${SPRITES_AGENT_SERVICE} >/dev/null 2>&1 || true`,
     `sprite-env services delete ${SPRITES_AGENT_SERVICE} >/dev/null 2>&1 || true`,
     'cg=/sys/fs/cgroup/openbots-computer',

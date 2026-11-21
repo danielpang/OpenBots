@@ -71,7 +71,14 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
   protectFilesDir(config.filesDir);
   // Migrations as the tables' owner; then the app works under row-level
   // security, as openbots_app (db/app-role.ts, db/scope.ts).
-  const owner = createDb(config.databaseUrl);
+  const owner = createDb(
+    config.databaseUrl,
+    {},
+    config.databaseDirectUrl ? { sessionUrl: config.databaseDirectUrl } : {},
+  );
+  // Session locks (the checkout lock) need a direct connection: refused,
+  // and said so now, where the database URL goes through a pooler.
+  if (owner.sessionLockProblem) logger.error(owner.sessionLockProblem);
   await migrate(owner);
   const db = await openAppDb(owner, config, logger);
   // A self-hosted install is one implicit organization (plan 21.2).
