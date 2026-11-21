@@ -46,12 +46,6 @@ export interface ResetCheck {
   error?: string | null;
   /** Set with `error` when the computer could not be started for the check (a plan limit, say). */
   errorCode?: string | null;
-  /**
-   * With "Also forget sign-ins", the days the old computer is kept in case
-   * support needs to restore it; null or absent (an older server) where it
-   * is deleted at once.
-   */
-  keptDays?: number | null;
 }
 
 /** The server's 409 code when the reset's request id has no finished check. */
@@ -77,22 +71,9 @@ export const prepareReset = () =>
 export const resetCheck = (requestId: string) =>
   send<ResetCheck>('GET', `/api/v1/computer/reset/${encodeURIComponent(requestId)}`);
 
-/**
- * Resets the computer to an empty home, after a finished check. With
- * `deleteOldComputer` (only with `resetSignIns`), the old computer is deleted
- * now rather than kept for support; the field is sent only when it is set.
- */
-export const resetComputer = (
-  requestId: string,
-  resetSignIns: boolean,
-  deleteOldComputer = false,
-) =>
-  send<unknown>('POST', '/api/v1/computer/reset', {
-    requestId,
-    confirm: true,
-    resetSignIns,
-    ...(resetSignIns && deleteOldComputer ? { deleteOldComputer: true } : {}),
-  });
+/** Resets the computer to an empty home, after a finished check. */
+export const resetComputer = (requestId: string, resetSignIns: boolean) =>
+  send<unknown>('POST', '/api/v1/computer/reset', { requestId, confirm: true, resetSignIns });
 
 export type ComputerSettings = components['schemas']['ComputerSettings'];
 

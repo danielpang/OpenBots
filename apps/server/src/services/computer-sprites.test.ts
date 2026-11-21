@@ -1,4 +1,4 @@
-import { PROVISION_VERSION_FILE, SPRITES_RETIRED_LABEL, spriteName } from '@openbots/computer';
+import { PROVISION_VERSION_FILE, spriteName } from '@openbots/computer';
 import { EVENTS_CHANNEL, type WsEvent } from '@openbots/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -144,7 +144,10 @@ describe('computers on Sprites', () => {
       await until(() => expect(holds(computer)).toEqual([`openbots-${USE_HOLD_NAME}`]));
       const puts = () =>
         sprites.api.calls.filter(
-          (c) => c.op === 'exec' && (c.args[0] as string[]).includes('openbots-hold'),
+          (c) =>
+            c.op === 'exec' &&
+            (c.args[0] as string[])[0] === 'curl' &&
+            (c.args[0] as string[]).includes('PUT'),
         ).length;
       const before = puts();
       await until(() => expect(puts()).toBeGreaterThan(before + 1));
@@ -280,7 +283,7 @@ describe('computers on Sprites', () => {
       body: JSON.stringify({ requestId, confirm: true }),
     });
     expect(res.status, await res.clone().text()).toBe(202);
-    // The same Sprite, still named on the row: a later full reset retires it.
+    // The same Sprite, still named on the row: a later full reset deletes it.
     expect(await row()).toMatchObject({
       status: 'stopped',
       agentUrl: null,
@@ -303,19 +306,18 @@ describe('computers on Sprites', () => {
     expect(sprites.api.provisions[2]!.token).not.toBe(sprites.api.provisions[1]!.token);
   });
 
-  it('resets with the sign-ins by retiring the Sprite for seven days; the next start makes a new one', async () => {
+  it('resets with the sign-ins by deleting the Sprite; the next start makes a new one', async () => {
     const computer = await row();
     const old = sprites.api.sprites.get(computer.containerId!)!;
     old.files.set('/var/lib/openbots/x', new Uint8Array([1]));
     await t.inOrganization(() => destroyComputer(t.deps, computer, { signIns: true }));
-    // Kept, out of service (computer-retire.test.ts covers the rest).
-    expect(sprites.api.sprites.size).toBe(1);
-    expect(old.labels).toContain(SPRITES_RETIRED_LABEL);
+    // Deleted at once, through its record (computer-retire.test.ts covers the rest).
+    expect(sprites.api.sprites.has(old.name)).toBe(false);
     expect((await start()).status).toBe(200);
     const key = (await row()).machineKey!;
     const fresh = sprites.api.sprites.get(spriteName(key))!;
     expect(fresh.files.has('/var/lib/openbots/x')).toBe(false);
-    expect(sprites.api.sprites.size).toBe(2);
+    expect(sprites.api.sprites.size).toBe(1);
   });
 
   it('makes a Sprite for a remote row on a loopback agent instead of adopting it into Docker', async () => {

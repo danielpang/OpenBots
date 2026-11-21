@@ -798,7 +798,6 @@ describe('coder runner', () => {
         providerRef: `elsewhere-${sessionId}`,
         status: 'deleted',
         retiredAt: since,
-        deleteAfter: since,
         fence: fenceOf(computer!.agentToken),
       })
       .returning();

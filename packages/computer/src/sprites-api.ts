@@ -56,8 +56,6 @@ export interface SpriteInfo {
   url: string;
   status: SpriteStatus;
   urlAuth?: SpriteUrlAuth;
-  /** The Sprite's labels; absent when it has none. */
-  labels?: string[];
 }
 
 /** The Sprites network policy has the shape of the provider's egress policy. */
@@ -100,15 +98,11 @@ export interface SpritesApi {
   /** A Sprite already gone is not an error. */
   delete(name: string): Promise<void>;
   setUrlAuth(name: string, auth: SpriteUrlAuth, options?: SpriteCallOptions): Promise<void>;
-  /** Replaces the Sprite's labels (metadata only: it does not wake the Sprite). */
-  setLabels(name: string, labels: string[], options?: SpriteCallOptions): Promise<void>;
   setNetworkPolicy(
     name: string,
     policy: SpriteEgressPolicy,
     options?: SpriteCallOptions,
   ): Promise<void>;
-  /** The Sprite's network policy as the API holds it; null when it has none. */
-  getNetworkPolicy(name: string, options?: SpriteCallOptions): Promise<SpriteEgressPolicy | null>;
   /** Runs `argv` (no shell) and waits for it; a non-zero exit is a result, not an error. */
   exec(name: string, argv: string[], options?: SpriteExecOptions): Promise<SpriteExecResult>;
   writeFile(
@@ -301,10 +295,6 @@ export function createSpritesApi({
       const ms = options.timeoutMs ?? timeoutMs;
       await call('URL settings', name, ms, () => clientFor(ms).updateURLSettings(name, { auth }));
     },
-    async setLabels(name, labels, options = {}) {
-      const ms = options.timeoutMs ?? timeoutMs;
-      await call('labels', name, ms, () => clientFor(ms).updateSprite(name, { labels }));
-    },
     // Raw: see the header. The same endpoint and body the SDK sends.
     async setNetworkPolicy(name, policy, options = {}) {
       const ms = options.timeoutMs ?? timeoutMs;
@@ -320,26 +310,6 @@ export function createSpritesApi({
         );
         if (!response.ok) await refused(response);
         await response.body?.cancel();
-      });
-    },
-    // Raw, as setting it: the same endpoint, read.
-    async getNetworkPolicy(name, options = {}) {
-      const ms = options.timeoutMs ?? timeoutMs;
-      return call('network policy read', name, ms, async () => {
-        const response = await fetch(
-          `${base}/v1/sprites/${encodeURIComponent(name)}/policy/network`,
-          {
-            headers: { authorization: `Bearer ${token}` },
-            signal: AbortSignal.timeout(ms),
-          },
-        );
-        if (response.status === 404) {
-          await response.body?.cancel();
-          return null;
-        }
-        if (!response.ok) await refused(response);
-        const body = (await response.json()) as { rules?: unknown } | null;
-        return Array.isArray(body?.rules) ? { rules: body.rules as SpriteEgressRule[] } : null;
       });
     },
     async exec(name, argv, options = {}) {
@@ -449,7 +419,6 @@ function info(sprite: Sprite): SpriteInfo {
     url: sprite.url ?? '',
     status: sprite.status ?? '',
     ...(auth === 'sprite' || auth === 'public' ? { urlAuth: auth } : {}),
-    ...(sprite.labels?.length ? { labels: [...sprite.labels] } : {}),
   };
 }
 

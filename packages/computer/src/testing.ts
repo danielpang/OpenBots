@@ -34,7 +34,6 @@ import type {
   SpriteStatus,
   SpriteUrlAuth,
 } from './sprites-api.js';
-import { PROVISION_RETIRED_EXIT, SPRITES_RETIRED_MARKER } from './sprites.js';
 import type { ComputerCheckpoint, EgressPolicy } from './types.js';
 
 // Test doubles: an in-process control agent speaking
@@ -607,7 +606,6 @@ export interface FakeSprite {
   /** Live Tasks API tasks by name, with their expiry in seconds. */
   tasks: Map<string, number>;
   checkpoints: (ComputerCheckpoint & { files: Map<string, Uint8Array> })[];
-  labels: string[];
   /** Sprite services by name; the provision script registers the agent's. */
   services: Set<string>;
 }
@@ -657,7 +655,6 @@ export function fakeSpritesApi(): FakeSpritesApi {
     url: sprite.url,
     status: sprite.status,
     urlAuth: sprite.urlAuth,
-    ...(sprite.labels.length ? { labels: [...sprite.labels] } : {}),
   });
   const decode = (data: Uint8Array | string | undefined) =>
     typeof data === 'string' ? data : data ? new TextDecoder().decode(data) : '';
@@ -669,10 +666,6 @@ export function fakeSpritesApi(): FakeSpritesApi {
     provisions: [],
     urlFor: (name) => `https://${name}-abc123.sprites.app`,
     provisionScript: (sprite, run) => {
-      // As docker/sprites/provision.sh: no agent on a Sprite marked retired.
-      if (sprite.files.has(SPRITES_RETIRED_MARKER)) {
-        return { exitCode: PROVISION_RETIRED_EXIT, stdout: '', stderr: 'retired' };
-      }
       sprite.files.set(
         '/opt/openbots/provision.version',
         new TextEncoder().encode(`${run.env.OPENBOTS_PROVISION_VERSION ?? ''}\n`),
@@ -693,7 +686,6 @@ export function fakeSpritesApi(): FakeSpritesApi {
         policy: null,
         tasks: new Map(),
         checkpoints: [],
-        labels: [],
         services: new Set(),
       };
       api.sprites.set(name, sprite);
@@ -714,23 +706,11 @@ export function fakeSpritesApi(): FakeSpritesApi {
       if (!sprite) throw missing(name);
       sprite.urlAuth = auth;
     },
-    async setLabels(name, labels) {
-      api.calls.push({ op: 'setLabels', name, args: [labels] });
-      const sprite = api.sprites.get(name);
-      if (!sprite) throw missing(name);
-      sprite.labels = [...labels];
-    },
     async setNetworkPolicy(name, policy) {
       api.calls.push({ op: 'setNetworkPolicy', name, args: [policy] });
       const sprite = api.sprites.get(name);
       if (!sprite) throw missing(name);
       sprite.policy = structuredClone(policy);
-    },
-    async getNetworkPolicy(name) {
-      api.calls.push({ op: 'getNetworkPolicy', name, args: [] });
-      const sprite = api.sprites.get(name);
-      if (!sprite) throw missing(name);
-      return sprite.policy ? structuredClone(sprite.policy) : null;
     },
     async exec(name, argv, options = {}) {
       api.calls.push({ op: 'exec', name, args: [argv, options] });
@@ -757,17 +737,6 @@ export function fakeSpritesApi(): FakeSpritesApi {
         }
         if (method === 'DELETE') return ok(sprite.tasks.delete(task) ? '204' : '404');
       }
-      if (command === 'bash' && args[2] === 'openbots-hold') {
-        // sprites.ts `holdCommand`: place the task, take it back if marked retired.
-        const [task, body, marker] = args.slice(3) as [string, string, string];
-        const created = !sprite.tasks.has(task);
-        sprite.tasks.set(task, (JSON.parse(body) as { expire: number }).expire);
-        if (sprite.files.has(marker)) {
-          sprite.tasks.delete(task);
-          return ok('retired\n');
-        }
-        return ok(created ? '201\n' : '200\n');
-      }
       if (command === 'bash' && args[1]?.includes('read -r OPENBOTS_AGENT_TOKEN')) {
         const token = decode(options.stdin).replace(/\n$/, '');
         const env = options.env ?? {};
@@ -784,24 +753,14 @@ export function fakeSpritesApi(): FakeSpritesApi {
         return ok();
       }
       if (command === 'bash' && args[2] === 'as-root') {
-        // The home wipe (`find <home> -mindepth 1 -delete`), `rm -rf <dir>`,
-        // `rm -f -- <files>`, `touch -- <file>` and deleting a service.
-        const script = args[3] ?? '';
-        const home = /^find (\S+) -mindepth 1 -delete$/m.exec(script)?.[1];
-        const removed = /^rm -rf (\S+)$/m.exec(script)?.[1];
-        const files = /^rm -f -- (.+)$/m.exec(script)?.[1]?.split(' ') ?? [];
+        // The home wipe (`find <home> -mindepth 1 -delete`) and `rm -rf <dir>`.
+        const home = /^find (\S+) -mindepth 1 -delete$/m.exec(args[3] ?? '')?.[1];
+        const removed = /^rm -rf (\S+)$/m.exec(args[3] ?? '')?.[1];
         for (const path of [...sprite.files.keys()]) {
           if (home && path.startsWith(`${home}/`)) sprite.files.delete(path);
           if (removed && (path === removed || path.startsWith(`${removed}/`))) {
             sprite.files.delete(path);
           }
-          if (files.includes(path)) sprite.files.delete(path);
-        }
-        for (const [, file] of script.matchAll(/^touch -- (\S+)$/gm)) {
-          sprite.files.set(file!, new Uint8Array());
-        }
-        for (const [, service] of script.matchAll(/^sprite-env services delete (\S+)/gm)) {
-          sprite.services.delete(service!);
         }
         return ok();
       }

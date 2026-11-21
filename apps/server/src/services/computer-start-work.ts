@@ -1,8 +1,7 @@
 // The git identity writes a start leaves running on a computer (computer.ts
 // `afterStart`), by computer id. Whatever takes a machine out of service (a
-// stop, a reset, a retire) ends them first with `endStartWork`, so none of
-// them calls a machine that is stopped, paused or retired, which would wake
-// it. Its own module so computer.ts and computer-retire.ts both reach it.
+// stop, a reset) ends them first with `endStartWork`, so none of them calls a
+// machine that is stopped, paused or being deleted, which would wake it.
 
 const startWork = new Map<string, { controller: AbortController; done: Promise<void> }>();
 

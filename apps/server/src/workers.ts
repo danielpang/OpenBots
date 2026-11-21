@@ -67,7 +67,7 @@ export const JOB_HANDLERS: Record<
   [MEMORIES_QUEUE]: { handler: (deps) => reembedHandler(deps) as JobHandler, concurrency: 2 },
   // Making and provisioning Sprites (plan 9.5), one job per computer at a time (groupKey).
   [COMPUTERS_QUEUE]: { handler: (deps) => provisionHandler(deps) as JobHandler, concurrency: 4 },
-  // Retired computers finished retiring, or deleted for good after their seven days.
+  // The old machines of full resets, deleted; a deletion that failed is retried.
   [RETIRED_COMPUTERS_QUEUE]: {
     handler: (deps) => retiredComputerHandler(deps, () => computerProvider(deps)) as JobHandler,
     concurrency: 2,
@@ -134,12 +134,12 @@ export async function startWorkers(deps: AppDeps): Promise<{ stop(): Promise<voi
     );
   }, IDLE_SWEEP_MS);
   sweep.unref();
-  // Retired computers past their seven days are deleted, one whose retiring
-  // a crash cut short is finished, and a restore cut short is taken back; now
-  // and every five minutes, in every worker (each row is claimed by one).
+  // Old machines of full resets whose deletion failed or never ran are
+  // deleted, now and every five minutes, in every worker (each row is
+  // claimed by one).
   const sweepRetired = () =>
     inEveryOrganization(deps, () => sweepRetiredComputers(deps)).then(
-      (queued) => queued && logger.info({ computers: queued }, 'queued retired computers'),
+      (queued) => queued && logger.info({ computers: queued }, 'queued old computers to delete'),
       (err: unknown) => logger.error({ err }, 'retired computer sweep failed'),
     );
   void sweepRetired();
