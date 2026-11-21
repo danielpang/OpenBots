@@ -280,7 +280,12 @@ describe('computers on Sprites', () => {
       body: JSON.stringify({ requestId, confirm: true }),
     });
     expect(res.status, await res.clone().text()).toBe(202);
-    expect(await row()).toMatchObject({ status: 'stopped', agentUrl: null, containerId: null });
+    // The same Sprite, still named on the row: a later full reset retires it.
+    expect(await row()).toMatchObject({
+      status: 'stopped',
+      agentUrl: null,
+      containerId: computer.containerId,
+    });
     expect(sprite.files.has('/home/bot/notes.md')).toBe(false);
     expect(sprite.files.has('/var/lib/openbots/sign-in')).toBe(true);
     // The checkpoint came before the home was cleared, and the audit names it.
