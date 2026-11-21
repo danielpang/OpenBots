@@ -48,6 +48,8 @@ function setup(
   overrides: {
     decideStatus?: number;
     meStatus?: number;
+    /** What /me answers in place of the user, e.g. the server's 401 problem. */
+    meBody?: unknown;
     pending?: () => unknown[];
     headers?: Record<string, string>;
   } = {},
@@ -62,7 +64,7 @@ function setup(
     const { pathname } = new URL(input.url);
     if (pathname === '/api/v1/me') {
       return json(
-        { user: { id: 'u1', name: 'Dana Pang', email: 'dana@example.com' } },
+        overrides.meBody ?? { user: { id: 'u1', name: 'Dana Pang', email: 'dana@example.com' } },
         overrides.meStatus,
       );
     }
@@ -293,11 +295,29 @@ describe('server connection', () => {
     connection.close();
   });
 
-  it('reports a refused token', async () => {
-    const { connection, onUnauthorized } = setup({ meStatus: 401 });
+  it('reports a token the server refused', async () => {
+    const { connection, onUnauthorized } = setup({
+      meStatus: 401,
+      meBody: {
+        type: 'about:blank',
+        title: 'Sign in or send an API key',
+        status: 401,
+        code: 'UNAUTHORIZED',
+      },
+    });
     await expect(connection.refresh()).rejects.toThrow();
     expect(onUnauthorized).toHaveBeenCalled();
     connection.close();
+  });
+
+  it("keeps the token on a 401 that is not the server's own refusal", async () => {
+    // A proxy in the way, or an older server that sends no code.
+    for (const meBody of [{ error: 'unauthorized' }, 'Unauthorized']) {
+      const { connection, onUnauthorized } = setup({ meStatus: 401, meBody });
+      await expect(connection.refresh()).rejects.toThrow();
+      expect(onUnauthorized).not.toHaveBeenCalled();
+      connection.close();
+    }
   });
 
   it('authenticates with given headers instead of a token, as a paired server does', async () => {

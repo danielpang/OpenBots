@@ -135,7 +135,10 @@ describe('app sign-in on a self-hosted install', () => {
     // A revoked device's key stops working at once.
     const revoke = await request(t, 'DELETE', `/devices/${paired.device.id}`, { cookie });
     expect(revoke.status).toBe(204);
-    expect((await request(t, 'GET', '/me', { key: paired.key })).status).toBe(401);
+    // The apps forget a host only on this answer (apps/mobile transport, apps/desktop connection).
+    const gone = await request(t, 'GET', '/me', { key: paired.key });
+    expect(gone.status).toBe(401);
+    expect(await gone.json()).toMatchObject({ code: 'UNAUTHORIZED' });
   });
 
   it('still pairs from a QR code with no verifier, and ignores one sent', async () => {
@@ -179,7 +182,9 @@ describe('app sign-in on a self-hosted install', () => {
 
     const revoke = await request(t, 'DELETE', `/devices/${body.device.id}`, { cookie });
     expect(revoke.status).toBe(204);
-    expect((await request(t, 'GET', '/me', { cookie: mac })).status).toBe(401);
+    const ended = await request(t, 'GET', '/me', { cookie: mac });
+    expect(ended.status).toBe(401);
+    expect(await ended.json()).toMatchObject({ code: 'UNAUTHORIZED' });
     const [row] = await t.db
       .select()
       .from(schema.devices)

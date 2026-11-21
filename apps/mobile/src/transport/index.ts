@@ -185,13 +185,33 @@ export async function createTunnelTransport(
 
 /**
  * The server answered, and refused this device's key: it was revoked (from
- * Devices on the web), or the account is gone. Only for an OpenBots Cloud
- * account, which has no relay to try instead; the app then forgets the host.
+ * Devices on the web), or the account is gone. Only for a signed-in account
+ * (OpenBots Cloud, or a server added by key or email), which has no relay to
+ * try instead; the app then forgets the host.
  */
 export class CredentialRejectedError extends Error {
   constructor() {
     super('You were signed out of OpenBots Cloud on this device. Sign in again to go on.');
     this.name = 'CredentialRejectedError';
+  }
+}
+
+/**
+ * Whether a 401 is the OpenBots server's own refusal of the credential: its
+ * problem answer with code UNAUTHORIZED, which it sends for a revoked or
+ * unknown key and an ended session. Anything else (a proxy's 401, a page,
+ * no code) keeps the host and its keys; the connection error shows instead.
+ */
+async function credentialRefused(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.json()) as unknown;
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      (body as { code?: unknown }).code === 'UNAUTHORIZED'
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -215,7 +235,12 @@ export async function connectHost(
         signal: controller.signal,
       });
       if (response.ok) return transport;
-      if (response.status === 401 && host.kind === 'account' && !options.pairing)
+      if (
+        response.status === 401 &&
+        host.kind === 'account' &&
+        !options.pairing &&
+        (await credentialRefused(response))
+      )
         throw new CredentialRejectedError();
       throw new Error(`Server answered ${response.status}`);
     } catch (error) {

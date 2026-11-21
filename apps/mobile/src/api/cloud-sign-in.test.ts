@@ -164,8 +164,44 @@ describe('native Sign in with Apple', () => {
 });
 
 describe('a revoked OpenBots Cloud device', () => {
+  it("keeps the host on a 401 that is not the server's own refusal", async () => {
+    const answers = [
+      // A proxy in the way, or an older server that sends no code.
+      new Response(null, { status: 401 }),
+      new Response('<html>Unauthorized</html>', {
+        status: 401,
+        headers: { 'content-type': 'text/html' },
+      }),
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ];
+    for (const answer of answers) {
+      const answering = vi.fn<typeof globalThis.fetch>(async () => answer);
+      const attempt = connectHost(
+        { ...cloudHost(CLOUD), deviceId: 'd' },
+        { apiKey: 'obk_x' },
+        { fetch: answering },
+      );
+      await expect(attempt).rejects.toThrow('Cannot reach this server');
+      await expect(attempt).rejects.not.toBeInstanceOf(CredentialRejectedError);
+    }
+  });
+
   it('is told apart from an unreachable server, for an account only', async () => {
-    const refused = vi.fn<typeof fetch>(async () => new Response(null, { status: 401 }));
+    const refused = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: 'about:blank',
+            title: 'Invalid API key',
+            status: 401,
+            code: 'UNAUTHORIZED',
+          }),
+          { status: 401, headers: { 'content-type': 'application/problem+json' } },
+        ),
+    );
     await expect(
       connectHost({ ...cloudHost(CLOUD), deviceId: 'd' }, { apiKey: 'obk_x' }, { fetch: refused }),
     ).rejects.toThrow(CredentialRejectedError);
