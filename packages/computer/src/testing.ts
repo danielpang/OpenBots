@@ -34,6 +34,7 @@ import type {
   SpriteStatus,
   SpriteUrlAuth,
 } from './sprites-api.js';
+import { PROVISION_RETIRED_EXIT, SPRITES_RETIRED_MARKER } from './sprites.js';
 import type { ComputerCheckpoint, EgressPolicy } from './types.js';
 
 // Test doubles: an in-process control agent speaking
@@ -668,6 +669,10 @@ export function fakeSpritesApi(): FakeSpritesApi {
     provisions: [],
     urlFor: (name) => `https://${name}-abc123.sprites.app`,
     provisionScript: (sprite, run) => {
+      // As docker/sprites/provision.sh: no agent on a Sprite marked retired.
+      if (sprite.files.has(SPRITES_RETIRED_MARKER)) {
+        return { exitCode: PROVISION_RETIRED_EXIT, stdout: '', stderr: 'retired' };
+      }
       sprite.files.set(
         '/opt/openbots/provision.version',
         new TextEncoder().encode(`${run.env.OPENBOTS_PROVISION_VERSION ?? ''}\n`),
@@ -721,10 +726,17 @@ export function fakeSpritesApi(): FakeSpritesApi {
       if (!sprite) throw missing(name);
       sprite.policy = structuredClone(policy);
     },
+    async getNetworkPolicy(name) {
+      api.calls.push({ op: 'getNetworkPolicy', name, args: [] });
+      const sprite = api.sprites.get(name);
+      if (!sprite) throw missing(name);
+      return sprite.policy ? structuredClone(sprite.policy) : null;
+    },
     async exec(name, argv, options = {}) {
       api.calls.push({ op: 'exec', name, args: [argv, options] });
       const sprite = api.sprites.get(name);
       if (!sprite) throw missing(name);
+      if (options.signal?.aborted) throw new Error('exec was ended by its caller');
       // A request wakes a paused Sprite.
       sprite.status = 'running';
       const hooked = api.execHook?.(sprite, argv, options);

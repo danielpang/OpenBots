@@ -69,6 +69,7 @@ import {
   githubInstallationUrl,
   type DevicePoll,
 } from './github-device.js';
+import { watchFences } from './computer-fence.js';
 import { computerStdioSpec } from './computer-stdio.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 import { connectorWorkspace, currentWorkspace, inWorkspace, outsideScope } from '../db/scope.js';
@@ -1245,6 +1246,7 @@ export async function importConnectors(deps: ConnectorsDeps, viewer: Viewer, jso
 // process shares.
 const managers = new WeakMap<object, McpManager>();
 const listening = new WeakMap<object, Promise<Unsubscribe | null>>();
+const fenceWatchers = new WeakMap<object, () => void>();
 const keyOf = (deps: object) => (deps as { config?: object }).config ?? deps;
 const refreshing = new Map<string, Promise<string>>();
 
@@ -1330,6 +1332,18 @@ export function mcpManager(deps: ConnectorsDeps): McpManager {
             })
         : Promise.resolve(null),
     );
+    // A reset took the owner's machine away (computer-fence.ts): their stdio
+    // connectors on it stop, from the bus or from the database's fences, so a
+    // process that missed the control message stops them all the same.
+    const unwatch = watchFences(({ ownerId, workspaceId }) => {
+      if (!ownerId || !workspaceId) return;
+      void inWorkspace(workspaceId, () =>
+        stopComputerSessions(deps, created, { ownerId, workspaceId }),
+      ).catch((error: unknown) =>
+        deps.logger.warn({ err: error }, 'stopping stdio connectors with the computer failed'),
+      );
+    });
+    fenceWatchers.set(keyOf(deps), unwatch);
     manager = created;
   }
   return manager;
@@ -1364,6 +1378,8 @@ export async function closeMcpManager(deps: object): Promise<void> {
   const unsubscribe = listening.get(keyOf(deps));
   managers.delete(keyOf(deps));
   listening.delete(keyOf(deps));
+  fenceWatchers.get(keyOf(deps))?.();
+  fenceWatchers.delete(keyOf(deps));
   await (
     await unsubscribe
   )?.();

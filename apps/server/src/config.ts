@@ -94,6 +94,7 @@ const envSchema = z.object({
   OPENBOTS_MASTER_KEY: masterKey,
   OPENBOTS_MASTER_KEY_PREVIOUS: withDefault(masterKeyList, ''),
   DATABASE_URL: z.string().min(1),
+  DATABASE_DIRECT_URL: optional(z.string().min(1)),
   OPENBOTS_DB_APP_PASSWORD: optional(
     z.string().regex(/^[A-Za-z0-9_-]{16,128}$/, 'use 16 to 128 letters, digits, - or _'),
   ),
@@ -296,6 +297,12 @@ export interface Config {
   /** Secrets given in the plain environment rather than as NAME_FILE (S-1); main.ts warns. */
   secretsFromEnvironment: string[];
   databaseUrl: string;
+  /**
+   * DATABASE_DIRECT_URL: a direct connection to the same database, not
+   * through a pooler, for what needs a session of its own (the checkout
+   * locks, db/client.ts). Defaults to DATABASE_URL.
+   */
+  databaseDirectUrl?: string;
   /**
    * OPENBOTS_DB_APP_PASSWORD: the app connects as openbots_app with it, a role
    * that owns nothing and does not bypass row-level security (db/app-role.ts).
@@ -568,6 +575,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     previousMasterKeys: e.OPENBOTS_MASTER_KEY_PREVIOUS,
     secretsFromEnvironment: secrets.fromEnvironment,
     databaseUrl: e.DATABASE_URL,
+    ...(e.DATABASE_DIRECT_URL ? { databaseDirectUrl: e.DATABASE_DIRECT_URL } : {}),
     ...(e.OPENBOTS_DB_APP_PASSWORD ? { dbAppPassword: e.OPENBOTS_DB_APP_PASSWORD } : {}),
     redisUrl: e.REDIS_URL,
     dockerHost: e.DOCKER_HOST,

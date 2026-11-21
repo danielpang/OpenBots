@@ -66,8 +66,22 @@ import {
 } from './computer-use.js';
 import { MCP_CONTROL_CHANNEL, type McpControl } from './mcp-control.js';
 import { admitComputerWork, computerWorkRefusal } from './computer-admission.js';
-import { computerBusy, computerChanged, retainsOnReset, retireMachine } from './computer-retire.js';
+import {
+  computerBusy,
+  computerChanged,
+  retainsOnReset,
+  retireMachine,
+  type ResetRecord,
+  type RetiredRow,
+} from './computer-retire.js';
+import { bestEffort } from './best-effort.js';
 import { fenceComputer, isFenced } from './computer-fence.js';
+import {
+  PROVISION_HEARTBEAT_MS,
+  PROVISION_STALE_MS,
+  STOPPING_HEARTBEAT_MS,
+  STOPPING_TAKEOVER_MS,
+} from './computer-timing.js';
 import { beginStartWork, endStartWork } from './computer-start-work.js';
 
 export { startWorkSettled } from './computer-start-work.js';
@@ -143,11 +157,17 @@ export const PROVISION_WAIT_MS = 15_000;
 const PROVISION_POLL_MS = 250;
 /**
  * The start's wait, changeable by tests so a queued start answers at once, and
- * how long a row may wait on its job before a start queues another: longer
- * than the longest provisioning (15 minutes), so a job that is only slow is
- * not doubled.
+ * how long a row may go without word from its job (queued, or its heartbeat
+ * while it runs: `status_at`) before a start or the sweep queues another
+ * (computer-timing.ts `PROVISION_STALE_MS`). A job that is only slow beats,
+ * so it is never doubled.
  */
-export const provisionTimings = { waitMs: PROVISION_WAIT_MS, staleMs: 20 * 60_000 };
+export const provisionTimings = {
+  waitMs: PROVISION_WAIT_MS,
+  staleMs: PROVISION_STALE_MS,
+  /** How often a running job beats (`PROVISION_HEARTBEAT_MS`); tests set it short. */
+  heartbeatMs: PROVISION_HEARTBEAT_MS,
+};
 
 /**
  * The settings a computer's container is made with (plan 9.5). They live in
@@ -391,9 +411,19 @@ async function setStatus(
   return updated ?? row;
 }
 
+/** One more generation: what every reset, stop, start and claim writes. */
+const nextGeneration = () => sql`${schema.computers.generation} + 1`;
+
+/** The row is still at the generation `row` read: nothing reset, stopped, started or claimed it since. */
+const sameGeneration = (row: Pick<ComputerRow, 'generation'>) =>
+  eq(schema.computers.generation, row.generation);
+
 /**
  * Sets the row's status (and `more`) if it still matches `guard`; the row as
- * it then is, or null when it no longer matched (nothing was written).
+ * it then is, or null when it no longer matched (nothing was written). A
+ * write with no guard is a new start, stop or claim of the row, so it moves
+ * the row to its next generation; a guarded one is the work of whoever holds
+ * the generation the guard names, and leaves it.
  */
 async function setStatusIf(
   deps: AppDeps,
@@ -405,7 +435,7 @@ async function setStatusIf(
 ): Promise<ComputerRow | null> {
   const [updated] = await deps.db
     .update(schema.computers)
-    .set({ status, ...more })
+    .set({ status, ...more, ...(guard ? {} : { generation: nextGeneration() }) })
     .where(and(eq(schema.computers.id, row.id), guard))
     .returning();
   if (!updated && guard) return null;
@@ -422,19 +452,28 @@ class StaleJobError extends Error {
 }
 const computerChangedUnderJob = () => new StaleJobError();
 
-function publishStatus(
+/**
+ * Tells the owner's apps the computer's status: best effort. The row is what
+ * counts; a bus that is down never changes what a start, a stop or a reset
+ * did or answers.
+ */
+async function publishStatus(
   deps: AppDeps,
   row: ComputerRow,
   status: ComputerStatus,
   error: string | null = null,
 ) {
-  return publishEvent(
-    deps.infra.bus,
-    wsEvent(
-      'computer.status',
-      { computerId: row.id, status, error },
-      { user_id: row.ownerId, workspace_id: row.workspaceId },
+  await bestEffort(
+    publishEvent(
+      deps.infra.bus,
+      wsEvent(
+        'computer.status',
+        { computerId: row.id, status, error },
+        { user_id: row.ownerId, workspace_id: row.workspaceId },
+      ),
     ),
+    (failure) =>
+      deps.logger.warn({ err: failure, computerId: row.id, status }, 'publishing a status failed'),
   );
 }
 
@@ -447,6 +486,21 @@ function refOf(deps: AppDeps, row: ComputerRow): ComputerRef {
     containerId: row.containerId,
     agentUrl: row.agentUrl,
     agentToken: decryptSecretString(row.agentToken, keyring(deps)),
+    volumeName: row.volumeName,
+  };
+}
+
+/**
+ * Enough of a reference for the provider to find the machine by its name or
+ * container (stop, destroy, checkpoint): keyed on `containerId`, the
+ * machine's existence, never on whether it has an agent.
+ */
+function machineRefOf(row: ComputerRow): ComputerRef {
+  return {
+    provider: row.provider,
+    containerId: row.containerId,
+    agentUrl: row.agentUrl ?? '',
+    agentToken: '',
     volumeName: row.volumeName,
   };
 }
@@ -525,6 +579,7 @@ async function adoptStrayRemote(deps: AppDeps, row: ComputerRow): Promise<Comput
       agentUrl: null,
       agentToken: null,
       status: 'stopped',
+      generation: nextGeneration(),
     })
     .where(and(eq(schema.computers.id, row.id), eq(schema.computers.provider, 'remote')))
     .returning();
@@ -566,9 +621,13 @@ async function createMachine(
   status: 'creating' | 'updating' = 'creating',
   /** A provisioning job's: its writes land only while the row is still its (`jobGuard`). */
   guard?: SQL,
+  /** A provisioning job's: aborted once the row is no longer its, which ends the make. */
+  signal?: AbortSignal,
 ): Promise<ComputerRow> {
   const machines = provider(deps);
   row = await setStatus(deps, row, status, {}, null, guard);
+  // Inline (Docker), this start's own generation from here: a reset meanwhile wins.
+  guard ??= sameGeneration(row);
   const agentToken = randomBytes(32).toString('base64url');
   const env = sandboxEnv(deps);
   try {
@@ -582,6 +641,7 @@ async function createMachine(
       // Set by a full reset that kept the old machine, or by a restore, which
       // records the restored machine's own name (computer-retire.ts).
       ...(row.machineKey ? { machineKey: row.machineKey } : {}),
+      ...(signal ? { signal } : {}),
     });
     const created = await setStatus(
       deps,
@@ -611,6 +671,8 @@ async function createMachine(
     return created;
   } catch (error) {
     if (error instanceof StaleJobError) throw error;
+    // Ended because the row moved on: nothing of it is this job's to write.
+    if (signal?.aborted) throw computerChangedUnderJob();
     const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer create failed');
     await setStatusIf(deps, row, 'error', {}, message, guard);
@@ -661,7 +723,11 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
   if (provisionsInBackground(machines)) return startInBackground(deps, row, by);
   const began = Date.now();
   // Removed behind the server's back: made again, same home volume.
-  if (machine === 'missing') row = await createMachine(deps, row, by);
+  if (machine === 'missing') {
+    row = await createMachine(deps, row, by).catch((error: unknown) => {
+      throw error instanceof StaleJobError ? computerChanged() : error;
+    });
+  }
   // Made from an older image (an upgrade, plan 16.3), before the egress
   // proxy or the timezone changed, or on another sandbox network: made again,
   // same volumes. Only ever a stopped machine, so a running one moves at its
@@ -674,22 +740,36 @@ async function start(deps: AppDeps, owner: Owner, by: AuditActor): Promise<Start
       networkChanged(deps, row) ||
       // The same tag (`latest`) on a newer build, pulled at worker start.
       (await machines.runsImage?.(refOf(deps, row), deps.config.sandboxImage)) === false);
-  if (updated) row = await createMachine(deps, row, by, 'updating');
-  row = await setStatus(deps, row, 'starting');
   try {
-    await machines.start(refOf(deps, row));
+    if (updated) row = await createMachine(deps, row, by, 'updating');
+    row = await setStatus(deps, row, 'starting');
+    // This start's generation: a reset meanwhile takes the row, and this start writes nothing more.
+    const mine = sameGeneration(row);
+    try {
+      await machines.start(refOf(deps, row));
+    } catch (error) {
+      const message = failureText(deps, error);
+      deps.logger.error({ err: error, computerId: row.id }, 'computer start failed');
+      await setStatusIf(deps, row, 'error', {}, message, mine);
+      throw computerUnavailable(`The computer did not start: ${message}`);
+    }
+    // A fresh start has no displays running yet.
+    await deps.db
+      .update(schema.botScreens)
+      .set({ status: 'stopped' })
+      .where(eq(schema.botScreens.computerId, row.id));
+    row = await setStatus(
+      deps,
+      row,
+      'running',
+      { lastUsedAt: new Date(), spec: settledSpec(row) },
+      null,
+      mine,
+    );
   } catch (error) {
-    const message = failureText(deps, error);
-    deps.logger.error({ err: error, computerId: row.id }, 'computer start failed');
-    await setStatus(deps, row, 'error', {}, message);
-    throw computerUnavailable(`The computer did not start: ${message}`);
+    if (error instanceof StaleJobError) throw computerChanged();
+    throw error;
   }
-  // A fresh start has no displays running yet.
-  await deps.db
-    .update(schema.botScreens)
-    .set({ status: 'stopped' })
-    .where(eq(schema.botScreens.computerId, row.id));
-  row = await setStatus(deps, row, 'running', { lastUsedAt: new Date(), spec: settledSpec(row) });
   await afterStart(deps, owner, row, by, began);
   return { computer: row, durationMs: Date.now() - began, updated };
 }
@@ -748,19 +828,29 @@ async function startInBackground(
   by: AuditActor,
 ): Promise<Started> {
   const began = Date.now();
-  if (!BUSY.has(row.status)) {
+  if (!BUSY.has(row.status) || row.status === 'stopping') {
     const status = row.agentUrl ? 'starting' : 'creating';
     // Two starts at once, in two processes: one claims the row and queues.
-    const claimed = await claim(deps, row, eq(schema.computers.status, row.status), status);
+    // A stop nobody holds any more (`abandonedStop`) is taken over.
+    const claimed = await claim(
+      deps,
+      row,
+      and(
+        eq(schema.computers.status, row.status),
+        sameGeneration(row),
+        row.status === 'stopping' ? abandonedStop() : undefined,
+      ),
+      status,
+    );
     if (claimed) {
       await publishStatus(deps, claimed, status);
       await queueOrFail(deps, claimed, by, row.status as ComputerStatus);
     }
-  } else if (row.status !== 'stopping' && provisionStale(row)) {
-    // Its job was queued long ago and never ended (lost with a process that
+  } else {
+    // Its job has not been heard from for long (lost with a process that
     // died, or never queued): this start queues another. Waiting for a worker
     // to restart would leave the owner pressing Start for nothing.
-    await queueOrFail(deps, row, by);
+    await queueOrFail(deps, row, by, undefined, true);
   }
   const ready = await waitForComputer(deps, row.id, provisionTimings.waitMs);
   if (ready.status === 'running') {
@@ -774,21 +864,16 @@ async function startInBackground(
   throw computerStarting(ready.status);
 }
 
-/** True when the row has waited on its provisioning job for longer than any job takes. */
-function provisionStale(row: ComputerRow): boolean {
-  const at = specOf(row).provision?.at;
-  return at !== undefined && Date.now() - new Date(at).getTime() >= provisionTimings.staleMs;
-}
-
 /** `queueProvision` for a start: a queue that refuses answers as a computer that cannot start. */
 async function queueOrFail(
   deps: AppDeps,
   row: ComputerRow,
   by: AuditActor,
   releaseTo?: ComputerStatus,
+  silentOnly = false,
 ) {
   try {
-    await queueProvision(deps, row, by, releaseTo);
+    await queueProvision(deps, row, by, releaseTo, silentOnly);
   } catch (error) {
     deps.logger.error({ err: error, computerId: row.id }, 'queueing the provisioning failed');
     throw computerUnavailable('The computer could not be queued to start. Try again shortly.');
@@ -813,17 +898,26 @@ async function queueProvision(
   row: ComputerRow,
   by: AuditActor,
   releaseTo?: ComputerStatus,
+  /** Only when its job has not been heard from (`provisionSilent`). */
+  silentOnly = false,
 ): Promise<boolean> {
   const attempt = randomUUID();
   const attemptOf = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
   const [queued] = await deps.db
     .update(schema.computers)
-    .set({ spec: { ...specOf(row), provision: { attempt, at: new Date().toISOString() } } })
+    .set({
+      spec: { ...specOf(row), provision: { attempt, at: new Date().toISOString() } },
+      // A claim: any job of an earlier attempt writes nothing more, and the
+      // row's busy state counts from now.
+      generation: nextGeneration(),
+      statusAt: sql`clock_timestamp()`,
+    })
     .where(
       and(
         eq(schema.computers.id, row.id),
         eq(schema.computers.status, row.status),
         sql`${attemptOf} is not distinct from ${specOf(row).provision?.attempt ?? null}`,
+        silentOnly ? provisionSilent() : undefined,
       ),
     )
     .returning();
@@ -879,7 +973,7 @@ async function waitForComputer(deps: AppDeps, computerId: string, ms: number) {
  */
 export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promise<void> {
   const machines = computerProvider(deps);
-  let [row] = await deps.db
+  const [row] = await deps.db
     .select()
     .from(schema.computers)
     .where(eq(schema.computers.id, job.computerId));
@@ -891,14 +985,68 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   // Every write of this job lands only while the row is still its own: the
   // same attempt and the same machine key. A reset or restore that moved the
   // row on meanwhile is never overwritten by what this job read before.
-  const guard = jobGuard(row, job);
+  const guard = jobGuard(row);
+  // Its heartbeat: `status_at` says the job runs (a start or the sweep queues
+  // another only once it falls silent), and a beat that finds the row no
+  // longer this job's ends it, its provider call too, so a reset that
+  // cancelled it does not leave it running for long.
+  const lost = new AbortController();
+  const attempt = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
+  const beat = async () => {
+    const [still] = await deps.db
+      .update(schema.computers)
+      .set({ statusAt: sql`clock_timestamp()` })
+      .where(
+        and(
+          eq(schema.computers.id, row!.id),
+          guard,
+          job.attempt ? sql`${attempt} = ${job.attempt}` : undefined,
+        ),
+      )
+      .returning({ id: schema.computers.id });
+    if (!still) lost.abort(computerChangedUnderJob());
+  };
+  await beat();
+  const timer = setInterval(() => {
+    beat().catch((error: unknown) =>
+      deps.logger.warn(
+        { err: error, computerId: job.computerId },
+        'a provisioning heartbeat failed',
+      ),
+    );
+  }, provisionTimings.heartbeatMs);
+  timer.unref?.();
   try {
+    await provisionWith(deps, machines, job, row, guard, lost.signal, timer, owner, began);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/** `provisionComputer`'s work, with its heartbeat running (`signal` ends it). */
+async function provisionWith(
+  deps: AppDeps,
+  machines: ComputerProvider,
+  job: ProvisionJob,
+  row: ComputerRow,
+  guard: SQL,
+  signal: AbortSignal,
+  timer: ReturnType<typeof setInterval>,
+  owner: Owner,
+  began: number,
+): Promise<void> {
+  try {
+    if (signal.aborted) throw computerChangedUnderJob();
     const machine = row.agentUrl ? await machines.status(refOf(deps, row)) : 'missing';
-    if (machine === 'missing') row = await createMachine(deps, row, job.by, 'creating', guard);
+    if (signal.aborted) throw computerChangedUnderJob();
+    if (machine === 'missing') {
+      row = await createMachine(deps, row, job.by, 'creating', guard, signal);
+    }
     row = await setStatus(deps, row, 'starting', {}, null, guard);
-    await machines.start(refOf(deps, row));
+    if (signal.aborted) throw computerChangedUnderJob();
+    await machines.start(refOf(deps, row), { signal });
   } catch (error) {
-    if (error instanceof StaleJobError) {
+    if (error instanceof StaleJobError || signal.aborted) {
       deps.logger.info({ computerId: row.id }, 'the computer moved on while its provisioning ran');
       return;
     }
@@ -925,6 +1073,7 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
     deps.logger.info({ computerId: row.id }, 'the computer moved on while its provisioning ran');
     return;
   }
+  clearInterval(timer);
   row = started;
   // The agent may have been installed again, so no display runs.
   await deps.db
@@ -934,14 +1083,17 @@ export async function provisionComputer(deps: AppDeps, job: ProvisionJob): Promi
   await afterStart(deps, owner, row, job.by, began);
 }
 
-/** What a provisioning job's writes require of the row: its attempt (or none) and its machine key. */
-function jobGuard(row: ComputerRow, job: ProvisionJob): SQL {
-  const attemptOf = sql`${schema.computers.spec} #>> '{provision,attempt}'`;
+/**
+ * What a provisioning job's writes require of the row: the generation it
+ * read and its machine key. Every reset, stop, start and claim moves the
+ * generation on (a soft reset and a delete of the old machine too, which keep
+ * the key), so nothing that moved the row on meanwhile is overwritten. A
+ * queue whose answer was lost gives the attempt back (`queueProvision`)
+ * without moving the generation, so that job's work still stands.
+ */
+function jobGuard(row: ComputerRow): SQL {
   return and(
-    // Its own attempt, or none: a queue whose answer was lost gives the
-    // attempt back (`queueProvision`), and the job's work still stands for
-    // the same machine unless another start claimed the row meanwhile.
-    job.attempt ? sql`(${attemptOf} = ${job.attempt} or ${attemptOf} is null)` : undefined,
+    sameGeneration(row),
     row.machineKey === null
       ? isNull(schema.computers.machineKey)
       : eq(schema.computers.machineKey, row.machineKey),
@@ -972,7 +1124,8 @@ export async function recoverProvisioning(deps: AppDeps): Promise<number> {
         // `stopping` too: a start waits on it (BUSY) and, unlike a Docker
         // computer's, never takes it over, while the idle sweep skips Sprites,
         // so a stop cut short would leave the computer unusable for good.
-        inArray(schema.computers.status, ['creating', 'starting', 'updating', 'stopping']),
+        // A stop still held, or a reset's retirement still open, is left alone.
+        or(inArray(schema.computers.status, PROVISIONING), abandonedStop()),
       ),
     );
   for (const row of rows) await queueProvision(deps, row, SYSTEM_ACTOR);
@@ -1019,6 +1172,89 @@ export interface WakeOptions {
 
 /** Statuses a wake leaves alone. */
 const BUSY = new Set<string>(['creating', 'updating', 'starting', 'stopping']);
+/** Statuses of a start or an update under way, which a reset cancels. */
+const PROVISIONING = ['creating', 'starting', 'updating'];
+/**
+ * How long a computer may read `stopping` with no heartbeat from whoever
+ * holds it before a reset or a start takes it over and the sweep finishes
+ * the stop (computer-timing.ts). The longest a member's reset is refused as
+ * busy (409 `COMPUTER_BUSY`) after a process died.
+ */
+export { STOPPING_TAKEOVER_MS };
+
+/** The database's clock, or `at` where a caller (a test, a sweep) names the time. */
+const clockOf = (at?: Date) => (at ? sql`${at.toISOString()}::timestamptz` : sql`now()`);
+
+/**
+ * A `stopping` row that nobody holds: its holder's heartbeat (`status_at`,
+ * the database's clock) is older than `STOPPING_TAKEOVER_MS`, and no reset's
+ * retirement of its machine is still open (not settled, not given up). A
+ * retirement holds the computer `stopping` until it is settled
+ * (`audited_at`), by the reset or its job, whatever its age
+ * (computer-retire.ts): a start in between would make the new machine while
+ * the reset could still be undone, and its cleanup could then land on it.
+ */
+function abandonedStop(at?: Date): SQL {
+  return and(
+    eq(schema.computers.status, 'stopping'),
+    sql`${schema.computers.statusAt} < ${clockOf(at)} - ${STOPPING_TAKEOVER_MS} * interval '1 millisecond'`,
+    sql`not exists (select 1 from ${schema.retiredComputers} r where r.computer_id = "computers"."id" and r.status in ('retiring', 'deleting') and r.audited_at is null and r.gave_up_at is null)`,
+  )!;
+}
+
+/** The row has had no word from its provisioning job for `provisionTimings.staleMs`. */
+function provisionSilent(at?: Date): SQL {
+  return sql`${schema.computers.statusAt} < ${clockOf(at)} - ${provisionTimings.staleMs} * interval '1 millisecond'`;
+}
+
+/**
+ * Refreshes the `stopping` claim `row` holds (its generation): true while it
+ * is still this holder's, which keeps any start, reset or sweep from taking
+ * it over (`abandonedStop`).
+ */
+async function stillStopping(deps: AppDeps, row: ComputerRow): Promise<boolean> {
+  const [held] = await deps.db
+    .update(schema.computers)
+    .set({ statusAt: sql`clock_timestamp()` })
+    .where(
+      and(
+        eq(schema.computers.id, row.id),
+        eq(schema.computers.status, 'stopping'),
+        sameGeneration(row),
+      ),
+    )
+    .returning({ id: schema.computers.id });
+  return held !== undefined;
+}
+
+/**
+ * Runs `fn` while holding the `stopping` claim on `row`: every
+ * `STOPPING_HEARTBEAT_MS` the claim is refreshed (`stillStopping`). Should a
+ * refresh find it taken (this process stalled past `STOPPING_TAKEOVER_MS`),
+ * `fn`'s signal is aborted, which ends the provider's call where it can.
+ */
+async function holdingStop<T>(
+  deps: AppDeps,
+  row: ComputerRow,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const lost = new AbortController();
+  const timer = setInterval(() => {
+    stillStopping(deps, row).then(
+      (held) => {
+        if (!held) lost.abort(new Error('The computer was taken over meanwhile'));
+      },
+      (error: unknown) =>
+        deps.logger.warn({ err: error, computerId: row.id }, 'refreshing a stop failed'),
+    );
+  }, STOPPING_HEARTBEAT_MS);
+  timer.unref?.();
+  try {
+    return await fn(lost.signal);
+  } finally {
+    clearInterval(timer);
+  }
+}
 
 /**
  * Starts the owner's computer in the background when it is off (plan 9.5):
@@ -1241,7 +1477,15 @@ export async function stopComputer(
 ): Promise<ComputerRow> {
   if (!row.agentUrl || row.status === 'stopped') return row;
   endStartWork(row.id);
-  return stopMachine(deps, await setStatus(deps, row, 'stopping'), by);
+  // A claim of its own: a start or a job meanwhile writes nothing over it.
+  const [claimed] = await deps.db
+    .update(schema.computers)
+    .set({ status: 'stopping', statusAt: sql`clock_timestamp()`, generation: nextGeneration() })
+    .where(eq(schema.computers.id, row.id))
+    .returning();
+  if (!claimed) return row;
+  await publishStatus(deps, claimed, 'stopping');
+  return stopMachine(deps, claimed, by);
 }
 
 /**
@@ -1274,114 +1518,180 @@ export interface DestroyComputerOptions {
    * with a machine that is retired rather than removed.
    */
   checkpointId?: string | null;
+  /** The member's reset, recorded with a retired machine for its audit and cleanup. */
+  reset?: ResetRecord;
+}
+
+/** What `resetMachine` did: the row as it now is, and the record of a machine it retired. */
+export interface MachineReset {
+  computer: ComputerRow;
+  /** Set when the machine was retired (kept, or deleted through the record). */
+  retired: RetiredRow | null;
 }
 
 /**
- * The machine part of a reset (GH5; services/computer-reset.ts asks first):
- * stops the computer if it is up (its stdio connectors and coding sessions
- * end with it), then removes the container and its home volume through the
- * provider, and the state volume only with `signIns`. The row stays,
- * `stopped`, with no machine, so the next start makes a fresh one with the
- * same volume name. Docker and Sprites only: the remote machine is not the
- * server's to remove (409 `RESET_UNSUPPORTED`). Refused while a job is
- * making, starting or stopping the computer (409 `COMPUTER_BUSY`). A stop
- * that fails does not stop the reset, since removing the container stops it
- * anyway. Once the old machine is gone or out of reach, every process fences
- * its agent token (computer-fence.ts).
+ * The machine part of a reset (GH5; services/computer-reset.ts asks first).
+ * The row is claimed for the reset with one conditional UPDATE that moves it
+ * to its next generation: a start or an update under way (`creating`,
+ * `starting`, `updating`) is cancelled, since every write of its job needs
+ * the generation it read, and a stop older than `STOPPING_TAKEOVER_MS` is
+ * taken over; a fresher stop is refused (409 `COMPUTER_BUSY`), so no member
+ * waits longer than that to reset. Then the computer is stopped if it is up
+ * (its stdio connectors and coding sessions end with it) and its machine is
+ * taken away: with `signIns`, on a provider that can retire it (Sprites), it
+ * is retired (computer-retire.ts) and kept `RETIRED_COMPUTER_DAYS`, or
+ * deleted through its record with `deleteOld`; otherwise the provider removes
+ * the container and its home volume, and the state volume only with
+ * `signIns`. The row stays, `stopped`, with no machine, so the next start
+ * makes a fresh one. Docker and Sprites only: the remote machine is not the
+ * server's to remove (409 `RESET_UNSUPPORTED`). A stop that fails does not
+ * stop the reset, since removing or retiring the machine stops it anyway.
+ * Once the old machine is gone or out of reach, every process fences its
+ * agent token (computer-fence.ts). Every branch is keyed on `containerId`,
+ * the machine's existence, so a machine with no agent yet (a restored one)
+ * is never left behind unrecorded.
  */
+export async function resetMachine(
+  deps: AppDeps,
+  row: ComputerRow,
+  options: DestroyComputerOptions,
+  by: AuditActor = { type: 'user', id: row.ownerId },
+): Promise<MachineReset> {
+  const machines = provider(deps);
+  assertResettable(deps);
+  const [claimed] = await deps.db
+    .update(schema.computers)
+    .set({
+      status: 'stopping',
+      statusAt: sql`clock_timestamp()`,
+      generation: nextGeneration(),
+      spec: sql`${schema.computers.spec} - 'provision'`,
+    })
+    .where(
+      and(
+        eq(schema.computers.id, row.id),
+        row.containerId === null
+          ? isNull(schema.computers.containerId)
+          : eq(schema.computers.containerId, row.containerId),
+        or(
+          notInArray(schema.computers.status, [...BUSY]),
+          inArray(schema.computers.status, PROVISIONING),
+          abandonedStop(),
+        ),
+      ),
+    )
+    .returning();
+  if (!claimed) {
+    const [now] = await deps.db
+      .select({ status: schema.computers.status })
+      .from(schema.computers)
+      .where(eq(schema.computers.id, row.id));
+    throw now && BUSY.has(now.status) ? computerBusy(now.status) : computerChanged();
+  }
+  endStartWork(row.id);
+  await publishStatus(deps, claimed, 'stopping');
+  // The reset holds this claim (`stopping`, this generation) to its end: the
+  // stop below keeps it, and the destructive step runs while it is held, so
+  // no start begins in between (`holdingStop`).
+  const current = claimed;
+  // `stopMachine` ends the coding sessions; with nothing to stop, they end here.
+  if (claimed.agentUrl && claimed.agentToken && row.status !== 'stopped') {
+    await stopMachine(deps, claimed, by, {}, { keepClaim: true }).catch((error: unknown) =>
+      // Removing or retiring the machine stops it anyway.
+      deps.logger.warn({ err: error, computerId: row.id }, 'stop before reset failed'),
+    );
+  } else {
+    await bestEffort(
+      deps.infra.bus.publish<CoderControl>(CODER_CONTROL_CHANNEL, {
+        type: 'stop_all',
+        computerId: row.id,
+      }),
+      (error) =>
+        deps.logger.warn({ err: error, computerId: row.id }, 'stopping coding sessions failed'),
+    );
+  }
+  // A full reset on a provider that can retire the machine takes it out of
+  // reach and records it (computer-retire.ts): kept RETIRED_COMPUTER_DAYS, or
+  // deleted now through its record when the member asked. The row gets a new
+  // machine key, so its next start makes a new machine. It answers only once
+  // the old machine is out of reach, or says it failed.
+  if (
+    options.signIns &&
+    retainsOnReset(machines) &&
+    current.containerId &&
+    current.provider === machines.name
+  ) {
+    return retireMachine(deps, machines, current, {
+      checkpointId: options.checkpointId ?? null,
+      by,
+      reason: 'reset',
+      deleteNow: options.deleteOld ?? false,
+      ...(options.reset ? { reset: options.reset } : {}),
+    });
+  }
+  const mine = and(sameGeneration(claimed), eq(schema.computers.status, 'stopping'));
+  if (current.containerId) {
+    // Still this reset's, refreshed just before anything is destroyed: a
+    // reset that lost the computer destroys nothing.
+    if (!(await stillStopping(deps, claimed))) throw computerChanged();
+    try {
+      await holdingStop(deps, claimed, (signal) =>
+        machines.destroy(machineRefOf(current), {
+          computerId: row.id,
+          home: true,
+          state: options.signIns,
+          signal,
+        }),
+      );
+    } catch (error) {
+      const message = failureText(deps, error);
+      deps.logger.error({ err: error, computerId: row.id }, 'computer reset failed');
+      await setStatusIf(deps, current, 'error', {}, message, mine);
+      throw computerUnavailable(`The computer could not be reset: ${message}`);
+    }
+  }
+  const reset = await setStatusIf(
+    deps,
+    current,
+    'stopped',
+    {
+      containerId: null,
+      agentUrl: null,
+      agentToken: null,
+      volumeName: current.volumeName ?? volumeName(row.id),
+    },
+    null,
+    mine,
+  );
+  if (!reset) {
+    // Only where this process stalled past the takeover while the provider
+    // worked: its machine was (at least in part) cleared or removed though
+    // the row moved on. Said, not hidden: the reset's cleanup and audit
+    // follow (computer-reset.ts), and no fence, since whoever took the row
+    // over may be using that machine's token now.
+    deps.logger.error(
+      { computerId: row.id },
+      'a reset lost the computer while its machine was being reset',
+    );
+    const [now] = await deps.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.id, row.id));
+    return { computer: now ?? current, retired: null };
+  }
+  // Out of service by a write that landed: its token is refused everywhere.
+  await fenceComputer(deps, current);
+  return { computer: reset, retired: null };
+}
+
+/** `resetMachine`, for the row alone. */
 export async function destroyComputer(
   deps: AppDeps,
   row: ComputerRow,
   options: DestroyComputerOptions,
   by: AuditActor = { type: 'user', id: row.ownerId },
 ): Promise<ComputerRow> {
-  const machines = provider(deps);
-  assertResettable(deps);
-  if (BUSY.has(row.status)) throw computerBusy(row.status);
-  // `stopMachine` ends the coding sessions; with nothing to stop, they end here.
-  const stops = !!row.agentUrl && row.status !== 'stopped';
-  if (stops) {
-    // Claimed for the stop, so a second reset at once is refused here
-    // rather than stopping the machine under the first one.
-    const [claimed] = await deps.db
-      .update(schema.computers)
-      .set({ status: 'stopping' })
-      .where(
-        and(
-          eq(schema.computers.id, row.id),
-          notInArray(schema.computers.status, [...BUSY]),
-          row.containerId === null
-            ? isNull(schema.computers.containerId)
-            : eq(schema.computers.containerId, row.containerId),
-        ),
-      )
-      .returning();
-    if (!claimed) {
-      const [now] = await deps.db
-        .select({ status: schema.computers.status })
-        .from(schema.computers)
-        .where(eq(schema.computers.id, row.id));
-      throw now && BUSY.has(now.status) ? computerBusy(now.status) : computerChanged();
-    }
-    endStartWork(row.id);
-    await publishStatus(deps, claimed, 'stopping');
-    row = await stopMachine(deps, claimed, by).catch(async (error: unknown) => {
-      deps.logger.warn({ err: error, computerId: row.id }, 'stop before reset failed');
-      const [now] = await deps.db
-        .select()
-        .from(schema.computers)
-        .where(eq(schema.computers.id, row.id));
-      return now ?? row;
-    });
-  } else {
-    endStartWork(row.id);
-    await deps.infra.bus
-      .publish<CoderControl>(CODER_CONTROL_CHANNEL, { type: 'stop_all', computerId: row.id })
-      .catch((error: unknown) =>
-        deps.logger.warn({ err: error, computerId: row.id }, 'stopping coding sessions failed'),
-      );
-  }
-  // A full reset on a provider that can retire the machine keeps it for
-  // RETIRED_COMPUTER_DAYS instead (computer-retire.ts), unless the member asked
-  // to delete it now; the row gets a new machine key, so its next start makes
-  // a new machine. It answers only once the old machine is out of reach, or
-  // says it failed and changed nothing.
-  if (
-    options.signIns &&
-    !options.deleteOld &&
-    retainsOnReset(machines) &&
-    row.containerId &&
-    row.provider === machines.name
-  ) {
-    const { computer } = await retireMachine(deps, machines, row, {
-      checkpointId: options.checkpointId ?? null,
-      by,
-      reason: 'reset',
-    });
-    return computer;
-  }
-  if (row.agentUrl && row.agentToken && row.containerId) {
-    try {
-      await machines.destroy(refOf(deps, row), {
-        computerId: row.id,
-        home: true,
-        state: options.signIns,
-      });
-    } catch (error) {
-      const message = failureText(deps, error);
-      deps.logger.error({ err: error, computerId: row.id }, 'computer reset failed');
-      await setStatus(deps, row, 'error', {}, message);
-      throw computerUnavailable(`The computer could not be reset: ${message}`);
-    }
-  }
-  const reset = await setStatus(deps, row, 'stopped', {
-    containerId: null,
-    agentUrl: null,
-    agentToken: null,
-    volumeName: row.volumeName ?? volumeName(row.id),
-  });
-  await fenceComputer(deps, row);
-  return reset;
+  return (await resetMachine(deps, row, options, by)).computer;
 }
 
 /**
@@ -1399,12 +1709,12 @@ export async function checkpointBeforeReset(
   options: DestroyComputerOptions,
 ): Promise<string | null> {
   const machines = provider(deps);
-  if (!machines.checkpoint || !row.agentUrl || !row.agentToken) return null;
+  if (!machines.checkpoint) return null;
   if (options.signIns && (options.deleteOld || !retainsOnReset(machines))) return null;
   if (machines.name !== row.provider || !row.containerId) return null;
   try {
     return await machines.checkpoint(
-      refOf(deps, row),
+      machineRefOf(row),
       `OpenBots: before a reset, ${new Date().toISOString()}`,
     );
   } catch (error) {
@@ -1438,30 +1748,38 @@ async function stopMachine(
   row: ComputerRow,
   by: AuditActor,
   failed: Partial<ComputerRow> = {},
+  /** A reset's: the row stays `stopping`, its claim, for what the reset does next. */
+  { keepClaim = false }: { keepClaim?: boolean } = {},
 ): Promise<ComputerRow> {
   endStartWork(row.id);
   // Its owner's stdio connectors running in it end first, in every process.
-  await deps.infra.bus
-    .publish<McpControl>(MCP_CONTROL_CHANNEL, {
+  await bestEffort(
+    deps.infra.bus.publish<McpControl>(MCP_CONTROL_CHANNEL, {
       type: 'computer',
       ownerId: row.ownerId,
       workspaceId: row.workspaceId,
-    })
-    .catch((error: unknown) =>
+    }),
+    (error) =>
       deps.logger.warn({ err: error, computerId: row.id }, 'stopping stdio connectors failed'),
-    );
+  );
   // And its coding sessions, wherever their jobs run (I12).
-  await deps.infra.bus
-    .publish<CoderControl>(CODER_CONTROL_CHANNEL, { type: 'stop_all', computerId: row.id })
-    .catch((error: unknown) =>
+  await bestEffort(
+    deps.infra.bus.publish<CoderControl>(CODER_CONTROL_CHANNEL, {
+      type: 'stop_all',
+      computerId: row.id,
+    }),
+    (error) =>
       deps.logger.warn({ err: error, computerId: row.id }, 'stopping coding sessions failed'),
-    );
+  );
+  // Its writes stand only while the row is still this stop's (a reset or a
+  // start that took it over meanwhile wins).
+  const mine = sameGeneration(row);
   try {
-    await provider(deps).stop(refOf(deps, row));
+    await holdingStop(deps, row, () => provider(deps).stop(machineRefOf(row)));
   } catch (error) {
     const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer stop failed');
-    await setStatus(deps, row, 'error', failed, message);
+    if (!keepClaim) await setStatusIf(deps, row, 'error', failed, message, mine);
     throw computerUnavailable(`The computer did not stop: ${message}`);
   }
   await deps.db
@@ -1474,7 +1792,9 @@ async function stopMachine(
     by,
     and(eq(schema.botScreens.computerId, row.id), isNotNull(schema.botScreens.controlledByUserId))!,
   );
-  const stopped = await setStatus(deps, row, 'stopped', { spec: settledSpec(row) });
+  if (keepClaim) return row;
+  const stopped = await setStatusIf(deps, row, 'stopped', { spec: settledSpec(row) }, null, mine);
+  if (!stopped) return row;
   await auditComputer(deps, stopped, by, 'computer.stop', {});
   return stopped;
 }
@@ -1553,8 +1873,10 @@ function auditComputer(
  * connectors. One whose provisioning is out of date is updated instead, once
  * unused for the default idle time (`queueSpriteUpdates`).
  */
-export async function sweepIdleComputers(deps: AppDeps, now = new Date()): Promise<number> {
+export async function sweepIdleComputers(deps: AppDeps, at?: Date): Promise<number> {
   if (!computerAvailable(deps)) return 0;
+  await recoverStaleComputers(deps, at);
+  const now = at ?? new Date();
   await queueSpriteUpdates(deps, now);
   const candidates = await deps.db
     .select()
@@ -1590,6 +1912,82 @@ export async function sweepIdleComputers(deps: AppDeps, now = new Date()): Promi
     }
   }
   return stopped;
+}
+
+/**
+ * Every sweep (`IDLE_SWEEP_MS`, in every worker and organization): a busy
+ * status a process left when it died is recovered, by its age in the
+ * database (`status_at`), never by what one process remembers. A `stopping`
+ * older than `STOPPING_TAKEOVER_MS` has its stop finished (or, with no
+ * machine left to stop, reads `stopped`); a `creating`, `starting` or
+ * `updating` older than any provisioning (`provisionTimings.staleMs`) gets its
+ * job queued again under a new attempt where a job makes it (Sprites), or
+ * reads `error` where the start ran in a request (Docker), so the next start
+ * begins afresh. Each recovery is one conditional UPDATE on the row's
+ * generation, so of several workers one recovers it, and the process that
+ * left it, if it was only slow, writes nothing more. Returns how many it
+ * recovered.
+ */
+export async function recoverStaleComputers(deps: AppDeps, now?: Date): Promise<number> {
+  const machines = computerProvider(deps);
+  if (!machines) return 0;
+  const rows = await deps.db
+    .select()
+    .from(schema.computers)
+    .where(
+      or(
+        abandonedStop(now),
+        and(inArray(schema.computers.status, PROVISIONING), provisionSilent(now)),
+      ),
+    );
+  let recovered = 0;
+  for (const row of rows) {
+    // Still as read, and still abandoned by the database's clock when claimed.
+    const still = and(
+      eq(schema.computers.status, row.status),
+      sameGeneration(row),
+      row.status === 'stopping' ? abandonedStop(now) : provisionSilent(now),
+    );
+    try {
+      if (row.status === 'stopping') {
+        if (row.containerId && row.agentUrl && row.provider === machines.name) {
+          const claimed = await claim(deps, row, still);
+          if (!claimed) continue;
+          recovered++;
+          deps.logger.warn({ computerId: row.id }, 'a stop was cut short; it is finished now');
+          await stopMachine(deps, claimed, SYSTEM_ACTOR).catch((error: unknown) =>
+            deps.logger.warn({ err: error, computerId: row.id }, 'finishing a stop failed'),
+          );
+        } else {
+          const claimed = await claim(deps, row, still, 'stopped');
+          if (!claimed) continue;
+          recovered++;
+          await publishStatus(deps, claimed, 'stopped');
+        }
+      } else if (provisionsInBackground(machines) && row.provider === machines.name) {
+        if (await queueProvision(deps, row, SYSTEM_ACTOR)) {
+          recovered++;
+          deps.logger.warn(
+            { computerId: row.id },
+            'a provisioning job was lost; it is queued again',
+          );
+        }
+      } else {
+        const failed = await claim(deps, row, still, 'error');
+        if (!failed) continue;
+        recovered++;
+        await publishStatus(
+          deps,
+          failed,
+          'error',
+          'The computer did not finish starting. Start it again.',
+        );
+      }
+    } catch (error) {
+      deps.logger.warn({ err: error, computerId: row.id }, 'recovering a computer failed');
+    }
+  }
+  return recovered;
 }
 
 /**
@@ -1669,7 +2067,7 @@ async function claim(
 ) {
   const [claimed] = await deps.db
     .update(schema.computers)
-    .set({ status: to })
+    .set({ status: to, statusAt: sql`clock_timestamp()`, generation: nextGeneration() })
     .where(and(eq(schema.computers.id, row.id), still))
     .returning();
   return claimed ?? null;
