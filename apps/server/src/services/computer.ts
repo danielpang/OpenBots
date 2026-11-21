@@ -1823,7 +1823,9 @@ async function stopMachine(
   // start that took it over meanwhile wins).
   const mine = sameGeneration(row);
   try {
-    await holdingStop(deps, row, () => provider(deps).stop(machineRefOf(row)));
+    // Its signal ends the provider's stop once this stop no longer holds the
+    // computer: a hold released after a takeover could be a new use's.
+    await holdingStop(deps, row, (signal) => provider(deps).stop(machineRefOf(row), { signal }));
   } catch (error) {
     const message = failureText(deps, error);
     deps.logger.error({ err: error, computerId: row.id }, 'computer stop failed');

@@ -1,3 +1,4 @@
+import type { ComputerRef } from '@openbots/computer';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runComputers } from '../cli/computers.js';
@@ -12,6 +13,7 @@ import {
   restartComputer,
   stopComputer,
   STOPPING_TAKEOVER_MS,
+  stopTimings,
   type ComputerRow,
 } from './computer.js';
 import {
@@ -286,6 +288,47 @@ describe('retired computers, fifth review', () => {
       expect(await m.row()).toMatchObject({ status: 'running', containerId: fresh.containerId });
       expect(await resetAudits(requestId)).toHaveLength(audits);
       expect(audits).toBeLessThanOrEqual(1);
+    });
+  });
+
+  describe('4. a stop that lost the computer', () => {
+    it('releases no hold of the use that took it over', async () => {
+      const m = await member('stop-takeover@example.com');
+      const row = await m.row();
+      const provider = machines();
+      const ref: ComputerRef = {
+        provider: 'sprites',
+        containerId: row.containerId,
+        agentUrl: row.agentUrl!,
+        agentToken: row.agentToken!,
+        volumeName: null,
+      };
+      const stop = provider.stop;
+      provider.stop = async (target, options) => {
+        // Taken over while the stop runs: the row moves on, and a new use holds the Sprite.
+        await t.db
+          .update(schema.computers)
+          .set({ status: 'running', generation: sql`${schema.computers.generation} + 1` })
+          .where(eq(schema.computers.id, row.id));
+        await provider.hold!(ref, 'new-use', 600);
+        // The stop hears of the takeover at its next refresh, through its signal.
+        const signal = options?.signal;
+        if (signal) await until(() => expect(signal.aborted).toBe(true));
+        return stop.call(provider, target, options);
+      };
+      const timings = { ...stopTimings };
+      stopTimings.heartbeatMs = 20;
+      try {
+        await expect(t.inOrganization(() => stopComputer(t.deps, row))).rejects.toMatchObject({
+          status: 503,
+        });
+      } finally {
+        provider.stop = stop;
+        Object.assign(stopTimings, timings);
+      }
+      expect([...sprites.api.sprites.get(row.containerId!)!.tasks.keys()]).toContain(
+        'openbots-new-use',
+      );
     });
   });
 
