@@ -429,6 +429,32 @@ describe('the sprites provider', () => {
       expect(api.sprites.has(NAME)).toBe(true);
     });
 
+    it('a stop whose caller gave it up releases no hold after that', async () => {
+      const { api, provider } = setup();
+      const ref = await provider.create(spec);
+      await provider.hold!(ref, 'a', 60);
+      await provider.hold!(ref, 'b', 60);
+      const given = new AbortController();
+      const exec = api.exec.bind(api);
+      const signals: (AbortSignal | undefined)[] = [];
+      api.exec = async (name, argv, options) => {
+        const result = await exec(name, argv, options);
+        if (argv.some((a) => a.includes('DELETE'))) {
+          signals.push(options?.signal);
+          // The first release lands, then the caller loses the computer.
+          given.abort(new Error('the computer was taken over'));
+        }
+        return result;
+      };
+      await expect(provider.stop(ref, { signal: given.signal })).rejects.toThrow(/taken over/);
+      expect(signals).toEqual([given.signal]);
+      expect(api.sprites.get(NAME)!.tasks.size).toBe(1);
+      // Given up before it began: not a single call.
+      const calls = api.calls.length;
+      await expect(provider.stop(ref, { signal: given.signal })).rejects.toThrow();
+      expect(api.calls.length).toBe(calls);
+    });
+
     it('stop does not wake a paused Sprite: it cannot be holding', async () => {
       const { api, provider } = setup();
       const ref = await provider.create(spec);

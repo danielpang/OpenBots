@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { describe, expect, it, vi } from 'vitest';
 import { createDb, looksPooled, SessionLockTimeout } from './client.js';
@@ -76,7 +77,7 @@ describe.runIf(process.env.DATABASE_URL)('session locks on Postgres', () => {
   });
 
   it('a holder whose lock connection is lost is told, through its signal', async () => {
-    const db = createDb(url, {}, { lockWatchMs: 50, lockWaitMs: 2_000 });
+    const db = createDb(url, {}, { lockWaitMs: 2_000 });
     const admin = postgres(url, { onnotice: () => {}, max: 1 });
     try {
       const key = `test:lock:${randomUUID()}`;
@@ -112,6 +113,30 @@ describe.runIf(process.env.DATABASE_URL)('session locks on Postgres', () => {
       await vi.waitFor(() => expect(held).toBe(8), { timeout: 1_500, interval: 10 });
       release();
       await Promise.all(eight);
+    } finally {
+      await admin.end();
+      await db.close();
+    }
+  });
+
+  it('a holder whose lock is held is never told it is lost, however slow the pool', async () => {
+    // One connection for every query, and the holder's own work keeps it busy.
+    const db = createDb(url, { max: 1 }, { lockWaitMs: 2_000 });
+    const admin = postgres(url, { onnotice: () => {}, max: 1 });
+    try {
+      const key = `test:lock:${randomUUID()}`;
+      const held = await db.withSessionLock(key, async (signal) => {
+        for (let i = 0; i < 4; i++) await db.execute(sql`select pg_sleep(0.3)`);
+        const [row] = await admin<{ held: boolean }[]>`
+          select exists (
+            select 1 from pg_locks
+            where locktype = 'advisory' and granted
+              and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+          ) as held
+        `;
+        return { aborted: signal.aborted, reason: String(signal.reason ?? ''), held: row?.held };
+      });
+      expect(held).toEqual({ aborted: false, reason: '', held: true });
     } finally {
       await admin.end();
       await db.close();

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { schema } from '../db/client.js';
 import { STASH, WORKTREE, WORKTREES, useRepoJobsWorld } from './__fixtures__/coders/repo-jobs.js';
 import { gitArgs, REPO_PATH, defaultGit } from './__fixtures__/coders/setup.js';
-import { rescueRepos } from './repos-rescue.js';
+import { rescueRepos, unsavedWork } from './repos-rescue.js';
 import { runnerSessionIds } from './git-credentials.js';
 
 // Rescue before loss (GH5), against a scripted `/coder` (repo-jobs.ts).
@@ -102,6 +102,49 @@ describe('repository rescue', () => {
         note: 'Nothing to save: everything is pushed',
       }),
     ]);
+  });
+
+  it('a checkout lock lost part way reports work it could not check, never nothing to save', async () => {
+    await j.readyCheckout();
+    // Unpushed work in both worktrees, which the rescue never gets to read.
+    j.gitBy((args, at) => {
+      if (args.includes('worktree')) return { code: 0, stdout: WORKTREES };
+      if (args.includes('--remotes')) return { code: 0, stdout: 'def1234 Try a fix\n' };
+      if (args.includes('status')) return { code: 0, stdout: at === WORKTREE ? ' M a.ts\n' : '' };
+      return undefined;
+    });
+    // The lock is lost (its signal aborts) as the first worktree is checked.
+    const lost = new AbortController();
+    const db = Object.assign(Object.create(j.w.t.deps.db) as typeof j.w.t.deps.db, {
+      withSessionLock: <T>(_key: string, fn: (signal?: AbortSignal) => Promise<T>) =>
+        fn(lost.signal),
+    });
+    const coder = j.w.coder.coder;
+    j.w.coder.coder = (launch, handlers) => {
+      if (launch.command === 'git' && gitArgs(launch.args).includes('symbolic-ref')) lost.abort();
+      return coder(launch, handlers);
+    };
+    let results;
+    try {
+      results = await j.inOrg(() => rescueRepos({ ...j.w.t.deps, db }, j.w.ownerId, j.computerId));
+    } finally {
+      j.w.coder.coder = coder;
+    }
+    expect(results.map((r) => r.note)).not.toContain('Nothing to save: everything is pushed');
+    expect(results).toEqual([
+      expect.objectContaining({
+        branch: null,
+        pushed: false,
+        note: expect.stringMatching(/^Could not check for unsaved work: /),
+      }),
+      expect.objectContaining({
+        branch: null,
+        pushed: false,
+        note: expect.stringMatching(/^Could not check for unsaved work on bot\/x: /),
+      }),
+    ]);
+    // The reset counts both as unsaved work.
+    expect(unsavedWork(results)).toHaveLength(2);
   });
 
   it('leaves the worktree of a live session alone', async () => {
