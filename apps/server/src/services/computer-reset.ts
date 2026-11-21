@@ -13,19 +13,13 @@ import {
   assertResettable,
   checkpointBeforeReset,
   computerAvailable,
-  computerProvider,
   computerUnavailable,
   getComputer,
   resetMachine,
   type ComputerRow,
 } from './computer.js';
 import { COMPUTER_REFUSED_STATUS } from './computer-admission.js';
-import {
-  auditReset,
-  cleanupAfterReset,
-  retainedDays,
-  type ResetRecord,
-} from './computer-retire.js';
+import { auditReset, cleanupAfterReset, type ResetRecord } from './computer-retire.js';
 import { assertPerson } from './person.js';
 import {
   finishedRescue,
@@ -44,14 +38,14 @@ import {
 // stops the computer and its coding sessions, removes the container and its
 // home volume (the state volume, with the cookie store and the coding agents'
 // sign-ins, only on request), marks every checkout `missing`, clears the
-// sessions' worktree paths and records `computer.reset`, with the id of the
-// checkpoint taken first where the provider keeps one, so an operator can
-// restore a mistaken reset. On a provider that can retire a machine (Sprites)
-// a reset that forgets the sign-ins keeps the old machine for seven days
-// rather than deleting it (computer-retire.ts), unless the owner asks to
-// delete it now; either way the reset answers only once the old machine is
-// out of reach or gone, or fails having changed nothing. The next start makes
-// a fresh computer, and its reconcile clones the `keep_cloned` repositories
+// sessions' worktree paths and records `computer.reset`. A reset that keeps
+// the sign-ins and the machine (Sprites) records the id of the checkpoint
+// taken first, so an operator can undo it. A full reset (`resetSignIns`)
+// deletes the old computer and everything on it, and nothing brings it back,
+// so only a person may ask for one (`assertPerson`); on a provider that names
+// machines by key (Sprites) the deletion finishes after the reset answers and
+// is retried until it is done (computer-retire.ts). The next start makes a
+// fresh computer, and its reconcile clones the `keep_cloned` repositories
 // again. When the managed build would not start a stopped computer for the
 // rescue (computer-admission.ts), nothing was checked: the status says so
 // (`errorCode`) and the reset answers 402 with that code, removing nothing.
@@ -226,7 +220,6 @@ export async function resetStatus(deps: AppDeps, owner: Owner, requestId: string
       status: s.status as CodingSessionStatus,
     })),
     expiresAt: new Date(record.at + RESET_PREPARE_TTL_MS).toISOString(),
-    keptDays: retainedDays(computerProvider(deps)),
   };
 }
 
@@ -234,14 +227,12 @@ const notPrepared = (message: string) => new DomainError(409, 'RESET_NOT_PREPARE
 
 export interface ResetOptions {
   requestId: string;
-  /** Removes the cookie store and the coding agents' sign-ins too. */
-  resetSignIns?: boolean;
   /**
-   * With `resetSignIns`, where the old computer would be kept for `keptDays`:
-   * deletes it now instead. Support cannot restore it then. Only a person
-   * may ask for it (403 `PERSON_REQUIRED` for an API key).
+   * A full reset: the computer is deleted with everything on it, the cookie
+   * store and the coding agents' sign-ins too, and the next start makes a new
+   * one. Only a person may ask for it (403 `PERSON_REQUIRED` for an API key).
    */
-  deleteOldComputer?: boolean;
+  resetSignIns?: boolean;
 }
 
 /**
@@ -257,14 +248,13 @@ export interface ResetOptions {
 export async function resetComputer(
   deps: AppDeps,
   owner: Owner & { apiKeyId?: string | null },
-  { requestId, resetSignIns = false, deleteOldComputer = false }: ResetOptions,
+  { requestId, resetSignIns = false }: ResetOptions,
 ): Promise<ComputerRow> {
   const row = await computerOf(deps, owner);
-  // Nothing can bring a machine deleted now back, so a person asks for it:
-  // a session, or the member's own paired phone or Mac app, never a script.
-  if (resetSignIns && deleteOldComputer) {
-    await assertPerson(deps.db, owner, 'delete the old computer at once');
-  }
+  // Nothing can bring a computer a full reset deleted back, so a person asks
+  // for it: a session, or the member's own paired phone or Mac app, never a
+  // script or a Bot.
+  if (resetSignIns) await assertPerson(deps.db, owner, 'fully reset the computer');
   await listen(deps);
   prune();
   const record = prepared.get(requestId);
@@ -300,36 +290,27 @@ export async function resetComputer(
   }
   prepared.delete(requestId);
   const by = userActor(owner);
-  const deleteOld = resetSignIns && deleteOldComputer;
-  const kept = resetSignIns && !deleteOld && retainedDays(computerProvider(deps)) !== null;
-  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns, deleteOld });
-  const resetRecord: ResetRecord = {
+  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns });
+  const audit: ResetRecord = {
     requestId,
     signIns: resetSignIns,
     unsaved: unsavedWork(done.results).length,
     rescueFailed: !!done.error,
-    // Where a reset with the sign-ins would keep the old computer: kept, or deleted now.
-    ...(resetSignIns && retainedDays(computerProvider(deps)) !== null
-      ? { oldComputer: kept ? ('kept' as const) : ('deleted' as const) }
-      : {}),
-    // The disk as it was, for an operator to restore a mistaken reset (Sprites).
+    // The disk as it was, for an operator to undo a mistaken reset (Sprites).
     ...(checkpoint ? { checkpoint } : {}),
   };
   const { computer: reset, retired } = await resetMachine(
     deps,
     row,
-    { signIns: resetSignIns, deleteOld, checkpointId: checkpoint, reset: resetRecord },
+    { signIns: resetSignIns, reset: audit },
     by,
   );
-  // A machine retired took the reset's cleanup with it, and its audit is
-  // written once it is out of reach (computer-retire.ts).
-  // Without one, there was no machine to keep or delete: the audit does not
-  // say the old computer was kept or deleted.
+  // An old machine deleted through a record took the reset's cleanup and
+  // audit into the transaction that took it off the computer (computer-retire.ts).
   if (!retired) {
-    const { oldComputer: _, ...record } = resetRecord;
     await deps.db.transaction(async (tx) => {
       const checkouts = await cleanupAfterReset(tx as unknown as Db, row, resetSignIns);
-      await auditReset(tx as unknown as Db, row, by, { ...record, checkouts });
+      await auditReset(tx as unknown as Db, row, by, { ...audit, checkouts });
     });
   }
   return reset;

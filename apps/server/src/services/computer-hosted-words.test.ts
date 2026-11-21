@@ -97,16 +97,7 @@ describe('the hosted provider is never named to members', () => {
 
   /** Every provider call fails as the vendor's API says it. */
   const providerDown = () => {
-    for (const name of [
-      'status',
-      'start',
-      'stop',
-      'destroy',
-      'checkpoint',
-      'retire',
-      'retireInside',
-      'unretire',
-    ] as const) {
+    for (const name of ['status', 'start', 'stop', 'destroy', 'checkpoint'] as const) {
       if (sprites.provider[name]) {
         vi.spyOn(sprites.provider, name).mockRejectedValue(apiError());
       }

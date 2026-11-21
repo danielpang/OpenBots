@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spriteName } from '@openbots/computer';
 import { schema } from '@openbots/server/db/client';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   csvUsageSource,
@@ -123,14 +124,18 @@ describe('reconciliation', () => {
 });
 
 // A full reset on Sprites (computer-retire.ts) gives the member's computer a
-// new machine key, so its next Sprite has a new name, and keeps the old
-// Sprite, retired, under its old name. Both are the organization's: the
-// window's usage is split between them.
+// new machine key, so its next Sprite has a new name, and deletes the old
+// Sprite through a `retired_computers` record under its old name. Until the
+// record is `deleted` the old Sprite may still exist, and the window's usage
+// before the reset was on it: both are the organization's. One deleted
+// before the window should not be billed in it, so it is nobody's.
 describe('reconciliation after a full reset', () => {
   let b: BillingApp;
   let d: { org: string; id: string };
   let computerD: string;
+  let record: string;
   const machineKey = randomUUID();
+  const oldKey = randomUUID();
 
   beforeAll(async () => {
     b = await billingApp();
@@ -147,17 +152,26 @@ describe('reconciliation after a full reset', () => {
         })
         .returning({ id: schema.computers.id })
     )[0]!.id;
-    const retiredAt = new Date('2026-11-10T00:00:00Z');
-    await b.t.db.insert(schema.retiredComputers).values({
-      workspaceId: d.org,
-      ownerId: d.id,
-      computerId: computerD,
-      provider: 'sprites',
-      providerRef: spriteName(computerD),
-      status: 'retired',
-      retiredAt,
-      deleteAfter: new Date(retiredAt.getTime() + 7 * 24 * H * 1000),
-    });
+    const retired = (providerRef: string, retiredAt: Date) =>
+      b.t.db
+        .insert(schema.retiredComputers)
+        .values({
+          workspaceId: d.org,
+          ownerId: d.id,
+          computerId: computerD,
+          provider: 'sprites',
+          providerRef,
+          status: 'deleting',
+          retiredAt,
+        })
+        .returning({ id: schema.retiredComputers.id });
+    record = (await retired(spriteName(computerD), new Date('2026-11-10T00:00:00Z')))[0]!.id;
+    // An earlier full reset, its Sprite deleted in October.
+    const [earlier] = await retired(spriteName(oldKey), new Date('2026-10-05T00:00:00Z'));
+    await b.t.db
+      .update(schema.retiredComputers)
+      .set({ status: 'deleted', deletedAt: new Date('2026-10-05T01:00:00Z') })
+      .where(eq(schema.retiredComputers.id, earlier!.id));
     await b.t.db.insert(schema.billingUsage).values({
       workspaceId: d.org,
       intervalId: randomUUID(),
@@ -170,18 +184,41 @@ describe('reconciliation after a full reset', () => {
   });
   afterAll(() => b.t.close());
 
-  it("counts the member's new Sprite and the retired one as the organization's", async () => {
+  const usage = (extra: { name: string; awakeSeconds: number }[] = []) => ({
+    usageBetween: async () => [
+      { name: spriteName(computerD), awakeSeconds: 4 * H },
+      { name: spriteName(machineKey), awakeSeconds: 2 * H },
+      ...extra,
+    ],
+  });
+
+  it("counts the member's new Sprite and the one being deleted as the organization's", async () => {
+    expect(await reconcile(b.t.deps.db, usage(), since, until)).toEqual([]);
+  });
+
+  it('still counts the old Sprite once deleted in the window', async () => {
+    await b.t.db
+      .update(schema.retiredComputers)
+      .set({ status: 'deleted', deletedAt: new Date('2026-11-10T00:50:00Z') })
+      .where(eq(schema.retiredComputers.id, record));
+    expect(await reconcile(b.t.deps.db, usage(), since, until)).toEqual([]);
+  });
+
+  it("reports a Sprite billed in the window but deleted before it as nobody's", async () => {
     const found = await reconcile(
       b.t.deps.db,
-      {
-        usageBetween: async () => [
-          { name: spriteName(computerD), awakeSeconds: 4 * H },
-          { name: spriteName(machineKey), awakeSeconds: 2 * H },
-        ],
-      },
+      usage([{ name: spriteName(oldKey), awakeSeconds: 1 * H }]),
       since,
       until,
     );
-    expect(found).toEqual([]);
+    expect(found).toEqual([
+      {
+        workspaceId: null,
+        sprites: [spriteName(oldKey)],
+        ledgerHours: 0,
+        providerHours: 1,
+        overMeteredHours: -1,
+      },
+    ]);
   });
 });
