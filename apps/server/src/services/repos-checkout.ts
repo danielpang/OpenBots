@@ -876,7 +876,7 @@ export interface RunningComputer {
  * jobs a start queues (the reconcile and the scan) and the refresh. Its agent
  * asks the row again before each call: once the computer stopped, or a reset
  * took its machine away, the job's next call fails (`COMPUTER_OFF`) instead
- * of waking a paused Sprite or reaching a retired one.
+ * of waking a paused Sprite or reaching one a reset is deleting.
  */
 export async function runningOn(
   deps: AppDeps,

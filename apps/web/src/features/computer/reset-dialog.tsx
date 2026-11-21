@@ -28,7 +28,9 @@ import {
 // server checks for unpushed work and pushes what it can to rescue branches
 // (prepare, then poll every 2 seconds); the dialog then shows what was
 // pushed, what could not be saved and the coding sessions a reset stops,
-// and only then offers Reset.
+// and only then offers Reset. A full reset (the sign-ins too) deletes the
+// computer and everything on it, which nothing can undo, and the dialog says
+// so before it is confirmed.
 
 export const RESET_POLL_MS = 2_000;
 
@@ -61,7 +63,6 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   const queryClient = useQueryClient();
   const [requestId, setRequestId] = useState<string | null>(null);
   const [resetSignIns, setResetSignIns] = useState(false);
-  const [deleteOld, setDeleteOld] = useState(false);
   const prepare = useMutation({
     mutationFn: prepareReset,
     onSuccess: (answer) => setRequestId(answer.requestId),
@@ -82,7 +83,7 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
     refetchInterval: (query) => (query.state.data?.status === 'done' ? false : pollMs),
   });
   const reset = useMutation({
-    mutationFn: () => resetComputer(requestId!, resetSignIns, deleteOld && !!check.data?.keptDays),
+    mutationFn: () => resetComputer(requestId!, resetSignIns),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: computerQuery.queryKey, exact: true });
       void queryClient.invalidateQueries({ queryKey: reposQuery.queryKey });
@@ -92,7 +93,6 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   });
 
   const done = check.data?.status === 'done' ? check.data : null;
-  const keptDays = done?.keptDays ?? null;
   const checkError = prepare.error ?? check.error;
   const stale = reset.error instanceof ApiError && reset.error.code === RESET_NOT_PREPARED;
   const checkAgain = () => {
@@ -118,22 +118,11 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
             checked={resetSignIns}
             onChange={(event) => setResetSignIns(event.currentTarget.checked)}
           />
-          Also forget sign-ins: the coding agents' logins and the browser logins the Bots share
+          Full reset: also forget sign-ins, the coding agents' logins and the browser logins the
+          Bots share
         </label>
       )}
-      {done && resetSignIns && keptDays ? (
-        <label className="flex items-center gap-2 pl-6">
-          <input
-            type="checkbox"
-            name="deleteOldComputer"
-            checked={deleteOld}
-            onChange={(event) => setDeleteOld(event.currentTarget.checked)}
-          />
-          Delete the old computer now instead of keeping it. Choose this if someone else may have
-          used your sign-ins.
-        </label>
-      ) : null}
-      {done && resetSignIns && <ForgetNotice days={deleteOld ? null : keptDays} />}
+      {done && resetSignIns && <FullResetNotice />}
       <ErrorText error={checkError} />
       {stale ? (
         <p className="text-sm text-destructive">
@@ -163,16 +152,12 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
   );
 }
 
-/**
- * What happens to the old computer when the sign-ins go too. Where the
- * server keeps it a while, it says so; it never names who runs it.
- */
-function ForgetNotice({ days }: { days: number | null }) {
+/** What a full reset does, plainly; it never names who runs the computer. */
+function FullResetNotice() {
   return (
-    <p className="text-xs text-muted-foreground" data-reset-kept={days ?? 'none'}>
-      {days
-        ? `The old computer is kept for ${days} ${days === 1 ? 'day' : 'days'} in case support needs to restore it. After that it is deleted for good.`
-        : 'The old computer and its sign-ins are deleted for good. This cannot be undone.'}
+    <p className="text-sm font-medium text-destructive" role="alert" data-reset-full>
+      A full reset deletes this computer and everything on it, its sign-ins included. This cannot be
+      undone. The next start makes a new computer.
     </p>
   );
 }

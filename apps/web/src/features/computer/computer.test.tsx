@@ -896,7 +896,7 @@ describe('the Computer page', () => {
 });
 
 describe('Reset computer', () => {
-  function resetServer(answer: 'ok' | 'not-prepared' = 'ok', keptDays: number | null = 7) {
+  function resetServer(answer: 'ok' | 'not-prepared' = 'ok') {
     let polls = 0;
     const handle = server.handle;
     server.handle = async (request) => {
@@ -928,7 +928,6 @@ describe('Reset computer', () => {
                   },
                 ],
                 runningSessions: [{ id: 's1', botId: BOT, repoFullName: 'danielpang/OpenBots' }],
-                keptDays,
               },
         );
       }
@@ -976,14 +975,17 @@ describe('Reset computer', () => {
         'The computer starts again with an empty home. Repositories marked keep cloned are cloned again.',
       );
       expect(document.body.textContent).not.toMatch(/[–—]| - /);
-      expect(dialog.querySelector('[data-reset-kept]')).toBeNull();
+      expect(dialog.querySelector('[data-reset-full]')).toBeNull();
       click(dialog.querySelector('input[name="resetSignIns"]'));
-      // Forgetting the sign-ins: the old computer is kept a while for support, then deleted.
-      await until(() => !!dialog.querySelector('[data-reset-kept]'), 'the notice');
-      expect(dialog.querySelector('[data-reset-kept]')!.textContent).toBe(
-        'The old computer is kept for 7 days in case support needs to restore it. After that it is deleted for good.',
+      // A full reset says plainly that it deletes the computer, for good.
+      await until(() => !!dialog.querySelector('[data-reset-full]'), 'the notice');
+      expect(dialog.querySelector('[data-reset-full]')!.textContent).toBe(
+        'A full reset deletes this computer and everything on it, its sign-ins included. This cannot be undone. The next start makes a new computer.',
       );
+      expect(dialog.querySelector('input[name="deleteOldComputer"]')).toBeNull();
       expect(document.body.textContent).not.toMatch(/[–—]| - /);
+      // It names no vendor, and promises nothing kept for support.
+      expect(document.body.textContent).not.toMatch(/sprite|fly\.io|support|kept for/i);
       click(button('Reset'));
       await until(() => posts('/api/v1/computer/reset').length === 1, 'the reset');
       expect(JSON.parse(posts('/api/v1/computer/reset')[0]!)).toEqual({
@@ -993,58 +995,6 @@ describe('Reset computer', () => {
       });
       expect(posts('/api/v1/computer/reset/prepare')).toHaveLength(1);
       await until(() => !document.querySelector('[data-reset]'), 'the dialog to close');
-    },
-  );
-
-  it(
-    'can delete the old computer now instead of keeping it, and says so',
-    { timeout: 15_000 },
-    async () => {
-      resetServer();
-      render(<ComputerPage />);
-      await until(() => !!button('Reset computer'), 'Reset computer');
-      click(button('Reset computer'));
-      await until(() => !!document.querySelector('[data-reset="checked"]'), 'the results');
-      const dialog = document.querySelector('[data-reset]')!;
-      // Only once the sign-ins go too.
-      expect(dialog.querySelector('input[name="deleteOldComputer"]')).toBeNull();
-      click(dialog.querySelector('input[name="resetSignIns"]'));
-      await until(() => !!dialog.querySelector('input[name="deleteOldComputer"]'), 'the option');
-      expect(dialog.textContent).toContain(
-        'Delete the old computer now instead of keeping it. Choose this if someone else may have used your sign-ins.',
-      );
-      click(dialog.querySelector('input[name="deleteOldComputer"]'));
-      await until(() => !!dialog.querySelector('[data-reset-kept="none"]'), 'the notice');
-      expect(dialog.querySelector('[data-reset-kept]')!.textContent).toBe(
-        'The old computer and its sign-ins are deleted for good. This cannot be undone.',
-      );
-      expect(document.body.textContent).not.toMatch(/[–—]| - /);
-      click(button('Reset'));
-      await until(() => posts('/api/v1/computer/reset').length === 1, 'the reset');
-      expect(JSON.parse(posts('/api/v1/computer/reset')[0]!)).toEqual({
-        requestId: 'r1',
-        confirm: true,
-        resetSignIns: true,
-        deleteOldComputer: true,
-      });
-    },
-  );
-
-  it(
-    'says the old computer is deleted for good where the server does not keep it',
-    { timeout: 15_000 },
-    async () => {
-      resetServer('ok', null);
-      render(<ComputerPage />);
-      await until(() => !!button('Reset computer'), 'Reset computer');
-      click(button('Reset computer'));
-      await until(() => !!document.querySelector('[data-reset="checked"]'), 'the results');
-      const dialog = document.querySelector('[data-reset]')!;
-      click(dialog.querySelector('input[name="resetSignIns"]'));
-      await until(() => !!dialog.querySelector('[data-reset-kept="none"]'), 'the notice');
-      expect(dialog.querySelector('[data-reset-kept]')!.textContent).toBe(
-        'The old computer and its sign-ins are deleted for good. This cannot be undone.',
-      );
     },
   );
 

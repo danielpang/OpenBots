@@ -167,28 +167,21 @@ process has a terminal, its parent process's kind), `Fly-Client-CI`, and `Fly-Cl
 them off unless `SPRITES_CLIENT_SIGNALS` is set (to 1 to send them). The User-Agent still names the
 SDK and its version (`sprites-js/0.2.4`). These go only to the Sprites API host.
 
-A reset that also forgets the sign-ins does not delete the member's Sprite at once. The old Sprite
-is kept for 7 days, out of service, in case support needs to restore it, then deleted for good by
-the worker. For those 7 days it still holds the old sign-ins (the coding agents' and the browser
-logins) and the old home, and only an operator can reach it: before the reset answers, its URL is
-made private and it may reach no host; then, in the background, its agent and agent token are
-removed. If the first part fails, the reset fails: the computer was stopped and its coding
-sessions ended, its files and sign-ins are kept, and its next start sets up a new agent token. The
-member can ask the reset to delete the old Sprite at once instead, from the app or a paired device
-only, not with an API key. A start under way does not hold up a reset: the reset cancels it. A
-stop under way holds it up while the process doing it is alive; a stop whose process died is taken
-over a minute later, and the worker finishes a stop or a start that a stopped process left behind.
-If the reset could neither cut the old Sprite off nor put it back, it says it finishes in the
-background: the computer is free again once the worker takes the old Sprite over, within about ten
-minutes, and a Sprite the member asked to delete is deleted then, never kept. A retire or a
-deletion that keeps failing is given up after 12 attempts and logged as an error; the operator
-lists it and retries it. An operator lists a member's retired computers with `openbots computers
-retired --member <email> --org <organization id>`, every one the worker gave up on with
-`openbots computers retired --gave-up --org <organization id>`, restores one with `openbots computers restore <id> --by <your name> --org <organization id>`,
-which keeps the member's current computer for 7 days in turn, and retries one the worker gave up on
-with `openbots computers retry <id> --by <your name> --org <organization id>`. `--by` names the
-operator in the audit log. A self-hosted install with one organization can leave out `--org`.
-Docker computers are deleted at once, as before.
+A full reset (one that also forgets the sign-ins) deletes the member's computer and everything
+on it. Nothing keeps or restores it, and only a person can ask for one: the app or a paired device,
+not an API key. On Sprites the member's computer gets a new Sprite name at once, so it can start
+again right away, and the old Sprite is deleted before the reset answers. Until it is gone the
+server refuses its old agent token in every process. If the deletion fails, or the process dies
+part way, the worker deletes it later: it retries after a minute, doubling up to six hours, and
+after 12 failed attempts it gives up and logs an error. The worker deletes it once more about an
+hour after the reset, in case a start the reset cancelled made it again. An operator lists the old
+computers not deleted yet with `openbots computers retired --org <organization id>`, only those
+the worker gave up on with `--gave-up`, and retries one with `openbots computers retry <id> --by
+<your name> --org <organization id>`. `--by` names the operator in the audit log. A self-hosted
+install with one organization can leave out `--org`. A start under way does not hold up a reset:
+the reset cancels it. A stop under way holds it up while the process doing it is alive; a stop
+whose process died is taken over a minute later, and the worker finishes a stop or a start that a
+stopped process left behind. Docker computers are deleted before the reset answers.
 
 ### Egress proxy for the computers
 
