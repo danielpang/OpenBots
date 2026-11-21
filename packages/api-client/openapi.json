@@ -307,6 +307,18 @@
             "type": "boolean",
             "description": "Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)"
           },
+          "publicArtifactsEnabled": {
+            "type": "boolean",
+            "description": "Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back."
+          },
+          "publicArtifacts": {
+            "type": "integer",
+            "description": "How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop"
+          },
+          "publicLinksStopped": {
+            "type": "integer",
+            "description": "Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off"
+          },
           "ceilings": {
             "type": ["object", "null"],
             "properties": {
@@ -371,7 +383,14 @@
             "description": "The most each limit may be on the managed service; null on a self-hosted install, which has none"
           }
         },
-        "required": ["limits", "auditRetentionDays", "customStdioEnabled", "ceilings"]
+        "required": [
+          "limits",
+          "auditRetentionDays",
+          "customStdioEnabled",
+          "publicArtifactsEnabled",
+          "publicArtifacts",
+          "ceilings"
+        ]
       },
       "Limits": {
         "type": "object",
@@ -494,6 +513,9 @@
             "maximum": 3650
           },
           "customStdioEnabled": {
+            "type": "boolean"
+          },
+          "publicArtifactsEnabled": {
             "type": "boolean"
           }
         },
@@ -911,6 +933,10 @@
           "setupPairingOnly": {
             "type": "boolean",
             "description": "The first owner is made by pairing a phone (`openbots pair`), not the web wizard (OPENBOTS_SETUP_PAIRING_ONLY)"
+          },
+          "artifactSharing": {
+            "type": "boolean",
+            "description": "Artifacts can be shared with the organization or made public and opened in a browser on the artifact domain (OPENBOTS_ARTIFACT_DOMAIN). Off: no share control, and the sharing routes answer 404."
           },
           "auth": {
             "type": "string",
@@ -4935,6 +4961,9 @@
           "currentVersion": {
             "$ref": "#/components/schemas/ArtifactVersion"
           },
+          "visibility": {
+            "$ref": "#/components/schemas/ArtifactVisibility"
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
@@ -5014,6 +5043,11 @@
           "createdAt"
         ]
       },
+      "ArtifactVisibility": {
+        "type": "string",
+        "enum": ["private", "org", "public"],
+        "description": "`private`: its owner only. `org`: every active member of the organization, read only, at the latest version. `public`: anyone with the link, at the version its owner confirmed."
+      },
       "UpdateArtifact": {
         "type": "object",
         "properties": {
@@ -5028,6 +5062,173 @@
         },
         "required": ["content"],
         "additionalProperties": false
+      },
+      "ArtifactSharing": {
+        "type": "object",
+        "properties": {
+          "visibility": {
+            "$ref": "#/components/schemas/ArtifactVisibility"
+          },
+          "currentVersion": {
+            "type": ["integer", "null"],
+            "exclusiveMinimum": 0,
+            "description": "Its latest version: what everyone who may see it sees"
+          },
+          "publicAllowed": {
+            "type": "boolean",
+            "description": "An owner or admin turned public links on for the organization (off by default)"
+          },
+          "takenDown": {
+            "type": "boolean",
+            "description": "The service took the public link down; it cannot be made public again"
+          },
+          "url": {
+            "type": ["string", "null"],
+            "format": "uri",
+            "description": "The Artifact's address on the artifact host; null when it has none (`noLink`)"
+          },
+          "noLink": {
+            "type": ["string", "null"],
+            "enum": ["bot_deleted", "address_too_long", null],
+            "description": "Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link"
+          },
+          "sharedAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "pendingRequest": {
+            "$ref": "#/components/schemas/ArtifactShareRequest"
+          }
+        },
+        "required": [
+          "visibility",
+          "currentVersion",
+          "publicAllowed",
+          "takenDown",
+          "url",
+          "noLink",
+          "sharedAt",
+          "pendingRequest"
+        ]
+      },
+      "ArtifactShareRequest": {
+        "type": ["object", "null"],
+        "properties": {
+          "approvalId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Answer it with `POST /approvals/{id}/decide`"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": ["org", "public"]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": ["approvalId", "visibility", "createdAt"],
+        "description": "A Bot's request to share it that the owner has not answered"
+      },
+      "ArtifactSharingChange": {
+        "type": "object",
+        "properties": {
+          "visibility": {
+            "$ref": "#/components/schemas/ArtifactVisibility"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "enum": [true],
+            "description": "For `public`: the person confirmed that anyone with the link will be able to view it and every later version"
+          }
+        },
+        "required": ["visibility"],
+        "additionalProperties": false
+      },
+      "ArtifactOpenLink": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Opens the Artifact on the artifact host. For the owner and members it carries a view token for this one Artifact, used once."
+          },
+          "expiresAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        },
+        "required": ["url", "expiresAt"]
+      },
+      "SharedArtifact": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["document", "code", "data", "design", "file"]
+          },
+          "title": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/ArtifactVisibility"
+          },
+          "version": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              "mime": {
+                "type": "string"
+              },
+              "size": {
+                "type": "integer"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": ["version", "mime", "size", "createdAt"],
+            "description": "Its latest version, which the caller sees"
+          },
+          "ownerName": {
+            "type": "string"
+          },
+          "botName": {
+            "type": ["string", "null"]
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": ["string", "null"],
+            "format": "uri"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "visibility",
+          "version",
+          "ownerName",
+          "botName",
+          "mine",
+          "url",
+          "updatedAt"
+        ]
       },
       "ComputerState": {
         "type": "object",
@@ -14249,6 +14450,435 @@
           },
           "404": {
             "description": "No such Bot",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{id}/sharing": {
+      "get": {
+        "tags": ["artifacts"],
+        "summary": "Who may see an Artifact, its link, and any share request from its Bot (owner)",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Its sharing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSharing"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such Artifact, or this install does not host Artifacts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["artifacts"],
+        "summary": "Change who may see an Artifact (owner; a person, for anything wider than before), or narrow another member's (owner or admin of the organization)",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactSharingChange"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Its sharing now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSharing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`public` without `confirmed` (`CONFIRMATION_REQUIRED`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An API key widening it (`PERSON_REQUIRED`), public links are not on in the organization (`PUBLIC_SHARING_OFF`), or an admin widening another member's Artifact (`OWNER_ONLY`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such Artifact the caller owns or, as an owner or admin, sees shared; or this install does not host Artifacts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The public link was taken down (`TAKEN_DOWN`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts/{id}/open": {
+      "post": {
+        "tags": ["artifacts"],
+        "summary": "A link that opens an Artifact on the artifact host for the caller",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactOpenLink"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such Artifact the caller may see",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shared-artifacts": {
+      "get": {
+        "tags": ["artifacts"],
+        "summary": "Artifacts shared with the caller's organization, read only, a page at a time",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The previous page's `nextCursor`"
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "At most this many; 50 by default"
+            },
+            "required": false,
+            "description": "At most this many; 50 by default",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shared Artifacts, most recently updated first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SharedArtifact"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": ["string", "null"],
+                      "format": "uuid",
+                      "description": "Pass as `cursor` for the next page; null on the last one"
+                    }
+                  },
+                  "required": ["items", "nextCursor"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or limit",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This install does not host Artifacts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shared-artifacts/{id}": {
+      "get": {
+        "tags": ["artifacts"],
+        "summary": "One Artifact shared with the organization",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The shared Artifact",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedArtifact"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such Artifact shared with the caller",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shared-artifacts/{id}/content": {
+      "get": {
+        "tags": ["artifacts"],
+        "summary": "The content of the version of a shared Artifact the caller may see",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version's bytes, with its mime type",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such Artifact shared with the caller",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -14,13 +14,16 @@ import {
 import { users } from './auth.js';
 import { bots } from './bots.js';
 import { chats } from './chats.js';
-import { createdAt, id, updatedAt } from './columns.js';
+import { createdAt, id, timestamptz, updatedAt } from './columns.js';
 import { runs } from './runs.js';
 import { workspaceId } from './workspace.js';
 
 // Plan 4.8: Artifacts, memory, files (A1 to A4, M1 to M3).
 
 export const artifactKind = pgEnum('artifact_kind', ['document', 'code', 'data', 'design', 'file']);
+
+/** Who may see an Artifact (plan 21.11): its owner, the organization, or anyone with the link. */
+export const artifactVisibility = pgEnum('artifact_visibility', ['private', 'org', 'public']);
 
 export const memoryKind = pgEnum('memory_kind', ['preference', 'fact', 'summary']);
 
@@ -43,22 +46,37 @@ export const filePurpose = pgEnum('file_purpose', [
  */
 export const EMBEDDING_DIMENSIONS = 1536;
 
-export const artifacts = pgTable('artifacts', {
-  id: id(),
-  workspaceId: workspaceId(),
-  ownerId: uuid('owner_id')
-    .notNull()
-    .references(() => users.id),
-  botId: uuid('bot_id').references(() => bots.id, { onDelete: 'set null' }),
-  chatId: uuid('chat_id').references(() => chats.id, { onDelete: 'set null' }),
-  kind: artifactKind('kind').notNull(),
-  title: text('title').notNull(),
-  currentVersionId: uuid('current_version_id').references((): AnyPgColumn => artifactVersions.id, {
-    onDelete: 'set null',
-  }),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const artifacts = pgTable(
+  'artifacts',
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    botId: uuid('bot_id').references(() => bots.id, { onDelete: 'set null' }),
+    chatId: uuid('chat_id').references(() => chats.id, { onDelete: 'set null' }),
+    kind: artifactKind('kind').notNull(),
+    title: text('title').notNull(),
+    currentVersionId: uuid('current_version_id').references(
+      (): AnyPgColumn => artifactVersions.id,
+      {
+        onDelete: 'set null',
+      },
+    ),
+    /** Private by default; widened only by a person (plan 21.11). */
+    visibility: artifactVisibility('visibility').notNull().default('private'),
+    /** Who last changed `visibility`, and when. */
+    sharedBy: uuid('shared_by').references(() => users.id),
+    sharedAt: timestamptz('shared_at'),
+    /** An operator took its public link down (abuse); it is not served publicly until restored. */
+    takenDownAt: timestamptz('taken_down_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  // What an organization's members can see, by organization (GET /shared-artifacts).
+  (t) => [index('artifacts_workspace_visibility').on(t.workspaceId, t.visibility)],
+);
 
 /** Every edit is a new version (A2). */
 export const artifactVersions = pgTable(

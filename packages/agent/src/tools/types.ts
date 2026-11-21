@@ -156,7 +156,26 @@ export interface AgentTool<Args = unknown> {
   transcript?(output: unknown): unknown;
   /** The provider's own tool for this one, when the run's model has one (Anthropic computer use). */
   native?(target: ModelTarget): NativeTool | undefined;
+  /**
+   * Called when the policy asks, before the request is posted: what exactly
+   * the owner would approve, when the arguments alone cannot say (an
+   * Artifact's title, who would see it, which stored version). A thrown
+   * error refuses the call, with nothing posted.
+   */
+  prepareApproval?(args: Args, ctx: ToolContext): Promise<ApprovalRequest | undefined>;
   execute(args: Args, ctx: ToolContext): Promise<unknown>;
+}
+
+/** What an approval request shows and keeps (`AgentTool.prepareApproval`). */
+export interface ApprovalRequest {
+  /** The one line shown in place of the arguments' summary. */
+  summary?: string;
+  /**
+   * The arguments the approval stores, in place of the call's: the call's
+   * own, plus what pins down what is approved. The tool still runs with the
+   * call's arguments; its backend reads the rest from the approval.
+   */
+  args?: Record<string, unknown>;
 }
 
 /** A tool result as the model gets it (the AI SDK's `ToolResultOutput`). */
@@ -200,6 +219,7 @@ export interface AnyAgentTool {
   toModelOutput?(output: unknown): ToolResultOutput | undefined;
   transcript?(output: unknown): unknown;
   native?(target: ModelTarget): NativeTool | undefined;
+  prepareApproval?(args: never, ctx: ToolContext): Promise<ApprovalRequest | undefined>;
   execute(args: never, ctx: ToolContext): Promise<unknown>;
 }
 

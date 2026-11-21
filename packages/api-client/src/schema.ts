@@ -4980,6 +4980,385 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/artifacts/{id}/sharing': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Who may see an Artifact, its link, and any share request from its Bot (owner) */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Its sharing */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['ArtifactSharing'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such Artifact, or this install does not host Artifacts */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    /** Change who may see an Artifact (owner; a person, for anything wider than before), or narrow another member's (owner or admin of the organization) */
+    put: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['ArtifactSharingChange'];
+        };
+      };
+      responses: {
+        /** @description Its sharing now */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['ArtifactSharing'];
+          };
+        };
+        /** @description `public` without `confirmed` (`CONFIRMATION_REQUIRED`) */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description An API key widening it (`PERSON_REQUIRED`), public links are not on in the organization (`PUBLIC_SHARING_OFF`), or an admin widening another member's Artifact (`OWNER_ONLY`) */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such Artifact the caller owns or, as an owner or admin, sees shared; or this install does not host Artifacts */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description The public link was taken down (`TAKEN_DOWN`) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/artifacts/{id}/open': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** A link that opens an Artifact on the artifact host for the caller */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description The link */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['ArtifactOpenLink'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such Artifact the caller may see */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`) */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/shared-artifacts': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Artifacts shared with the caller's organization, read only, a page at a time */
+    get: {
+      parameters: {
+        query?: {
+          /** @description The previous page's `nextCursor` */
+          cursor?: string;
+          /** @description At most this many; 50 by default */
+          limit?: number;
+        };
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Shared Artifacts, most recently updated first */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': {
+              items: components['schemas']['SharedArtifact'][];
+              /**
+               * Format: uuid
+               * @description Pass as `cursor` for the next page; null on the last one
+               */
+              nextCursor: string | null;
+            };
+          };
+        };
+        /** @description Invalid cursor or limit */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description This install does not host Artifacts */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/shared-artifacts/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** One Artifact shared with the organization */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description The shared Artifact */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['SharedArtifact'];
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such Artifact shared with the caller */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/shared-artifacts/{id}/content': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** The content of the version of a shared Artifact the caller may see */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description The version's bytes, with its mime type */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/octet-stream': string;
+          };
+        };
+        /** @description Not signed in */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+        /** @description No such Artifact shared with the caller */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/computer': {
     parameters: {
       query?: never;
@@ -11381,6 +11760,12 @@ export interface components {
       auditRetentionDays: number;
       /** @description Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may) */
       customStdioEnabled: boolean;
+      /** @description Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back. */
+      publicArtifactsEnabled: boolean;
+      /** @description How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop */
+      publicArtifacts: number;
+      /** @description Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off */
+      publicLinksStopped?: number;
       /** @description The most each limit may be on the managed service; null on a self-hosted install, which has none */
       ceilings: {
         botsPerAccount: number;
@@ -11425,6 +11810,7 @@ export interface components {
       };
       auditRetentionDays?: number;
       customStdioEnabled?: boolean;
+      publicArtifactsEnabled?: boolean;
     };
     Resync: {
       messages: components['schemas']['Message'][];
@@ -11599,6 +11985,8 @@ export interface components {
       };
       /** @description The first owner is made by pairing a phone (`openbots pair`), not the web wizard (OPENBOTS_SETUP_PAIRING_ONLY) */
       setupPairingOnly?: boolean;
+      /** @description Artifacts can be shared with the organization or made public and opened in a browser on the artifact domain (OPENBOTS_ARTIFACT_DOMAIN). Off: no share control, and the sharing routes answer 404. */
+      artifactSharing?: boolean;
       /**
        * @description `local`: the Mac app on This Mac signs its owner in itself (OPENBOTS_LOCAL_TOKEN), so there is no sign-in, sign-up or sign-out. `password`: the usual sign-in.
        * @enum {string}
@@ -13191,6 +13579,7 @@ export interface components {
       kind: components['schemas']['ArtifactKind'];
       title: string;
       currentVersion: components['schemas']['ArtifactVersion'];
+      visibility?: components['schemas']['ArtifactVisibility'];
       /** Format: date-time */
       createdAt: string;
       /** Format: date-time */
@@ -13217,10 +13606,89 @@ export interface components {
       /** Format: date-time */
       createdAt: string;
     } | null;
+    /**
+     * @description `private`: its owner only. `org`: every active member of the organization, read only, at the latest version. `public`: anyone with the link, at the version its owner confirmed.
+     * @enum {string}
+     */
+    ArtifactVisibility: 'private' | 'org' | 'public';
     UpdateArtifact: {
       content: string;
       /** @description The version the edit started from; a newer current version answers 409 */
       baseVersion?: number;
+    };
+    ArtifactSharing: {
+      visibility: components['schemas']['ArtifactVisibility'];
+      /** @description Its latest version: what everyone who may see it sees */
+      currentVersion: number | null;
+      /** @description An owner or admin turned public links on for the organization (off by default) */
+      publicAllowed: boolean;
+      /** @description The service took the public link down; it cannot be made public again */
+      takenDown: boolean;
+      /**
+       * Format: uri
+       * @description The Artifact's address on the artifact host; null when it has none (`noLink`)
+       */
+      url: string | null;
+      /**
+       * @description Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link
+       * @enum {string|null}
+       */
+      noLink: 'bot_deleted' | 'address_too_long' | null;
+      /** Format: date-time */
+      sharedAt: string | null;
+      pendingRequest: components['schemas']['ArtifactShareRequest'];
+    };
+    /** @description A Bot's request to share it that the owner has not answered */
+    ArtifactShareRequest: {
+      /**
+       * Format: uuid
+       * @description Answer it with `POST /approvals/{id}/decide`
+       */
+      approvalId: string;
+      /** @enum {string} */
+      visibility: 'org' | 'public';
+      /** Format: date-time */
+      createdAt: string;
+    } | null;
+    ArtifactSharingChange: {
+      visibility: components['schemas']['ArtifactVisibility'];
+      /**
+       * @description For `public`: the person confirmed that anyone with the link will be able to view it and every later version
+       * @enum {boolean}
+       */
+      confirmed?: true;
+    };
+    ArtifactOpenLink: {
+      /**
+       * Format: uri
+       * @description Opens the Artifact on the artifact host. For the owner and members it carries a view token for this one Artifact, used once.
+       */
+      url: string;
+      /** Format: date-time */
+      expiresAt: string | null;
+    };
+    SharedArtifact: {
+      /** Format: uuid */
+      id: string;
+      /** @enum {string} */
+      kind: 'document' | 'code' | 'data' | 'design' | 'file';
+      title: string;
+      visibility: components['schemas']['ArtifactVisibility'];
+      /** @description Its latest version, which the caller sees */
+      version: {
+        version: number;
+        mime: string;
+        size: number;
+        /** Format: date-time */
+        createdAt: string;
+      };
+      ownerName: string;
+      botName: string | null;
+      mine: boolean;
+      /** Format: uri */
+      url: string | null;
+      /** Format: date-time */
+      updatedAt: string;
     };
     ComputerState: {
       /** @description This install has a computer provider */

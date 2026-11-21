@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nextSeq, schema } from '../db/client.js';
+import { createArtifact } from '../services/artifacts.js';
 import type { FilePurpose } from '../services/files.js';
 import { insertRun } from '../services/runs.js';
 import { createTestApp, type TestApp } from '../test-app.js';
@@ -28,7 +29,11 @@ describe('ownership', () => {
   let workspaceId: string;
 
   beforeAll(async () => {
-    t = await createTestApp({ OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_SIGNUP_MODE: 'open' });
+    t = await createTestApp({
+      OPENBOTS_DEPLOYMENT: 'managed',
+      OPENBOTS_SIGNUP_MODE: 'open',
+      OPENBOTS_ARTIFACT_DOMAIN: 'openbots-artifacts.test',
+    });
     alice = (await t.signUp('alice@example.com')).cookie!;
     bob = (await t.signUp('bob@example.com')).cookie!;
     const users = await t.db.select().from(schema.users);
@@ -383,5 +388,97 @@ describe('ownership', () => {
     const [row] = await t.db.select().from(schema.devices).where(eq(schema.devices.id, id));
     expect(row).toMatchObject({ ownerId: aliceId, revokedAt: null, pushToken: null });
     expect(bobId).not.toBe(aliceId);
+  });
+
+  it("keeps a member's private Artifact from another member, and a shared one from a suspended member", async () => {
+    const bot = await newBot(alice, 'Sharer');
+    const { artifact } = await createArtifact(
+      t.ownerDeps,
+      { id: aliceId, workspaceId },
+      { title: 'Private plan', kind: 'document', botId: bot.id, content: 'secret plan' },
+      { userId: aliceId },
+    );
+    const id = artifact.id;
+    const routes: [string, string, unknown?][] = [
+      ['GET', `/artifacts/${id}`],
+      ['GET', `/artifacts/${id}/sharing`],
+      ['PUT', `/artifacts/${id}/sharing`, { visibility: 'org' }],
+      ['POST', `/artifacts/${id}/open`],
+      ['GET', `/shared-artifacts/${id}`],
+      ['GET', `/shared-artifacts/${id}/content`],
+    ];
+    for (const [method, path, body] of routes) {
+      const res = await call(bob, method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(404);
+      expect(await res.text()).not.toContain('secret plan');
+    }
+    const listed = (await (await call(bob, 'GET', '/shared-artifacts')).json()) as {
+      items: { id: string }[];
+    };
+    expect(listed.items.map((i) => i.id)).not.toContain(id);
+    const [row] = await t.db.select().from(schema.artifacts).where(eq(schema.artifacts.id, id));
+    expect(row!.visibility).toBe('private');
+
+    // Shared with the organization, Bob reads it; suspended, he reads nothing.
+    expect(
+      (await call(alice, 'PUT', `/artifacts/${id}/sharing`, { visibility: 'org' })).status,
+    ).toBe(200);
+    expect((await call(bob, 'GET', `/shared-artifacts/${id}`)).status).toBe(200);
+    expect(
+      (await call(bob, 'PUT', `/artifacts/${id}/sharing`, { visibility: 'private' })).status,
+    ).toBe(404);
+    await t.db
+      .update(schema.workspaceMembers)
+      .set({ suspendedAt: new Date() })
+      .where(eq(schema.workspaceMembers.userId, bobId));
+    try {
+      for (const [, path] of routes.filter(([m]) => m === 'GET')) {
+        expect((await call(bob, 'GET', path)).status, path).toBe(403);
+      }
+      expect((await call(bob, 'GET', '/shared-artifacts')).status).toBe(403);
+    } finally {
+      await t.db
+        .update(schema.workspaceMembers)
+        .set({ suspendedAt: null })
+        .where(eq(schema.workspaceMembers.userId, bobId));
+    }
+  });
+
+  it('lets the owner share from a paired device, never from a plain API key', async () => {
+    const bot = await newBot(alice, 'Phone sharer');
+    const { artifact } = await createArtifact(
+      t.ownerDeps,
+      { id: aliceId, workspaceId },
+      { title: 'From the phone', kind: 'document', botId: bot.id, content: 'x' },
+      { userId: aliceId },
+    );
+    const pairing = (await (await call(alice, 'POST', '/devices/pairings', {})).json()) as {
+      qr: { code: string };
+    };
+    const paired = (await (
+      await call(alice, 'POST', '/devices/pair', {
+        code: pairing.qr.code,
+        name: 'Alice phone 2',
+        platform: 'ios',
+        publicKey: randomBytes(32).toString('base64url'),
+        pushKey: randomBytes(32).toString('base64url'),
+      })
+    ).json()) as { key: string };
+    const plain = (await (await call(alice, 'POST', '/api-keys', { name: 'script' })).json()) as {
+      key: string;
+    };
+    expect((await call(alice, 'PATCH', '/settings', { publicArtifactsEnabled: true })).status).toBe(
+      200,
+    );
+    const share = (key: string) =>
+      t.app.request(`/api/v1/artifacts/${artifact.id}/sharing`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ visibility: 'public', confirmed: true }),
+      });
+    expect((await share(plain.key)).status).toBe(403);
+    const fromPhone = await share(paired.key);
+    expect(fromPhone.status).toBe(200);
+    expect(((await fromPhone.json()) as { visibility: string }).visibility).toBe('public');
   });
 });

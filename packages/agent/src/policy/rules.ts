@@ -1,4 +1,8 @@
-import type { PolicyDecision, ToolGroupName } from '@openbots/shared';
+import {
+  REQUEST_ARTIFACT_SHARE_TOOL,
+  type PolicyDecision,
+  type ToolGroupName,
+} from '@openbots/shared';
 import type { PolicyRule } from './policy.js';
 
 // The built-in defaults (plan 8, T5): reads run, anything that can change
@@ -90,11 +94,24 @@ const NAMED_RULES: Record<string, (args: Record<string, unknown>) => DefaultRule
   web_fetch: (args) => ({ ...read('web_fetch only reads'), fetchHost: hostOf(args.url) }),
   // Starting a session runs; what the agent does inside it is judged action
   // by action (`coderActionDecision`), and pushes and pull requests ask (I7, I9).
+  [REQUEST_ARTIFACT_SHARE_TOOL]: () =>
+    ask(
+      `${REQUEST_ARTIFACT_SHARE_TOOL} shows an Artifact to more people; its owner always decides`,
+    ),
   code_task: () =>
     act(
       'code_task starts a coding session; pushes, pull requests and risky commands ask inside it',
     ),
 };
+
+/**
+ * Tools that always wait for a person, whatever the Bot's settings, the
+ * connector marks or the run's trigger say (plan 21.11): the engine never
+ * lets them run unasked. Sharing an Artifact shows it to people who could not
+ * see it before, so only its owner, in the app, may say yes. Deny still
+ * refuses them.
+ */
+export const PERSON_ONLY_TOOLS: ReadonlySet<string> = new Set([REQUEST_ARTIFACT_SHARE_TOOL]);
 
 /** Tools whose default depends on the call's arguments, said before any call is made. */
 const BY_ARGUMENTS: Record<string, { decision: PolicyDecision; why: string }> = {

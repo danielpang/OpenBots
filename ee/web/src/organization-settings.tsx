@@ -5,6 +5,7 @@ import { isAdmin } from '@openbots/web/extensions';
 import {
   LimitFields,
   limitsPatch,
+  PublicLinksSetting,
   SaveRow,
   settingsQuery,
   useSaveSettings,
@@ -16,8 +17,9 @@ import { CreateOrganizationForm } from './create-organization.js';
 
 // Settings > Organization (plan 21.5): its name, and for owners and admins
 // its limits and how long its audit log keeps rows, under the ceiling the
-// service sets. Everyone may create another organization or leave this one;
-// the last owner cannot leave.
+// service sets, and whether members may make Artifacts public (plan 21.11;
+// off by default; the setting, its rules and its control are the core's). Everyone may create
+// another organization or leave this one; the last owner cannot leave.
 
 export function OrganizationSettings() {
   const me = useQuery(meQuery);
@@ -25,6 +27,7 @@ export function OrganizationSettings() {
   return (
     <div className="flex flex-col gap-10">
       <NameSection admin={admin} />
+      {admin && <SharingSection />}
       {admin && <LimitsSection />}
       <OtherOrganizations />
     </div>
@@ -74,6 +77,9 @@ function NameSection({ admin }: { admin: boolean }) {
     </section>
   );
 }
+
+/** Public links to Artifacts for the organization: the core's setting (plan 21.11). */
+export const SharingSection = PublicLinksSetting;
 
 function LimitsSection() {
   const { data } = useQuery(settingsQuery);

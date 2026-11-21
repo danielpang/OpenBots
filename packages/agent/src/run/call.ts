@@ -2,7 +2,7 @@ import type { ModelMessage } from 'ai';
 import type { ToolResultOutput } from '../tools/types.js';
 import { labelFor } from '../activity/labels.js';
 import { frameToolOutput } from '../context/framing.js';
-import { gated, WaitFor } from '../gated.js';
+import { gated, NeedsApproval, WaitFor } from '../gated.js';
 import type { Policy, PolicyRun } from '../policy/index.js';
 import { artifactCardPart } from '../tools/artifacts.js';
 import { attachedFilePart } from '../tools/builtin.js';
@@ -75,6 +75,9 @@ export async function runToolCall(input: RunToolCallInput): Promise<ToolCallOutc
           onStart: (label) => input.setState('working', label, name),
           execute,
           ...(labels ? { labels } : {}),
+          ...(tool.prepareApproval
+            ? { prepare: () => tool.prepareApproval!(parsed.data as never, input.toolContext) }
+            : {}),
         });
       } else {
         await input.setState('working', labelFor(name, parsed.data, undefined, labels), name);
@@ -108,7 +111,8 @@ export async function runToolCall(input: RunToolCallInput): Promise<ToolCallOutc
           ...error.request,
           toolCallId: call.toolCallId,
           toolName: name,
-          args: call.args,
+          // What the owner approves: the call's arguments, as the tool pinned them down.
+          args: error instanceof NeedsApproval ? error.args : call.args,
           partIndex,
           ...(posted ? { messageId: posted.messageId } : {}),
         },

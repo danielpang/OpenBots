@@ -2,6 +2,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   jsonb,
   pgEnum,
   pgTable,
@@ -55,10 +56,27 @@ export const bots = pgTable(
      */
     isMain: boolean('is_main').notNull().default(false),
     archivedAt: timestamptz('archived_at'),
+    /**
+     * The Bot's name on the artifact domain (plan 21.11):
+     * `https://<public_slug>--<organization slug>.<OPENBOTS_ARTIFACT_DOMAIN>`.
+     * Unique across every organization, since handles are only unique per
+     * member; lower case letters and digits in hyphen-separated runs, so it
+     * never holds `--` and the label splits one way. Given at creation
+     * (services/bots.ts) and never changed; the default covers rows written
+     * any other way.
+     */
+    publicSlug: text('public_slug')
+      .notNull()
+      .unique('bots_public_slug_unique')
+      .default(sql`('b' || substr(md5(gen_random_uuid()::text), 1, 11))`),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
+    check(
+      'bots_public_slug_format',
+      sql`${t.publicSlug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND length(${t.publicSlug}) BETWEEN 3 AND 40`,
+    ),
     unique('bots_handle_per_owner').on(t.workspaceId, t.ownerId, t.handle),
     uniqueIndex('bots_one_main_per_owner')
       .on(t.workspaceId, t.ownerId)

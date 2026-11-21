@@ -1,0 +1,380 @@
+import { Readable } from 'node:stream';
+import { createRoute, z } from '@hono/zod-openapi';
+import { artifactFileName } from '@openbots/artifacts';
+import { ARTIFACT_KINDS } from '@openbots/shared';
+import { DomainError } from '../errors.js';
+import { requireUser } from '../middleware/auth.js';
+import { authenticated, authProblems, createRouter, problemResponse } from '../openapi.js';
+import {
+  changeSharing,
+  getShared,
+  getSharing,
+  listShared,
+  openLink,
+  openShared,
+  requireArtifactHost,
+  SHARE_AN_ARTIFACT,
+  SHARED_PAGE,
+  type SharedArtifact,
+  type SharingState,
+} from '../services/artifact-sharing.js';
+import { assertPerson } from '../services/person.js';
+import { ArtifactVisibilitySchema, INLINE_MIME } from './artifacts.js';
+
+// Sharing Artifacts (plan 21.11; services/artifact-sharing.ts). Core routes,
+// so the web and phone apps share them; every one answers 404 unless the
+// install hosts Artifacts (OPENBOTS_ARTIFACT_DOMAIN, `artifactSharing` in
+// /capabilities).
+//
+// - The owner reads and changes who may see an Artifact. Widening it needs a
+//   person (a session or a paired device, 403 PERSON_REQUIRED for an API
+//   key); `public` needs `confirmed` and the organization's public links on.
+//   A shared Artifact always shows its latest version.
+// - An owner or admin of the organization may narrow anyone's shared
+//   Artifact (to stop what a suspended or removed member shared), never
+//   widen it (403 OWNER_ONLY).
+// - Members of the organization list and read what is shared with it, read
+//   only: the title, kind, who shared it, its latest version and its bytes.
+//   Nothing else of the owner's (the chat, the Bot, other Artifacts, earlier
+//   versions) comes with it.
+// - `POST /artifacts/{id}/open` gives the caller a link to the artifact host,
+//   with a one-minute view token when they see it as its owner or a member.
+
+const params = z.object({ id: z.uuid() });
+
+const ShareRequestSchema = z
+  .object({
+    approvalId: z.uuid().openapi({ description: 'Answer it with `POST /approvals/{id}/decide`' }),
+    visibility: z.enum(['org', 'public']),
+    createdAt: z.iso.datetime(),
+  })
+  .openapi('ArtifactShareRequest');
+
+const ArtifactSharingSchema = z
+  .object({
+    visibility: ArtifactVisibilitySchema,
+    currentVersion: z.number().int().positive().nullable().openapi({
+      description: 'Its latest version: what everyone who may see it sees',
+    }),
+    publicAllowed: z.boolean().openapi({
+      description: 'An owner or admin turned public links on for the organization (off by default)',
+    }),
+    takenDown: z.boolean().openapi({
+      description: 'The service took the public link down; it cannot be made public again',
+    }),
+    url: z.url().nullable().openapi({
+      description: "The Artifact's address on the artifact host; null when it has none (`noLink`)",
+    }),
+    noLink: z.enum(['bot_deleted', 'address_too_long']).nullable().openapi({
+      description:
+        "Why `url` is null: the Bot that made it was deleted, or the organization's address is too long for a link",
+    }),
+    sharedAt: z.iso.datetime().nullable(),
+    pendingRequest: ShareRequestSchema.nullable().openapi({
+      description: "A Bot's request to share it that the owner has not answered",
+    }),
+  })
+  .openapi('ArtifactSharing');
+
+const SharingChangeSchema = z
+  .strictObject({
+    visibility: ArtifactVisibilitySchema,
+    confirmed: z.literal(true).optional().openapi({
+      description:
+        'For `public`: the person confirmed that anyone with the link will be able to view it and every later version',
+    }),
+  })
+  .openapi('ArtifactSharingChange');
+
+const SharedArtifactSchema = z
+  .object({
+    id: z.uuid(),
+    kind: z.enum(ARTIFACT_KINDS),
+    title: z.string(),
+    visibility: ArtifactVisibilitySchema,
+    version: z
+      .object({
+        version: z.number().int().positive(),
+        mime: z.string(),
+        size: z.number().int(),
+        createdAt: z.iso.datetime(),
+      })
+      .openapi({ description: 'Its latest version, which the caller sees' }),
+    ownerName: z.string(),
+    botName: z.string().nullable(),
+    mine: z.boolean(),
+    url: z.url().nullable(),
+    updatedAt: z.iso.datetime(),
+  })
+  .openapi('SharedArtifact');
+
+const OpenLinkSchema = z
+  .object({
+    url: z.url().openapi({
+      description:
+        'Opens the Artifact on the artifact host. For the owner and members it carries a view token for this one Artifact, used once.',
+    }),
+    expiresAt: z.iso.datetime().nullable(),
+  })
+  .openapi('ArtifactOpenLink');
+
+const iso = (date: Date | null) => (date ? new Date(date).toISOString() : null);
+
+function toSharing(state: SharingState): z.infer<typeof ArtifactSharingSchema> {
+  return {
+    visibility: state.visibility,
+    currentVersion: state.currentVersion,
+    publicAllowed: state.publicAllowed,
+    takenDown: state.takenDown,
+    url: state.url,
+    noLink: state.noLink,
+    sharedAt: iso(state.sharedAt),
+    pendingRequest: state.pendingRequest
+      ? {
+          approvalId: state.pendingRequest.approvalId,
+          visibility: state.pendingRequest.visibility,
+          createdAt: iso(state.pendingRequest.createdAt)!,
+        }
+      : null,
+  };
+}
+
+function toShared(shared: SharedArtifact, viewerId: string): z.infer<typeof SharedArtifactSchema> {
+  return {
+    id: shared.artifact.id,
+    kind: shared.artifact.kind,
+    title: shared.artifact.title,
+    visibility: shared.artifact.visibility,
+    version: {
+      version: shared.version.version,
+      mime: shared.version.mime,
+      size: shared.version.size,
+      createdAt: iso(shared.version.createdAt)!,
+    },
+    ownerName: shared.ownerName,
+    botName: shared.botName,
+    mine: shared.artifact.ownerId === viewerId,
+    url: shared.url,
+    updatedAt: iso(shared.artifact.updatedAt)!,
+  };
+}
+
+const sharingResponse = (description: string) => ({
+  description,
+  content: { 'application/json': { schema: ArtifactSharingSchema } },
+});
+
+export const artifactSharingRoutes = createRouter()
+  .openapi(
+    createRoute({
+      method: 'get',
+      path: '/artifacts/{id}/sharing',
+      tags: ['artifacts'],
+      summary: 'Who may see an Artifact, its link, and any share request from its Bot (owner)',
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: { params },
+      responses: {
+        200: sharingResponse('Its sharing'),
+        ...authProblems,
+        404: problemResponse('No such Artifact, or this install does not host Artifacts'),
+      },
+    }),
+    async (c) => {
+      const state = await getSharing(c.var.deps, c.var.user, c.req.valid('param').id);
+      return c.json(toSharing(state), 200);
+    },
+  )
+  .openapi(
+    createRoute({
+      method: 'put',
+      path: '/artifacts/{id}/sharing',
+      tags: ['artifacts'],
+      summary:
+        "Change who may see an Artifact (owner; a person, for anything wider than before), or narrow another member's (owner or admin of the organization)",
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: {
+        params,
+        body: { required: true, content: { 'application/json': { schema: SharingChangeSchema } } },
+      },
+      responses: {
+        200: sharingResponse('Its sharing now'),
+        400: problemResponse('`public` without `confirmed` (`CONFIRMATION_REQUIRED`)'),
+        ...authProblems,
+        403: problemResponse(
+          "An API key widening it (`PERSON_REQUIRED`), public links are not on in the organization (`PUBLIC_SHARING_OFF`), or an admin widening another member's Artifact (`OWNER_ONLY`)",
+        ),
+        404: problemResponse(
+          'No such Artifact the caller owns or, as an owner or admin, sees shared; or this install does not host Artifacts',
+        ),
+        409: problemResponse('The public link was taken down (`TAKEN_DOWN`)'),
+      },
+    }),
+    async (c) => {
+      const { deps, user } = c.var;
+      const id = c.req.valid('param').id;
+      const body = c.req.valid('json');
+      // Public always needs a person. Anything else is judged by setVisibility
+      // against the row it locks: whether it widens what is shared now.
+      if (body.visibility === 'public') {
+        requireArtifactHost(deps.config);
+        await assertPerson(deps.db, user, SHARE_AN_ARTIFACT);
+      }
+      if (body.visibility === 'public' && body.confirmed !== true) {
+        throw new DomainError(
+          400,
+          'CONFIRMATION_REQUIRED',
+          'Confirm that anyone with the link will be able to view it and every later version',
+        );
+      }
+      const state = await changeSharing(deps, user, id, { visibility: body.visibility });
+      return c.json(toSharing(state), 200);
+    },
+  )
+  .openapi(
+    createRoute({
+      method: 'post',
+      path: '/artifacts/{id}/open',
+      tags: ['artifacts'],
+      summary: 'A link that opens an Artifact on the artifact host for the caller',
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: { params },
+      responses: {
+        200: {
+          description: 'The link',
+          content: { 'application/json': { schema: OpenLinkSchema } },
+        },
+        ...authProblems,
+        404: problemResponse('No such Artifact the caller may see'),
+        409: problemResponse(
+          "It has no link: its Bot was deleted (`NO_LINK`), or the organization's address is too long for one (`ADDRESS_TOO_LONG`)",
+        ),
+      },
+    }),
+    async (c) => {
+      const link = await openLink(c.var.deps, c.var.user, c.req.valid('param').id);
+      return c.json({ url: link.url, expiresAt: iso(link.expiresAt) }, 200);
+    },
+  )
+  .openapi(
+    createRoute({
+      method: 'get',
+      path: '/shared-artifacts',
+      tags: ['artifacts'],
+      summary: "Artifacts shared with the caller's organization, read only, a page at a time",
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: {
+        query: z.object({
+          cursor: z.uuid().optional().openapi({ description: "The previous page's `nextCursor`" }),
+          limit: z.coerce
+            .number()
+            .int()
+            .min(1)
+            .max(SHARED_PAGE.max)
+            .optional()
+            .openapi({
+              description: `At most this many; ${SHARED_PAGE.size} by default`,
+            }),
+        }),
+      },
+      responses: {
+        200: {
+          description: 'Shared Artifacts, most recently updated first',
+          content: {
+            'application/json': {
+              schema: z.object({
+                items: z.array(SharedArtifactSchema),
+                nextCursor: z.uuid().nullable().openapi({
+                  description: 'Pass as `cursor` for the next page; null on the last one',
+                }),
+              }),
+            },
+          },
+        },
+        400: problemResponse('Invalid cursor or limit'),
+        ...authProblems,
+        404: problemResponse('This install does not host Artifacts'),
+      },
+    }),
+    async (c) => {
+      const { cursor, limit } = c.req.valid('query');
+      const page = await listShared(c.var.deps, c.var.user, {
+        ...(cursor ? { cursor } : {}),
+        ...(limit ? { limit } : {}),
+      });
+      return c.json(
+        {
+          items: page.items.map((row) => toShared(row, c.var.user.id)),
+          nextCursor: page.nextCursor,
+        },
+        200,
+      );
+    },
+  )
+  .openapi(
+    createRoute({
+      method: 'get',
+      path: '/shared-artifacts/{id}',
+      tags: ['artifacts'],
+      summary: 'One Artifact shared with the organization',
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: { params },
+      responses: {
+        200: {
+          description: 'The shared Artifact',
+          content: { 'application/json': { schema: SharedArtifactSchema } },
+        },
+        ...authProblems,
+        404: problemResponse('No such Artifact shared with the caller'),
+      },
+    }),
+    async (c) => {
+      const shared = await getShared(c.var.deps, c.var.user, c.req.valid('param').id);
+      return c.json(toShared(shared, c.var.user.id), 200);
+    },
+  )
+  .openapi(
+    createRoute({
+      method: 'get',
+      path: '/shared-artifacts/{id}/content',
+      tags: ['artifacts'],
+      summary: 'The content of the version of a shared Artifact the caller may see',
+      middleware: [requireUser] as const,
+      security: authenticated,
+      request: { params },
+      responses: {
+        200: {
+          description: "The version's bytes, with its mime type",
+          content: {
+            'application/octet-stream': { schema: z.string().openapi({ format: 'binary' }) },
+          },
+        },
+        ...authProblems,
+        404: problemResponse('No such Artifact shared with the caller'),
+      },
+    }),
+    async (c) => {
+      const { artifact, version, stream } = await openShared(
+        c.var.deps,
+        c.var.user,
+        c.req.valid('param').id,
+      );
+      // As the owner's content route serves it: the app's origin never runs it.
+      const disposition = INLINE_MIME.has(version.mime) ? 'inline' : 'attachment';
+      const name = artifactFileName(artifact.title, version.mime);
+      return c.body(Readable.toWeb(stream) as ReadableStream, 200, {
+        'content-type': version.mime.startsWith('text/')
+          ? `${version.mime}; charset=utf-8`
+          : version.mime,
+        'content-length': String(version.size),
+        'content-disposition': `${disposition}; filename*=UTF-8''${encodeURIComponent(name)}`,
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; sandbox",
+        'cache-control': 'private, no-store',
+      });
+    },
+  );

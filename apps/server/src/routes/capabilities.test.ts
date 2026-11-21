@@ -32,6 +32,7 @@ describe('capabilities route', () => {
       version: ROOT_VERSION,
       protocol: { relay: 1 },
       setupPairingOnly: false,
+      artifactSharing: false,
       auth: 'password',
     });
   });
@@ -54,6 +55,7 @@ describe('capabilities route', () => {
       version: ROOT_VERSION,
       protocol: { relay: 1 },
       setupPairingOnly: false,
+      artifactSharing: false,
       auth: 'password',
     });
   });
@@ -66,6 +68,16 @@ describe('capabilities route', () => {
       expect(relayed.deps.config.relayUrl).toBe('wss://relay.example.com');
     } finally {
       await relayed.close();
+    }
+  });
+
+  it('reports Artifact sharing only when OPENBOTS_ARTIFACT_DOMAIN is set', async () => {
+    const hosted = await createTestApp({ OPENBOTS_ARTIFACT_DOMAIN: 'openbots-artifacts.test' });
+    try {
+      const res = await hosted.app.request('/api/v1/capabilities');
+      expect(((await res.json()) as { artifactSharing: boolean }).artifactSharing).toBe(true);
+    } finally {
+      await hosted.close();
     }
   });
 

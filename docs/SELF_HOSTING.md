@@ -190,6 +190,36 @@ The hosted service bills seats and computer hours through Stripe (`STRIPE_*` and
 up). A self-hosted install has no billing and leaves them empty: every computer start and run goes
 ahead as before.
 
+### Shared Artifacts
+
+Sharing an Artifact with the organization or making it public, and opening one in a browser, is
+off unless `OPENBOTS_ARTIFACT_DOMAIN` is set (default empty). With it, each Bot gets a hostname
+on that domain, `https://<bot>--<organization>.<domain>/<artifact id>`, and the server answers
+every request whose `Host` is under it. Use a registrable domain apart from the app's, so a
+shared page never reaches the app's cookies, and point a wildcard DNS record and certificate for
+`*.<domain>` at the server. The server refuses a domain that is the app's host or sits under it.
+
+`OPENBOTS_ARTIFACT_EDGE_SECRET` (default empty) is for the Cloudflare Worker in
+[apps/artifact-worker](../apps/artifact-worker/README.md), which can terminate the wildcard
+hostname instead and forwards to `/artifact-host/` with this secret. Without it that path answers 404.
+
+An Artifact is private to the person who made it until they share it. Sharing with the
+organization is always possible. Public links are off for every organization until an owner or
+admin turns them on in Settings (Settings > Limits on a self-hosted install, Settings >
+Organization on the managed service). Turning them off makes every public Artifact visible to the
+organization only, and turning them on again brings none of those links back. A shared Artifact
+always shows its latest version, so later edits, a Bot's included, are visible at once. An owner
+or admin can stop sharing any member's Artifact, which is how what a suspended or removed member
+shared is stopped. An operator can take one public link down at once with
+`openbots artifacts takedown <link> [reason]` (and put it back with
+`openbots artifacts restore <link>`); both are recorded in the organization's audit log.
+
+An HTML Artifact runs its scripts in a sandboxed frame with no access to the app or the host's
+cookies, and they cannot fetch anything. They are not cut off from the network, though: browsers
+do not block WebRTC or DNS lookups from that frame, so a script in an Artifact can send what the
+Artifact contains to a server its author names. Treat an Artifact with scripts as able to leak
+what is in it, whoever it is shared with.
+
 ### Egress proxy for the computers
 
 By default a computer reaches the whole public internet. To limit it to listed hosts, run the
@@ -277,6 +307,12 @@ Back up first (below). Migrations run when the new server starts.
 - A compose bundle install is pinned to its release: set `OPENBOTS_VERSION` in `.env` to the new
   version (or `latest`) first.
 - Built from source: `git pull && docker compose up -d --build`.
+
+Upgrading to the release with shared Artifacts (migration `0049_artifact_sharing`): the migration
+gives every existing Bot its address on the artifact domain, and while it does it locks the
+organizations (`workspaces`) and `bots` tables, so every request that reads or changes a Bot or an
+organization waits until it ends. That takes moments on most installs. On a very large one, upgrade in a
+quiet period.
 
 Computers move to the new computer image too. The server pulls it at start, and each computer is
 made again from it at its next start, keeping its files and browser logins (the Computer page and
@@ -400,8 +436,8 @@ the last one finished. A backup made before a rotation needs the key it was made
 ### Secrets in files
 
 Each secret setting (`OPENBOTS_MASTER_KEY`, `OPENBOTS_MASTER_KEY_PREVIOUS`, `DATABASE_URL`,
-`REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN` and
-`OPENBOTS_METRICS_TOKEN`) can be given as `NAME_FILE` instead: the path of a file holding the value,
+`REDIS_URL`, the provider API keys, the OAuth client secrets, `OPENBOTS_COMPUTER_AGENT_TOKEN`,
+`OPENBOTS_METRICS_TOKEN` and `OPENBOTS_ARTIFACT_EDGE_SECRET`) can be given as `NAME_FILE` instead: the path of a file holding the value,
 such as a Docker or Kubernetes secret. Set one or the other, not both.
 
 The compose stack does this itself: its entrypoint moves the secrets from `.env` into private

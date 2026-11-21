@@ -12,6 +12,7 @@ import { useApi, useMobile } from '../api/provider';
 import { Button, ErrorNote, Label, Page } from '../components/ui';
 import { useTheme } from '../theme';
 import { formatBytes } from '../transcript/model';
+import { ArtifactShare } from './artifact-share';
 
 const textMime = (mime: string) =>
   mime.startsWith('text/') ||
@@ -193,6 +194,7 @@ export function ArtifactScreen() {
           />
         </View>
       ) : null}
+      {artifact.data ? <ArtifactShare id={id} title={artifact.data.title} /> : null}
     </Page>
   );
 }

@@ -2,6 +2,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { AppEnv } from '../context.js';
 import { apiKeyRoutes } from './api-keys.js';
 import { approvalRoutes } from './approvals.js';
+import { artifactSharingRoutes } from './artifact-sharing.js';
 import { artifactRoutes } from './artifacts.js';
 import { avatarRoutes } from './avatars.js';
 import { botRoutes } from './bots.js';
@@ -51,6 +52,7 @@ export function mountRoutes(app: OpenAPIHono<AppEnv>) {
   app.route('/api/v1', approvalRoutes);
   app.route('/api/v1', connectorRoutes);
   app.route('/api/v1', artifactRoutes);
+  app.route('/api/v1', artifactSharingRoutes);
   app.route('/api/v1', computerRoutes);
   app.route('/api/v1', coderRoutes);
   app.route('/api/v1', codingSessionRoutes);

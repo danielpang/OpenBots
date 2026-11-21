@@ -508,7 +508,7 @@ describe('webhook ingress', () => {
     const limits = config.limits;
     config.limits = { ...limits, webhookEndpointRatePerMin: 1, webhookIpRatePerMin: 3 };
     const workspace = await ensureWorkspace(t.db);
-    await updateSettings(t.db, workspace, { limits: { webhookFailedAuthPerMin: 2 } });
+    await updateSettings(t.db, workspace.id, { limits: { webhookFailedAuthPerMin: 2 } });
     try {
       // An endpoint without its own rate limit gets webhookEndpointRatePerMin.
       expect((await hook(url, { body: '{"t":1}', headers: bearer(token) })).status).toBe(202);
@@ -681,7 +681,7 @@ describe('webhook ingress', () => {
     expect(await waitOf({ syncTimeoutS: 15 })).toBe(15);
     // The admin's sync webhook wait caps every endpoint's.
     const workspace = await ensureWorkspace(t.db);
-    await updateSettings(t.db, workspace, { limits: { syncWebhookWaitSeconds: 10 } });
+    await updateSettings(t.db, workspace.id, { limits: { syncWebhookWaitSeconds: 10 } });
     try {
       expect(await waitOf({ syncTimeoutS: null })).toBe(10);
       const listed = await call('GET', `/bots/${bot.id}/endpoints`);

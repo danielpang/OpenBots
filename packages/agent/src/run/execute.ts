@@ -14,7 +14,7 @@ import {
 } from 'ai';
 import { labelFor, thoughtLabel } from '../activity/labels.js';
 import { FramedToolError, toolModelOutput } from '../context/framing.js';
-import { gated, WaitFor } from '../gated.js';
+import { gated, NeedsApproval, WaitFor } from '../gated.js';
 import type { Policy, PolicyRun } from '../policy/index.js';
 import { artifactCardPart } from '../tools/artifacts.js';
 import { attachedFilePart } from '../tools/builtin.js';
@@ -223,6 +223,9 @@ export async function executeRun(input: ExecuteRunInput): Promise<RunOutcome> {
           },
           execute: () => agentTool.execute(args as never, toolContext),
           ...(agentTool.label ? { labels: agentTool.label } : {}),
+          ...(agentTool.prepareApproval
+            ? { prepare: () => agentTool.prepareApproval!(args as never, toolContext) }
+            : {}),
         });
         if (name !== SEARCH_TOOLS) {
           await finished(toolModelOutput(name, agentTool, output));
@@ -241,7 +244,9 @@ export async function executeRun(input: ExecuteRunInput): Promise<RunOutcome> {
           await finished({ type: 'error-text', value: framed.message });
           throw framed;
         }
-        wait = { ...error.request, toolCallId, toolName: name, args };
+        // What the owner approves: the call's arguments, as the tool pinned them down.
+        const approved = error instanceof NeedsApproval ? error.args : args;
+        wait = { ...error.request, toolCallId, toolName: name, args: approved };
         return WAITING_RESULT;
       } finally {
         toolMs.set(toolCallId, Date.now() - started);

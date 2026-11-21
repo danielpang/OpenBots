@@ -107,6 +107,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   'put /api/v1/connectors/{id}/trusted': { trusted: true },
   'put /api/v1/connectors/{id}/local': { local: false },
   'put /api/v1/artifacts/{id}': { content: 'overwritten' },
+  'put /api/v1/artifacts/{id}/sharing': { visibility: 'public', confirmed: true },
   'patch /api/v1/routines/{id}': { name: 'Taken' },
   'patch /api/v1/skills/{id}': { name: 'Taken' },
   'put /api/v1/skills/{id}/blocked-bots': { botIds: [] },
@@ -278,6 +279,10 @@ describe('organizations are isolated (plan 21.3)', () => {
       { title: `${marker} Artifact`, kind: 'document', botId: bot.id, content: `${marker} doc` },
       { userId },
     );
+    // Shared with A, so A's members may read it and the walk shows nobody else can (plan 21.11).
+    await json(
+      call(cookie, 'put', `/api/v1/artifacts/${artifact.id}/sharing`, { visibility: 'org' }),
+    );
     const run = await insertRun(t.db, {
       botId: bot.id,
       chatId: bot.chatId,
@@ -387,6 +392,7 @@ describe('organizations are isolated (plan 21.3)', () => {
       approvals: ids.approval!,
       connectors: ids.connector!,
       artifacts: ids.artifact!,
+      'shared-artifacts': ids.artifact!,
       routines: ids.routine!,
       skills: ids.skill!,
       endpoints: ids.endpoint!,
@@ -418,7 +424,12 @@ describe('organizations are isolated (plan 21.3)', () => {
   }
 
   beforeAll(async () => {
-    t = await createTestApp({ OPENBOTS_DEPLOYMENT: 'managed', OPENBOTS_SIGNUP_MODE: 'open' });
+    t = await createTestApp({
+      OPENBOTS_DEPLOYMENT: 'managed',
+      OPENBOTS_SIGNUP_MODE: 'open',
+      // Artifact sharing on, so its routes are walked too.
+      OPENBOTS_ARTIFACT_DOMAIN: 'openbots-artifacts.test',
+    });
     orgA = await t.defaultOrganization();
     alice = (await t.signUp('alice@example.com')).cookie!; // the owner of A
     carolInA = (await t.signUp('carol@example.com')).cookie!; // a member of A

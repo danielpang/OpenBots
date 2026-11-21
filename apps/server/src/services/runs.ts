@@ -1,4 +1,4 @@
-import type { RunCheckpoint, SerializedRunState } from '@openbots/agent';
+import { PERSON_ONLY_TOOLS, type RunCheckpoint, type SerializedRunState } from '@openbots/agent';
 import { isForBot } from '@openbots/router';
 import { PRIORITY, wsEvent, type MessagePart } from '@openbots/shared';
 import {
@@ -14,6 +14,8 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm
 import type { AppDeps, CurrentUser } from '../context.js';
 import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
+import { SHARE_AN_ARTIFACT } from './artifact-sharing.js';
+import { assertPerson } from './person.js';
 import { publishEvent } from '../infra/index.js';
 import { observeRun } from '../metrics.js';
 import { assertBotOwner } from '../ownership.js';
@@ -524,13 +526,13 @@ export const widgetClosed = (message: string) => new DomainError(409, 'WIDGET_CL
 /** `POST /messages/:id/widgets/:part/action` for the owner. */
 export async function actOnWidget(
   deps: RunsDeps,
-  owner: Owner,
+  owner: Owner & { apiKeyId?: string | null },
   messageId: string,
   partIndex: number,
   action: unknown,
 ): Promise<WidgetActionResult> {
   const [row] = await deps.db
-    .select({ id: schema.messages.id })
+    .select({ id: schema.messages.id, parts: schema.messages.parts })
     .from(schema.messages)
     .innerJoin(schema.chats, eq(schema.chats.id, schema.messages.chatId))
     .where(
@@ -541,6 +543,17 @@ export async function actOnWidget(
       ),
     );
   if (!row) throw notFound('Message not found');
+  // Approving a tool that only a person may approve (sharing an Artifact,
+  // plan 21.11) needs a person behind the request, not a script's API key.
+  const part = (row.parts as MessagePart[] | undefined)?.[partIndex];
+  if (
+    part?.type === 'widget' &&
+    part.kind === 'approval' &&
+    PERSON_ONLY_TOOLS.has(String((part.props as { tool_name?: unknown }).tool_name)) &&
+    (action as { type?: unknown } | null)?.type === 'approve'
+  ) {
+    await assertPerson(deps.db, owner, SHARE_AN_ARTIFACT);
+  }
   return applyWidgetAction(deps, messageId, partIndex, action, owner.id);
 }
 

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { meQuery } from '@openbots/web/api';
+import { capabilitiesQuery, meQuery } from '@openbots/web/api';
+import { settingsQuery } from '@openbots/web/limits';
 import type { ActiveMe } from '@openbots/web/extensions';
 import type { ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
@@ -8,6 +9,7 @@ import { invitationQuery, organizationsQuery, type Organization } from './api.js
 import { managedWeb } from './extensions.js';
 import { assignableRoles, MemberRow } from './members.js';
 import { Onboarding } from './onboarding.js';
+import { SharingSection } from './organization-settings.js';
 import { OrganizationSwitcher } from './switcher.js';
 
 // The managed web app's pieces (plan 21.5), rendered to HTML.
@@ -163,5 +165,29 @@ describe('the managed web app', () => {
       ]),
     ].join('');
     expect(html).not.toMatch(/[–—]/);
+  });
+
+  it('lets owners and admins turn public Artifact links on, only where the server hosts Artifacts', () => {
+    const settings = { publicArtifactsEnabled: true, publicArtifacts: 2 };
+    const on = render(<SharingSection />, [
+      [capabilitiesQuery.queryKey, { artifactSharing: true }],
+      [settingsQuery.queryKey, settings],
+    ]);
+    expect(text(on)).toContain('Allow public links');
+    expect(text(on)).toContain('Off by default.');
+    expect(text(on)).toContain(
+      'Turning this off makes every public Artifact visible to your organization only.',
+    );
+    expect(on).toMatch(/ checked=""/);
+    const offByDefault = render(<SharingSection />, [
+      [capabilitiesQuery.queryKey, { artifactSharing: true }],
+      [settingsQuery.queryKey, { publicArtifactsEnabled: false, publicArtifacts: 0 }],
+    ]);
+    expect(offByDefault).not.toMatch(/ checked=""/);
+    const off = render(<SharingSection />, [
+      [capabilitiesQuery.queryKey, { artifactSharing: false }],
+      [settingsQuery.queryKey, settings],
+    ]);
+    expect(off).toBe('');
   });
 });

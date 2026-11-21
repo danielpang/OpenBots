@@ -3,6 +3,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { adminProblems, authenticated, createRouter, problemResponse } from '../openapi.js';
 import { LimitsSchema } from '../schemas.js';
 import { DomainError } from '../errors.js';
+import { countPublic, stopPublicLinks } from '../services/artifact-sharing.js';
 import { recordAudit, userActor } from '../services/audit.js';
 import { stopCustomStdio } from '../services/connectors.js';
 import type { Limits } from '@openbots/shared';
@@ -35,6 +36,18 @@ const SettingsSchema = z
       description:
         'Whether admins may add custom stdio connectors, which run a command on the server (default false; members never may)',
     }),
+    publicArtifactsEnabled: z.boolean().openapi({
+      description:
+        'Whether members may make Artifacts public, so anyone with the link can view them (default false). Turning it off makes every public Artifact visible to the organization only, so turning it on again brings no old link back.',
+    }),
+    publicArtifacts: z.number().int().openapi({
+      description:
+        'How many Artifacts are public now, not counting any the service took down: the links that turning `publicArtifactsEnabled` off would stop',
+    }),
+    publicLinksStopped: z.number().int().optional().openapi({
+      description:
+        'Only in the answer to a change: how many public links it stopped, by turning `publicArtifactsEnabled` off or by leaving it off',
+    }),
     ceilings: z.object(LimitsSchema.shape).nullable().openapi({
       description:
         'The most each limit may be on the managed service; null on a self-hosted install, which has none',
@@ -47,6 +60,7 @@ const SettingsPatchSchema = z
     limits: LimitsSchema.partial().strict().optional(),
     auditRetentionDays: z.number().int().min(1).max(3650).optional(),
     customStdioEnabled: z.boolean().optional(),
+    publicArtifactsEnabled: z.boolean().optional(),
   })
   .openapi('SettingsPatch');
 
@@ -58,7 +72,11 @@ const settingsResponse = {
 /** The settings in effect for the organization, with the ceilings its limits stay under. */
 async function settingsOf(deps: AppDeps, workspace: Workspace) {
   const ceilings = await limitsCeiling(deps, workspace);
-  return { ...effectiveSettings(deps.config, workspace, ceilings), ceilings };
+  return {
+    ...effectiveSettings(deps.config, workspace, ceilings),
+    publicArtifacts: await countPublic(deps.db, workspace.id),
+    ceilings,
+  };
 }
 
 /** The least an organization keeps its audit log for on the managed service. */
@@ -148,17 +166,36 @@ export const settingsRoutes = createRouter()
           );
         }
       }
-      const workspace = await updateSettings(db, current, patch);
-      await recordAudit(db, {
-        workspaceId: workspace.id,
-        actor: userActor(c.var.user),
-        action: 'settings.update',
-        targetType: 'workspace',
-        targetId: workspace.id,
-        metadata: patch,
+      const actor = userActor(c.var.user);
+      const { workspace, stopped } = await db.transaction(async (tx) => {
+        // Merged from the organization's row as locked here, so a change
+        // another admin made meanwhile stays (`updateSettings`).
+        const { after: updated } = await updateSettings(tx, current.id, patch);
+        // Whenever the setting this leaves is off, every public link becomes
+        // an organization one, in this transaction: on again brings none of
+        // them back (plan 21.11). Asked of the written row, not the patch, so
+        // a link made public while another admin had them on is stopped even
+        // by a change that did not name the setting. It takes the lock that
+        // shares wait on after the row's, as it always has; when nothing is
+        // public it changes nothing.
+        const stopped = effectiveSettings(config, updated).publicArtifactsEnabled
+          ? 0
+          : await stopPublicLinks(tx, updated.id, actor);
+        await recordAudit(tx, {
+          workspaceId: updated.id,
+          actor,
+          action: 'settings.update',
+          targetType: 'workspace',
+          targetId: updated.id,
+          metadata: stopped ? { ...patch, publicLinksStopped: stopped } : patch,
+        });
+        return { workspace: updated, stopped };
       });
       // Their calls are refused from now on; their running children stop too (S-1).
       if (patch.customStdioEnabled === false) await stopCustomStdio(c.var.deps, workspace.id);
-      return c.json(await settingsOf(c.var.deps, workspace), 200);
+      return c.json(
+        { ...(await settingsOf(c.var.deps, workspace)), publicLinksStopped: stopped },
+        200,
+      );
     },
   );

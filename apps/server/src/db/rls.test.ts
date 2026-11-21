@@ -6,6 +6,7 @@ import { schema, type Db } from './client.js';
 import {
   APP_ROLE,
   DIRECTORY_ROLE,
+  artifactHostWorkspace,
   asDirectory,
   billingCustomerWorkspace,
   deviceWorkspaces,
@@ -364,6 +365,37 @@ describe('row-level security between organizations', () => {
     );
     expect(fn).toEqual({ definer: true, owner: 'openbots_system' });
     await t.db.delete(schema.organizationBilling);
+  });
+
+  it("finds a Bot's organization by its public slug for the artifact host, and nothing more", async () => {
+    const [b] = await t.db
+      .select({ slug: schema.bots.publicSlug })
+      .from(schema.bots)
+      .where(sql`id = ${botB}`);
+    // With no organization in scope the Bot is out of reach; the lookup still answers its id.
+    expect(await t.deps.db.select().from(schema.bots)).toEqual([]);
+    expect(await artifactHostWorkspace(t.deps.db, b!.slug)).toBe(orgB);
+    expect(await artifactHostWorkspace(t.deps.db, 'no-such-bot')).toBeNull();
+    // Artifacts keep to their organization like every table.
+    const artifact = await t.db
+      .insert(schema.artifacts)
+      .values({ workspaceId: orgB, ownerId: owner, botId: botB, kind: 'document', title: 'B doc' })
+      .returning({ id: schema.artifacts.id });
+    await as<{ id: string }>(t.db, APP_ROLE, orgA, async (q) => {
+      expect(await q(sql`select id from artifacts where id = ${artifact[0]!.id}`)).toEqual([]);
+      expect(
+        await q(
+          sql`update artifacts set visibility = 'public' where id = ${artifact[0]!.id} returning id`,
+        ),
+      ).toEqual([]);
+    });
+    const [fn] = rowsOf<{ definer: boolean; owner: string }>(
+      await t.db.execute(sql`
+        select p.prosecdef as definer, pg_get_userbyid(p.proowner) as owner
+        from pg_proc p where p.proname = 'openbots_artifact_host_workspace'`),
+    );
+    expect(fn).toEqual({ definer: true, owner: 'openbots_system' });
+    await t.db.delete(schema.artifacts).where(sql`id = ${artifact[0]!.id}`);
   });
 
   it('lets the app role keep used GitHub flow nonces with no organization set', async () => {

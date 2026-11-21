@@ -6,6 +6,7 @@ import {
   type PolicyRun,
   type PolicyTraceStep,
 } from './policy/index.js';
+import type { ApprovalRequest } from './tools/types.js';
 
 // Waiting (plan 5.6) and the gated tool wrapper (plan 5.5). A tool that needs
 // the owner throws a `WaitFor`; the run loop catches it, stops after the
@@ -48,6 +49,7 @@ export class NeedsApproval extends WaitFor {
     reason: string | null = null,
     trace: PolicyTraceStep[] = [],
     labels: LabelContext = {},
+    summary?: string,
   ) {
     super({
       reason: 'approval',
@@ -56,7 +58,7 @@ export class NeedsApproval extends WaitFor {
         props: {
           tool_name: toolName,
           args: args ?? {},
-          summary: summarizeArgs(toolName, args),
+          summary: summary ?? summarizeArgs(toolName, args),
           reason,
           ...(trace.length ? { trace } : {}),
         },
@@ -79,12 +81,39 @@ export interface GatedCall {
   execute: () => Promise<unknown>;
   /** Connector name and tool title for the labels. */
   labels?: LabelContext;
+  /**
+   * When the policy asks: what exactly the owner would approve, as the
+   * tool's backend can say it (`AgentTool.prepareApproval`): the one line in
+   * place of the arguments' summary, and the arguments the approval keeps.
+   * Its failure refuses the call, so nobody is asked to approve something
+   * the backend already knows is wrong.
+   */
+  prepare?: () => Promise<ApprovalRequest | undefined>;
 }
 
-export async function gated({ run, policy, toolName, args, onStart, execute, labels }: GatedCall) {
+export async function gated({
+  run,
+  policy,
+  toolName,
+  args,
+  onStart,
+  execute,
+  labels,
+  prepare,
+}: GatedCall) {
   const { decision, reason, trace } = asEvaluation(await policy.evaluate(run, toolName, args));
   if (decision === 'deny') return DENIED_RESULT;
-  if (decision === 'ask') throw new NeedsApproval(toolName, args, reason || null, trace, labels);
+  if (decision === 'ask') {
+    const request = prepare ? await prepare() : undefined;
+    throw new NeedsApproval(
+      toolName,
+      request?.args ?? args,
+      reason || null,
+      trace,
+      labels,
+      request?.summary,
+    );
+  }
   await onStart(labelFor(toolName, args, undefined, labels));
   return execute();
 }

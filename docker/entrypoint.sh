@@ -8,6 +8,7 @@
 #   pair             print a QR code for pairing a phone (--name, --direct <url>, --link)
 #   devices          list paired devices, or `devices revoke <id>`
 #   relay            this server's relay host id and whether the relay sees it linked
+#   artifacts        take a public Artifact link down, or restore it
 #   computers        support only: old computers not deleted yet, or `computers retry <id>`
 #   docker-guard     run the docker guard in front of the socket proxy (compose service docker-guard)
 #   anything else    run it as a command, e.g. `sh`
@@ -37,7 +38,7 @@ SERVER_GID="${OPENBOTS_SERVER_GID:-$SERVER_UID}"
 SECRETS_DIR="${OPENBOTS_SECRETS_DIR:-/run/openbots}"
 # The variables apps/server/src/env-files.ts reads from NAME_FILE
 # (env-files.test.ts checks that the two lists match).
-SECRET_VARS="OPENBOTS_MASTER_KEY OPENBOTS_MASTER_KEY_PREVIOUS DATABASE_URL DATABASE_DIRECT_URL OPENBOTS_DB_APP_PASSWORD REDIS_URL OPENBOTS_COMPUTER_AGENT_TOKEN OPENBOTS_SPRITES_TOKEN OPENBOTS_METRICS_TOKEN OPENBOTS_LOCAL_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY XAI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GITHUB_CLIENT_SECRET GOOGLE_CLIENT_SECRET GITHUB_APP_PRIVATE_KEY GITHUB_APP_CLIENT_SECRET GITHUB_APP_WEBHOOK_SECRET"
+SECRET_VARS="OPENBOTS_MASTER_KEY OPENBOTS_MASTER_KEY_PREVIOUS DATABASE_URL DATABASE_DIRECT_URL OPENBOTS_DB_APP_PASSWORD REDIS_URL OPENBOTS_COMPUTER_AGENT_TOKEN OPENBOTS_SPRITES_TOKEN OPENBOTS_METRICS_TOKEN OPENBOTS_LOCAL_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY XAI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GITHUB_CLIENT_SECRET GOOGLE_CLIENT_SECRET GITHUB_APP_PRIVATE_KEY GITHUB_APP_CLIENT_SECRET GITHUB_APP_WEBHOOK_SECRET OPENBOTS_ARTIFACT_EDGE_SECRET"
 
 if [ "$(id -u)" = 0 ] && [ "${OPENBOTS_STANDALONE:-}" = 1 ]; then
   # Leaving uid 0 clears every capability, and no_new_privs keeps a setuid
@@ -101,7 +102,7 @@ case "$command" in
     secrets_to_files
     exec node dist/rotate-key.js "$@"
     ;;
-  pair | devices | relay | computers)
+  pair | devices | relay | artifacts | computers)
     secrets_to_files
     exec node dist/cli/main.js "$command" "$@"
     ;;
