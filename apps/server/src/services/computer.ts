@@ -1248,29 +1248,37 @@ async function holdingStop<T>(
   fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const lost = new AbortController();
-  const giveUp = () =>
-    setTimeout(
+  // The give-up counts from when the last refresh that landed was sent, not
+  // from when its answer came: the database wrote `status_at` after it was
+  // sent, so the takeover cannot come sooner than that plus
+  // `STOPPING_TAKEOVER_MS`, however long the answer took.
+  let unheard: ReturnType<typeof setTimeout> | undefined;
+  let deadline = 0;
+  const heard = (sentAt: number) => {
+    if (lost.signal.aborted || sentAt + stopTimings.giveUpMs <= deadline) return;
+    deadline = sentAt + stopTimings.giveUpMs;
+    clearTimeout(unheard);
+    unheard = setTimeout(
       () => lost.abort(new Error('The computer could not be held: its claim was not refreshed')),
-      stopTimings.giveUpMs,
+      Math.max(0, deadline - Date.now()),
     );
-  // From the claim the caller just wrote or refreshed.
-  let unheard = giveUp();
-  unheard.unref?.();
+    unheard.unref?.();
+  };
+  const refresh = async () => {
+    const sentAt = Date.now();
+    if (!(await stillStopping(deps, row))) {
+      lost.abort(new Error('The computer was taken over meanwhile'));
+      return;
+    }
+    heard(sentAt);
+  };
+  // Once before the call: the claim is this stop's now, and the give-up
+  // counts from now rather than from whenever the caller wrote it.
+  await refresh();
+  if (lost.signal.aborted) throw lost.signal.reason as Error;
   const timer = setInterval(() => {
-    stillStopping(deps, row).then(
-      (held) => {
-        if (!held) {
-          lost.abort(new Error('The computer was taken over meanwhile'));
-          return;
-        }
-        clearTimeout(unheard);
-        if (!lost.signal.aborted) {
-          unheard = giveUp();
-          unheard.unref?.();
-        }
-      },
-      (error: unknown) =>
-        deps.logger.warn({ err: error, computerId: row.id }, 'refreshing a stop failed'),
+    refresh().catch((error: unknown) =>
+      deps.logger.warn({ err: error, computerId: row.id }, 'refreshing a stop failed'),
     );
   }, stopTimings.heartbeatMs);
   timer.unref?.();

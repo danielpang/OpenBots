@@ -332,6 +332,94 @@ describe('retired computers, fifth review', () => {
     });
   });
 
+  describe('6. a stop whose refresh is slow to answer', () => {
+    it('gives up counting from when the refresh was sent, not from its answer', async () => {
+      const m = await member('slow-refresh@example.com');
+      const row = await m.row();
+      const giveUp = 1_000;
+      const late = 800;
+      // Refreshes of the stop's claim (a write of `status_at` alone): the
+      // first lands and answers at once, the second lands at once but its
+      // answer comes `late`, and the rest never answer (the database is gone).
+      let refreshes = 0;
+      let sentLate = 0;
+      const pending: (() => void)[] = [];
+      const db = t.deps.db;
+      const wrap = (target: object, refresh: boolean): unknown =>
+        new Proxy(target, {
+          get(inner, prop) {
+            const value = Reflect.get(inner, prop) as unknown;
+            if (prop === 'then' && refresh && typeof value === 'function') {
+              return (ok: (v: unknown) => void, fail: (e: unknown) => void) => {
+                const n = refreshes++;
+                const landed = (value as (a: unknown, b: unknown) => Promise<unknown>).call(
+                  inner,
+                  (v: unknown) => v,
+                  (e: unknown) => Promise.reject(e),
+                );
+                if (n === 0) return landed.then(ok, fail);
+                if (n === 1) sentLate = Date.now();
+                return landed.then(
+                  (v) =>
+                    new Promise<void>((resolve) => {
+                      const answer = () => resolve(ok(v));
+                      if (n === 1) setTimeout(answer, late);
+                      else pending.push(answer);
+                    }),
+                  fail,
+                );
+              };
+            }
+            if (typeof value !== 'function') return value;
+            return (...args: unknown[]) => {
+              const out = (value as (...a: unknown[]) => unknown).apply(inner, args);
+              const isRefresh =
+                refresh || (prop === 'set' && Object.keys(args[0] as object).join() === 'statusAt');
+              return out && typeof out === 'object' ? wrap(out, isRefresh) : out;
+            };
+          },
+        });
+      const slow = new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'update') {
+            return (table: unknown) => wrap(target.update(table as typeof schema.computers), false);
+          }
+          const value = Reflect.get(target, prop) as unknown;
+          return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+        },
+      });
+      const provider = machines();
+      const stop = provider.stop;
+      let abortedAt = 0;
+      provider.stop = async (_ref, options) => {
+        const signal = options?.signal;
+        if (!signal) return;
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        abortedAt = Date.now();
+        throw signal.reason as Error;
+      };
+      const timings = { ...stopTimings };
+      stopTimings.heartbeatMs = 20;
+      stopTimings.giveUpMs = giveUp;
+      try {
+        await expect(
+          t.inOrganization(() => stopComputer({ ...t.deps, db: slow as typeof db }, row)),
+        ).rejects.toMatchObject({ status: 503 });
+      } finally {
+        provider.stop = stop;
+        Object.assign(stopTimings, timings);
+        for (const answer of pending) answer();
+      }
+      expect(sentLate).toBeGreaterThan(0);
+      // From the late refresh's sending, its give-up: never pushed back by how
+      // long its answer took (that would be `giveUp + late`).
+      expect(abortedAt - sentLate).toBeLessThan(giveUp + late / 2);
+    });
+  });
+
   describe('5. a stop that loses its claim to a start that finished', () => {
     it('stops the computer as it now is, rather than answer stopped while it runs', async () => {
       const m = await member('stop-race@example.com');
