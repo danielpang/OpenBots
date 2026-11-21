@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import postgres from 'postgres';
+import { describe, expect, it, vi } from 'vitest';
 import { createDb, looksPooled, SessionLockTimeout } from './client.js';
 
 // The session locks (db/client.ts `withSessionLock`, the checkout lock): one
@@ -70,6 +71,49 @@ describe.runIf(process.env.DATABASE_URL)('session locks on Postgres', () => {
       // One at a time, in the order they asked.
       expect(order).toEqual(Array.from({ length: 12 }, (_, i) => i));
     } finally {
+      await db.close();
+    }
+  });
+
+  it('a holder whose lock connection is lost is told, through its signal', async () => {
+    const db = createDb(url, {}, { lockWatchMs: 50, lockWaitMs: 2_000 });
+    const admin = postgres(url, { onnotice: () => {}, max: 1 });
+    try {
+      const key = `test:lock:${randomUUID()}`;
+      let seen: AbortSignal | undefined;
+      const holder = db.withSessionLock(key, async (signal?: AbortSignal) => {
+        seen = signal;
+        // The lock's connection goes (a restart, a network cut) while the work runs.
+        await admin`
+          select pg_terminate_backend(pid) from pg_locks
+          where locktype = 'advisory' and granted
+            and objid = (hashtextextended(${key}, 0) & 4294967295)::oid
+        `;
+        await vi.waitFor(() => expect(signal?.aborted).toBe(true), {
+          timeout: 2_000,
+          interval: 10,
+        });
+        return 'ended';
+      });
+      await expect(holder).resolves.toBe('ended');
+      expect(seen?.aborted).toBe(true);
+      // The key is free again for the next holder.
+      await expect(db.withSessionLock(key, async () => 'next')).resolves.toBe('next');
+      // And no lock connection was lost for good: eight keys held at once.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let held = 0;
+      const eight = Array.from({ length: 8 }, () =>
+        db.withSessionLock(`test:lock:${randomUUID()}`, async () => {
+          held++;
+          await gate;
+        }),
+      );
+      await vi.waitFor(() => expect(held).toBe(8), { timeout: 1_500, interval: 10 });
+      release();
+      await Promise.all(eight);
+    } finally {
+      await admin.end();
       await db.close();
     }
   });

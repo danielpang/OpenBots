@@ -60,6 +60,11 @@ export interface GitContext {
   owner: { id: string; workspaceId: string };
   /** The repository the commands work on: git's credentials are served for it only. */
   repoFullName?: string | null;
+  /**
+   * Ends every command run in this context: the checkout lock's, aborted
+   * when the lock is lost (`withCheckoutLock`).
+   */
+  signal?: AbortSignal;
 }
 
 export class GitError extends Error {
@@ -154,9 +159,10 @@ export async function runAsRunner(
     push = false,
     write = false,
     headChars,
-    signal,
+    signal: own,
   }: RunnerOptions = {},
 ): Promise<GitRun> {
+  const signal = own && ctx.signal ? AbortSignal.any([own, ctx.signal]) : (own ?? ctx.signal);
   if (signal?.aborted)
     return { code: null, stdout: '', stderr: '', error: `${command} was cancelled` };
   let cancel: (() => void) | undefined;
@@ -602,17 +608,19 @@ export function resetCheckoutLocks(): void {
  * Runs `fn` alone among every process's operations on the checkout: under a
  * Postgres advisory lock on the (repository, computer), held on a connection
  * of its own, outside any transaction (db/client.ts `createDb`). Never call
- * it inside itself for the same checkout.
+ * it inside itself for the same checkout. `fn`'s signal is aborted if the
+ * lock is lost while it runs (its connection went): put it on the git
+ * context (`GitContext.signal`), so every command ends.
  */
 export function withCheckoutLock<T>(
   deps: { db: Db },
   repoId: string,
   computerId: string,
-  fn: () => Promise<T>,
+  fn: (signal?: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const across = sessionLockOf(deps.db);
   if (across) return across(`openbots:checkout:${repoId}:${computerId}`, fn);
-  return locked(`${repoId}:${computerId}`, fn);
+  return locked(`${repoId}:${computerId}`, () => fn());
 }
 
 function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -676,7 +684,9 @@ export async function ensureCheckout(
     owner: { id: repo.ownerId, workspaceId: repo.workspaceId },
     repoFullName: remoteOf(repo).fullName,
   };
-  return withCheckoutLock(deps, repoId, computerId, () => checkout(ctx, repo, computerId));
+  return withCheckoutLock(deps, repoId, computerId, (signal) =>
+    checkout(signal ? { ...ctx, signal } : ctx, repo, computerId),
+  );
 }
 
 /** A branch name git could have printed; anything else is not used. */

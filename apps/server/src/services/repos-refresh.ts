@@ -86,8 +86,8 @@ export async function refreshStates(deps: AppDeps, computerId: string): Promise<
     );
   let fetched = 0;
   for (const { checkout, repo } of rows) {
-    const ok = await withCheckoutLock(deps, repo.id, computerId, () =>
-      refreshOne(deps, gitContextOn(deps, on, repo), repo, checkout),
+    const ok = await withCheckoutLock(deps, repo.id, computerId, (signal) =>
+      refreshOne(deps, { ...gitContextOn(deps, on, repo), signal }, repo, checkout),
     );
     if (ok) fetched++;
   }
@@ -331,7 +331,7 @@ export async function reconcileComputer(
       ),
     );
   for (const { checkout, repo } of checkouts) {
-    await withCheckoutLock(deps, repo.id, computerId, async () => {
+    await withCheckoutLock(deps, repo.id, computerId, async (signal) => {
       // Read again under the lock: a clone another process finished
       // meanwhile is on disk, and one under way is that job's.
       const [now] = await deps.db
@@ -339,7 +339,9 @@ export async function reconcileComputer(
         .from(schema.repoCheckouts)
         .where(eq(schema.repoCheckouts.id, checkout.id));
       if (!now || ['cloning', 'updating', 'missing'].includes(now.state)) return;
-      if (await onDisk(gitContextOn(deps, on, repo), now.path)) return;
+      if (await onDisk({ ...gitContextOn(deps, on, repo), signal }, now.path)) return;
+      // A lock lost while it looked is no ground to mark anything.
+      if (signal?.aborted) return;
       await deps.db
         .update(schema.repoCheckouts)
         .set({ state: 'missing', error: null, updatedAt: new Date() })
