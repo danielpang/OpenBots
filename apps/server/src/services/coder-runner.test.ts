@@ -32,6 +32,7 @@ import {
   type CoderWorld,
 } from './__fixtures__/coders/setup.js';
 import { publishCoderControl } from './coder-control.js';
+import { fenceOf, forgetFences, loadFences } from './computer-fence.js';
 import { readEntries, recordEntry } from './coder-transcript.js';
 import { enqueueCoderJob, type CoderJob } from './coder-jobs.js';
 import {
@@ -148,6 +149,15 @@ describe('coder runner', () => {
     );
     await start(sessionId);
     const row = await ended(sessionId, 'settled');
+    // The session used the computer from its start to its end (plan 9.5).
+    await w.until(async () => {
+      const used = await w.t.db
+        .select()
+        .from(schema.computerUsageIntervals)
+        .where(eq(schema.computerUsageIntervals.reason, 'coding_session'));
+      expect(used.length).toBeGreaterThan(0);
+      expect(used.every((u) => u.endedAt)).toBe(true);
+    });
 
     // The checkout was fetched with the fetch and push urls, then the worktree made.
     const git = w.coder.gitCalls();
@@ -735,6 +745,48 @@ describe('coder runner', () => {
     await ended(sessionId, 'stopped');
     expect((await w.widget(sessionId)).status).toBe('stopped');
     expect((await resumedWith(runId)).status).toBe('stopped');
+  });
+
+  it('stops a session whose machine a reset took away, in a process that missed the bus', async () => {
+    w.coder.agent = async (io) => {
+      io.stdout(jsonl(initLine()));
+      const signal = await io.signalled();
+      expect(signal).toBe('SIGTERM');
+      io.exit(null, 'SIGTERM');
+    };
+    const { sessionId } = await w.newSession();
+    await start(sessionId);
+    await w.until(async () => expect((await w.session(sessionId)).status).toBe('running'));
+    await w.until(() => expect(w.coder.agentCalls().at(-1)?.launch.session_id).toBe(sessionId));
+    const [computer] = await w.t.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.ownerId, w.ownerId));
+    // Another process reset the computer; this one heard nothing on the bus.
+    // Its record is all it has: the fence, read from the database.
+    const since = new Date();
+    const [record] = await w.t.db
+      .insert(schema.retiredComputers)
+      .values({
+        workspaceId: computer!.workspaceId,
+        ownerId: w.ownerId,
+        computerId: computer!.id,
+        provider: computer!.provider,
+        providerRef: `elsewhere-${sessionId}`,
+        status: 'deleted',
+        retiredAt: since,
+        fence: fenceOf(computer!.agentToken),
+      })
+      .returning();
+    try {
+      await loadFences(w.t.db, since);
+      await ended(sessionId, 'stopped');
+    } finally {
+      await w.t.db
+        .delete(schema.retiredComputers)
+        .where(eq(schema.retiredComputers.id, record!.id));
+      forgetFences();
+    }
   });
 
   it('fails sessions an interrupted process left behind, and queues the queued ones again', async () => {

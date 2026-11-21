@@ -5,6 +5,7 @@ import {
   agentFor,
   computerAvailable,
   getComputer,
+  shownFailure,
   startComputer,
   touchComputer,
 } from './computer.js';
@@ -73,6 +74,6 @@ async function computerFor(deps: AppDeps, owner: Owner, restart: boolean) {
     return (await startComputer(deps, owner)).computer;
   } catch (error) {
     // A plain error, so the manager records it on the connector.
-    throw new Error(error instanceof Error ? error.message : String(error), { cause: error });
+    throw new Error(shownFailure(deps, error), { cause: error });
   }
 }

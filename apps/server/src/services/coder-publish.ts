@@ -3,6 +3,7 @@ import type { CoderCommit, CoderPublishInput } from '@openbots/shared';
 import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import type { CodingSessionRow } from './coder-state.js';
+import { shownFailure } from './computer.js';
 import { lockDown, runGit, type GitContext, type RepoRow } from './repos-checkout.js';
 import { findOpenPullRequest, openPullRequest, recordPushedSha } from './session-git.js';
 
@@ -135,7 +136,7 @@ export async function publishSessionPullRequest(
     return { status: 'published', sha, url };
   } catch (error) {
     if (cancelled()) return cancellation();
-    const message = error instanceof Error ? error.message : String(error);
+    const message = shownFailure(deps, error, { inline: true });
     return {
       status: 'failed',
       sha,

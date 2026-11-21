@@ -54,6 +54,18 @@ describe('token auth', () => {
     expect(res.status).toBe(401);
   });
 
+  it('accepts the token in X-OpenBots-Agent-Token behind a proxy that keeps Authorization', async () => {
+    const { app } = await createTestAgent();
+    const ok = await app.request('/healthz', {
+      headers: { authorization: 'Bearer sprites-org-token', 'x-openbots-agent-token': TEST_TOKEN },
+    });
+    expect(ok.status).toBe(200);
+    const wrong = await app.request('/healthz', {
+      headers: { authorization: 'Bearer sprites-org-token', 'x-openbots-agent-token': 'nope' },
+    });
+    expect(wrong.status).toBe(401);
+  });
+
   it('accepts the token', async () => {
     const { request } = await createTestAgent();
     const res = await request('/healthz');

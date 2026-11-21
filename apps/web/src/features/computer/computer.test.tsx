@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import type { WsClient } from '@openbots/api-client';
-import { COMPUTER_OFF_CLOSE_CODE, type WsEvent, type WsEventOf } from '@openbots/shared';
+import {
+  COMPUTER_IDLE_CLOSE_CODE,
+  COMPUTER_OFF_CLOSE_CODE,
+  type WsEvent,
+  type WsEventOf,
+} from '@openbots/shared';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -77,9 +82,10 @@ vi.mock('@novnc/novnc', () => ({
     resizeSession = true;
     background = '';
     disconnected = false;
-    constructor(_target: HTMLElement, url: string) {
+    constructor(_target: HTMLElement, url: string | { url: string }) {
       super();
-      this.url = url;
+      // The view opens the socket itself and hands it over.
+      this.url = typeof url === 'string' ? url : url.url;
       vnc.screens.push(this);
     }
     disconnect() {
@@ -131,6 +137,7 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
+  listeners: ((event: { code: number }) => void)[] = [];
   constructor(readonly url: string) {
     FakeSocket.sockets.push(this);
   }
@@ -139,6 +146,13 @@ class FakeSocket {
   }
   close() {
     this.readyState = 3;
+  }
+  addEventListener(_type: 'close', listener: (event: { code: number }) => void) {
+    this.listeners.push(listener);
+  }
+  /** The server closed it with `code`. */
+  closedWith(code: number) {
+    for (const listener of this.listeners) listener({ code });
   }
   open() {
     act(() => {
@@ -175,6 +189,8 @@ function computer(status: Computer['status'], controlledBy: string | null = null
     status,
     alwaysOn: false,
     idleTimeoutMin: 30,
+    idleSettings: true,
+    error: null,
     lastUsedAt: null,
     createdAt: '2026-10-18T10:00:00.000Z',
     screens: [screen(controlledBy)],
@@ -451,6 +467,21 @@ describe('The Computer panel and Takeover (K3)', () => {
     } finally {
       visibility.mockRestore();
     }
+  });
+
+  it('waits for Reconnect after an idle close instead of retrying (plan 9.5)', async () => {
+    render(<BotTitleBar bot={bot()} />);
+    click(button('Computer'));
+    await until(() => vnc.screens.length === 1, 'the screen');
+    const socket = FakeSocket.sockets.find((s) => s.url.includes('/screen/vnc'))!;
+    act(() => {
+      socket.closedWith(COMPUTER_IDLE_CLOSE_CODE);
+      vnc.screens[0]!.dispatchEvent(new Event('disconnect'));
+    });
+    await until(() => !!host.querySelector('[data-screen="idle"]'), 'the idle notice');
+    expect(host.textContent).toContain('Paused after a while with no activity');
+    click(button('Reconnect'));
+    await until(() => vnc.screens.length === 2, 'the screen again');
   });
 
   it('shows a computer that went off while the tab missed it, without starting it', async () => {
@@ -778,6 +809,26 @@ describe('the Computer page', () => {
     expect(FakeSocket.sockets).toHaveLength(2);
   });
 
+  it('says an idle terminal closed so the computer can sleep, and reconnects', async () => {
+    render(<ComputerPage />);
+    await until(() => FakeSocket.sockets.length === 1, 'the terminal socket');
+    FakeSocket.sockets[0]!.open();
+    act(() => FakeSocket.sockets[0]!.onclose?.({ code: COMPUTER_IDLE_CLOSE_CODE }));
+    expect(host.textContent).toContain('Closed after a while with no activity');
+    click(button('Reconnect'));
+    expect(FakeSocket.sockets).toHaveLength(2);
+  });
+
+  it('shows no idle time for a computer that sleeps on its own (Sprites)', async () => {
+    state = {
+      available: true,
+      computer: { ...computer('running'), provider: 'remote', idleSettings: false },
+    };
+    render(<ComputerPage />);
+    await until(() => host.textContent?.includes('Sleeps when idle') ?? false, 'the note');
+    expect(host.querySelector('select[name="idle"]')).toBeNull();
+  });
+
   it('says the computer is off when the terminal socket closes with COMPUTER_OFF', async () => {
     render(<ComputerPage />);
     await until(() => FakeSocket.sockets.length === 1, 'the terminal socket');
@@ -924,7 +975,17 @@ describe('Reset computer', () => {
         'The computer starts again with an empty home. Repositories marked keep cloned are cloned again.',
       );
       expect(document.body.textContent).not.toMatch(/[–—]| - /);
+      expect(dialog.querySelector('[data-reset-full]')).toBeNull();
       click(dialog.querySelector('input[name="resetSignIns"]'));
+      // A full reset says plainly that it deletes the computer, for good.
+      await until(() => !!dialog.querySelector('[data-reset-full]'), 'the notice');
+      expect(dialog.querySelector('[data-reset-full]')!.textContent).toBe(
+        'A full reset deletes this computer and everything on it, its sign-ins included. This cannot be undone. The next start makes a new computer.',
+      );
+      expect(dialog.querySelector('input[name="deleteOldComputer"]')).toBeNull();
+      expect(document.body.textContent).not.toMatch(/[–—]| - /);
+      // It names no vendor, and promises nothing kept for support.
+      expect(document.body.textContent).not.toMatch(/sprite|fly\.io|support|kept for/i);
       click(button('Reset'));
       await until(() => posts('/api/v1/computer/reset').length === 1, 'the reset');
       expect(JSON.parse(posts('/api/v1/computer/reset')[0]!)).toEqual({

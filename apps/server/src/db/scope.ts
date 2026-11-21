@@ -180,7 +180,12 @@ export function scopedDb<D extends Db>(base: D, fixed?: DbScope): D {
       tableNamesMap: internals._.tableNamesMap,
     } as never,
   );
-  const scoped = Object.assign(db, internals.close ? { close: internals.close } : {});
+  const lock = (internals as { withSessionLock?: unknown }).withSessionLock;
+  const scoped = Object.assign(
+    db,
+    internals.close ? { close: internals.close } : {},
+    lock ? { withSessionLock: lock } : {},
+  );
   bases.set(scoped, base);
   return scoped as unknown as D;
 }
@@ -281,7 +286,7 @@ export async function githubInstallationWorkspaces(
   return rowsOf<{ id: string }>(result).map((r) => r.id);
 }
 
-/** postgres.js answers an array of rows, PGlite `{ rows }`. */
-function rowsOf<T>(result: unknown): T[] {
+/** The rows of a raw `execute`: postgres.js answers an array of rows, PGlite `{ rows }`. */
+export function rowsOf<T>(result: unknown): T[] {
   return Array.isArray(result) ? (result as T[]) : ((result as { rows: T[] }).rows ?? []);
 }

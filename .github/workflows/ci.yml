@@ -148,10 +148,19 @@ jobs:
           shellcheck -x install.sh scripts/*.sh docker/*.sh \
             docker/standalone/lib/*.sh docker/standalone/lib/check-redis \
             docker/standalone/bin/openbots docker/standalone/bin/start docker/standalone/test/*.sh \
-            docker/standalone/s6-rc.d/*/run
+            docker/standalone/s6-rc.d/*/run \
+            docker/sprites/*.sh docker/sprites/test/*.sh docker/sprites/test/sprite-env
           shellcheck -s sh docker/standalone/s6-rc.d/*/up
       - name: Test the standalone image's init checks
         run: bash docker/standalone/test/init-lib.test.sh
+      # The Sprite computer's bundle builds, and provision.sh reads it and
+      # prints its plan without changing the runner (docker/sprites/README.md).
+      - name: Build the Sprite bundle and dry-run its provisioning
+        run: |
+          bash docker/sprites/build-bundle.sh
+          PROVISION_DRY_RUN=1 OPENBOTS_AGENT_TOKEN=ci-dry-run-token-0000 OPENBOTS_AGENT_PORT=8080 \
+            OPENBOTS_PROVISION_VERSION="$(cat docker/sprites/dist/VERSION)" \
+            bash docker/sprites/provision.sh docker/sprites/dist/agent-bundle.tgz
       # Mobile owns its lint/types/tests/bundle in the dedicated job.
       - run: pnpm exec turbo run lint --filter='!@openbots/mobile'
       - run: pnpm exec turbo run typecheck --filter='!@openbots/mobile'

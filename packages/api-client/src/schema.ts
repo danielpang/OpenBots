@@ -5024,7 +5024,7 @@ export interface paths {
     head?: never;
     /**
      * Keep the computer on, or set how long it idles before it stops
-     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change.
+     * @description The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (the hosted service).
      */
     patch: {
       parameters: {
@@ -5091,6 +5091,15 @@ export interface paths {
       responses: {
         /** @description Running */
         200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Computer'];
+          };
+        };
+        /** @description Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        202: {
           headers: {
             [name: string]: unknown;
           };
@@ -5263,6 +5272,15 @@ export interface paths {
             'application/json': components['schemas']['Computer'];
           };
         };
+        /** @description Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error` */
+        202: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Computer'];
+          };
+        };
         /** @description Not signed in */
         401: {
           headers: {
@@ -5309,7 +5327,7 @@ export interface paths {
     put?: never;
     /**
      * Rescue unpushed work before a reset
-     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker computers only (409 `RESET_UNSUPPORTED`).
+     * @description The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and hosted computers only (409 `RESET_UNSUPPORTED`).
      */
     post: {
       parameters: {
@@ -5443,7 +5461,7 @@ export interface paths {
     put?: never;
     /**
      * Reset the computer: a fresh home, after the rescue
-     * @description Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.
+     * @description Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.
      */
     post: {
       parameters: {
@@ -5476,6 +5494,15 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
+        /** @description `resetSignIns` from an API key: only a person may fully reset a computer (`PERSON_REQUIRED`) */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/problem+json': components['schemas']['Problem'];
+          };
+        };
         /** @description The account has no computer yet */
         404: {
           headers: {
@@ -5485,7 +5512,7 @@ export interface paths {
             'application/problem+json': components['schemas']['Problem'];
           };
         };
-        /** @description Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), or a computer that cannot be reset from here (`RESET_UNSUPPORTED`) */
+        /** @description Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), a computer that cannot be reset from here (`RESET_UNSUPPORTED`), one being stopped for less than two minutes (`COMPUTER_BUSY`), or one another reset changed meanwhile (`COMPUTER_CHANGED`) */
         409: {
           headers: {
             [name: string]: unknown;
@@ -13165,6 +13192,10 @@ export interface components {
       status: 'creating' | 'updating' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
       alwaysOn: boolean;
       idleTimeoutMin: number | null;
+      /** @description Whether `alwaysOn` and `idleTimeoutMin` apply. False on the hosted service, where a computer pauses itself shortly after its last use and wakes on the next */
+      idleSettings: boolean;
+      /** @description Why the last setup in the background failed (the hosted service), while the status is `error` */
+      error: string | null;
       /** Format: date-time */
       lastUsedAt: string | null;
       /** Format: date-time */
@@ -13239,7 +13270,7 @@ export interface components {
       requestId: string;
       /** @enum {boolean} */
       confirm: true;
-      /** @description Also remove the cookie store and the coding agents' sign-ins on the computer */
+      /** @description A full reset: also remove the cookie store and the coding agents' sign-ins, deleting the computer with everything on it. Cannot be undone, and only a person may ask for it */
       resetSignIns?: boolean;
     };
     ComputerDirListing: {

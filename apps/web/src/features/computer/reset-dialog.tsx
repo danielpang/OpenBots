@@ -28,7 +28,9 @@ import {
 // server checks for unpushed work and pushes what it can to rescue branches
 // (prepare, then poll every 2 seconds); the dialog then shows what was
 // pushed, what could not be saved and the coding sessions a reset stops,
-// and only then offers Reset.
+// and only then offers Reset. A full reset (the sign-ins too) deletes the
+// computer and everything on it, which nothing can undo, and the dialog says
+// so before it is confirmed.
 
 export const RESET_POLL_MS = 2_000;
 
@@ -116,9 +118,11 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
             checked={resetSignIns}
             onChange={(event) => setResetSignIns(event.currentTarget.checked)}
           />
-          Also forget sign-ins: the coding agents' logins and the browser logins the Bots share
+          Full reset: also forget sign-ins, the coding agents' logins and the browser logins the
+          Bots share
         </label>
       )}
+      {done && resetSignIns && <FullResetNotice />}
       <ErrorText error={checkError} />
       {stale ? (
         <p className="text-sm text-destructive">
@@ -145,6 +149,16 @@ function ResetSteps({ onClose, pollMs }: { onClose(): void; pollMs: number }) {
         </Button>
       </DialogFooter>
     </div>
+  );
+}
+
+/** What a full reset does, plainly; it never names who runs the computer. */
+function FullResetNotice() {
+  return (
+    <p className="text-sm font-medium text-destructive" role="alert" data-reset-full>
+      A full reset deletes this computer and everything on it, its sign-ins included. This cannot be
+      undone. The next start makes a new computer.
+    </p>
   );
 }
 

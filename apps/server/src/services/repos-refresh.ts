@@ -9,13 +9,16 @@ import type { AppDeps } from '../context.js';
 import { schema } from '../db/client.js';
 import { mainBotOf } from './bots.js';
 import { enqueueCoderJob } from './coder-jobs.js';
+import { shownFailure } from './computer.js';
 import { postMessage } from './messages.js';
 import {
+  askGit,
   assertRunnable,
   dirtyLines,
   ensureCheckout,
   git,
   gitContextOn,
+  GitError,
   onDisk,
   remoteDefaultBranch,
   runAsRunner,
@@ -45,8 +48,6 @@ export const REFRESH_MIN_GAP_MS = 10 * 60_000;
 const SETTLED = ['ready', 'behind', 'dirty', 'error'];
 /** A checkout `cloning` or `updating` this long was left by a job that died: reconcile retries it. */
 export const STUCK_MS = 30 * 60_000;
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -87,8 +88,8 @@ export async function refreshStates(deps: AppDeps, computerId: string): Promise<
     );
   let fetched = 0;
   for (const { checkout, repo } of rows) {
-    const ok = await withCheckoutLock(repo.id, computerId, () =>
-      refreshOne(deps, gitContextOn(deps, on, repo), repo, checkout),
+    const ok = await withCheckoutLock(deps, repo.id, computerId, (signal) =>
+      refreshOne(deps, { ...gitContextOn(deps, on, repo), signal }, repo, checkout),
     );
     if (ok) fetched++;
   }
@@ -102,11 +103,14 @@ async function refreshOne(
   checkout: CheckoutRow,
 ): Promise<boolean> {
   const { path } = checkout;
+  // Only over a settled state: a clone under way, or a reset's `missing`, stands.
   const set = (values: Partial<CheckoutRow>) =>
     deps.db
       .update(schema.repoCheckouts)
       .set({ ...values, updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.id, checkout.id));
+      .where(
+        and(eq(schema.repoCheckouts.id, checkout.id), inArray(schema.repoCheckouts.state, SETTLED)),
+      );
   try {
     if (!(await onDisk(ctx, path))) {
       await set({ state: 'missing', error: null });
@@ -116,7 +120,9 @@ async function refreshOne(
     await git(ctx, ['-C', path, 'fetch', '--prune', 'origin']);
     const detected = await remoteDefaultBranch(ctx, path);
     const branch = detected ?? repo.defaultBranch;
-    const counts = await runGit(ctx, [
+    // Answers that decide the state: one git did not give fails the refresh,
+    // never reads as clean or up to date.
+    const counts = await askGit(ctx, [
       '-C',
       path,
       'rev-list',
@@ -130,8 +136,12 @@ async function refreshOne(
     await pruneWorktrees(deps, ctx, repo, path, branch);
     let dirty = dirtyLines(await git(ctx, ['-C', path, 'status', '--porcelain'])).length > 0;
     for (const worktree of dirty ? [] : await worktreesOf(ctx, path)) {
-      const status = await runGit(ctx, ['-C', worktree.path, 'status', '--porcelain']);
-      if (status.code === 0 && status.stdout.trim()) {
+      // Its directory is gone (removed by hand): no files, so no changes.
+      if (worktree.prunable) continue;
+      const statusArgs = ['-C', worktree.path, 'status', '--porcelain'];
+      const status = await askGit(ctx, statusArgs);
+      if (status.code !== 0) throw new GitError(statusArgs, status);
+      if (status.stdout.trim()) {
         dirty = true;
         break;
       }
@@ -158,7 +168,7 @@ async function refreshOne(
     });
     return true;
   } catch (error) {
-    await set({ state: 'error', error: errorText(error).slice(0, 2_000) });
+    await set({ state: 'error', error: shownFailure(deps, error).slice(0, 2_000) });
     return false;
   }
 }
@@ -187,7 +197,8 @@ async function pruneWorktrees(
 ): Promise<void> {
   let removed = 0;
   for (const worktree of await worktreesOf(ctx, path)) {
-    if (!worktree.branch) continue;
+    // A worktree whose directory is gone is git's to prune, not this sweep's.
+    if (!worktree.branch || worktree.prunable) continue;
     const sessions = await deps.db
       .select({
         id: schema.codingSessions.id,
@@ -219,6 +230,8 @@ async function pruneWorktrees(
           `refs/remotes/origin/${defaultBranch}`,
         ])
       ).code === 0;
+    // `--verify --quiet` exits 1 for a ref that is not there; anything else
+    // (a run cut short) is no answer, and the worktree stays.
     const gone =
       sessions.some((s) => s.pushAllowed) &&
       (
@@ -230,7 +243,7 @@ async function pruneWorktrees(
           '--quiet',
           `refs/remotes/origin/${worktree.branch}`,
         ])
-      ).code !== 0;
+      ).code === 1;
     if (!merged && !gone) continue;
     const done = await runGit(ctx, ['-C', path, 'worktree', 'remove', worktree.path]);
     if (done.code !== 0) continue;
@@ -329,12 +342,21 @@ export async function reconcileComputer(
       ),
     );
   for (const { checkout, repo } of checkouts) {
-    await withCheckoutLock(repo.id, computerId, async () => {
-      if (await onDisk(gitContextOn(deps, on, repo), checkout.path)) return;
+    await withCheckoutLock(deps, repo.id, computerId, async (signal) => {
+      // Read again under the lock: a clone another process finished
+      // meanwhile is on disk, and one under way is that job's.
+      const [now] = await deps.db
+        .select()
+        .from(schema.repoCheckouts)
+        .where(eq(schema.repoCheckouts.id, checkout.id));
+      if (!now || ['cloning', 'updating', 'missing'].includes(now.state)) return;
+      if (await onDisk({ ...gitContextOn(deps, on, repo), signal }, now.path)) return;
+      // A lock lost while it looked is no ground to mark anything.
+      if (signal?.aborted) return;
       await deps.db
         .update(schema.repoCheckouts)
         .set({ state: 'missing', error: null, updatedAt: new Date() })
-        .where(eq(schema.repoCheckouts.id, checkout.id));
+        .where(and(eq(schema.repoCheckouts.id, now.id), eq(schema.repoCheckouts.state, now.state)));
     });
   }
   const targets = await deps.db
@@ -372,7 +394,7 @@ export async function reconcileComputer(
       result.cloned.push(repo.fullName);
       if (state === 'missing') again = true;
     } catch (error) {
-      result.failed.push({ fullName: repo.fullName, error: errorText(error) });
+      result.failed.push({ fullName: repo.fullName, error: shownFailure(deps, error) });
     }
   }
   if (result.cloned.length) {
