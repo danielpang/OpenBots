@@ -213,7 +213,7 @@ function errorText(error: unknown) {
 
 /**
  * When a claim's lease ends, on the database's clock: the sweep reads it on
- * that clock too (`dueBy`), so two processes whose own clocks differ never
+ * that clock too (`clockAt`), so two processes whose own clocks differ never
  * cut a lease short. A caller that names the time (a test, a sweep run for a
  * given moment) gets it from that time instead.
  */
