@@ -175,7 +175,11 @@ function DeviceRow({ device, onRevoke }: { device: Device; onRevoke(): void }) {
         <span className="text-xs text-muted-foreground">
           Paired on {new Date(device.createdAt).toLocaleDateString()}. Last seen:{' '}
           {device.lastSeenAt ? relativeTime(device.lastSeenAt) : 'Never'}.{' '}
-          {device.pushRegistered ? 'Push registered.' : 'Push not registered.'}
+          {device.platform === 'desktop'
+            ? null
+            : device.pushRegistered
+              ? 'Push registered.'
+              : 'Push not registered.'}
         </span>
       </div>
       <IconButton label="Revoke" onClick={onRevoke}>

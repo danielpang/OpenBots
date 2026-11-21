@@ -96,6 +96,14 @@ const PairRequestSchema = z
     ownerName: z.string().trim().min(1).max(100).optional().openapi({
       description: 'The new owner’s name, used only on a server with no owner yet',
     }),
+    codeVerifier: z
+      .string()
+      .regex(/^[A-Za-z0-9._~-]{43,128}$/)
+      .optional()
+      .openapi({
+        description:
+          'The PKCE verifier, for a code from an app sign-in in the browser (`POST /app-sign-in/codes`); such a code works only with it. Ignored for a QR pairing.',
+      }),
   })
   .openapi('PairRequest');
 

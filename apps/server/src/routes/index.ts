@@ -1,6 +1,7 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { AppEnv } from '../context.js';
 import { apiKeyRoutes } from './api-keys.js';
+import { appSignInRoutes } from './app-sign-in.js';
 import { approvalRoutes } from './approvals.js';
 import { artifactSharingRoutes } from './artifact-sharing.js';
 import { artifactRoutes } from './artifacts.js';
@@ -64,6 +65,7 @@ export function mountRoutes(app: OpenAPIHono<AppEnv>) {
   app.route('/api/v1', setupRoutes);
   app.route('/api/v1', localRoutes);
   app.route('/api/v1', deviceRoutes);
+  app.route('/api/v1', appSignInRoutes);
   app.route('/', hookIngressRoutes);
   app.route('/', githubAppWebhookRoutes);
 }

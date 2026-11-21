@@ -5,7 +5,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { APIError, createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
 import { symmetricEncrypt } from 'better-auth/crypto';
-import { and, asc, eq, isNotNull, or } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { APPLE_ISSUER, appleProvider, type AppleProviderOptions } from './apple.js';
 import { CLIENT_IP_HEADER } from './client-ip.js';
@@ -85,6 +85,9 @@ const PAIRING_OWNER_PATH = '/openbots/pairing-owner';
 /** better-auth's path for `setOwnerCredentials`, which no HTTP request reaches. */
 const OWNER_CREDENTIALS_PATH = '/openbots/owner-credentials';
 
+/** better-auth's path for `createAppSession`, which no HTTP request reaches. */
+export const APP_SESSION_PATH = '/openbots/app-session';
+
 /** The server-only endpoints that may make the owner in local mode. */
 const OWNER_PATHS = new Set([LOCAL_SESSION_PATH, PAIRING_OWNER_PATH]);
 
@@ -150,6 +153,17 @@ export interface Auth {
     setOwnerCredentials(input: {
       body: { userId: string; email: string; password: string };
     }): Promise<{ user: { id: string; email: string } }>;
+    /**
+     * A new session for a user, working in `workspaceId`, for a Mac app
+     * signed in through the browser (services/app-sign-in.ts). The response
+     * carries the session cookie and `{ session: { id } }`. The session hooks
+     * run as for any sign-in: refused in local mode, audited as a sign-in.
+     */
+    createAppSession(input: {
+      body: { userId: string; workspaceId: string };
+      headers: Headers;
+      asResponse: true;
+    }): Promise<Response>;
   };
 }
 
@@ -322,6 +336,11 @@ export function createAuth({
           },
         },
         delete: {
+          // A Mac app signed in through the browser works with a session; when
+          // it ends (sign-out, expiry, revocation) its device is revoked too.
+          before: async (session) => {
+            await revokeSessionDevices(db, config, session);
+          },
           after: async (session, ctx) => {
             // Expiry and revocation delete sessions too; only signing out counts.
             if (ctx?.path !== '/sign-out') return;
@@ -428,7 +447,10 @@ async function ensureOwner(
   }
 }
 
-/** `createLocalSession`, `createPairingOwner` and `setOwnerCredentials` (see the top of this file). */
+/**
+ * `createLocalSession`, `createPairingOwner`, `setOwnerCredentials` and
+ * `createAppSession` (see the top of this file).
+ */
 function ownerPlugin(db: Db) {
   const body = z.object({ name: z.string().min(1).max(100) });
   const credentials = z.object({
@@ -524,8 +546,80 @@ function ownerPlugin(db: Db) {
           return ctx.json({ user: { id: userId, email } });
         },
       ),
+      createAppSession: createAuthEndpoint(
+        APP_SESSION_PATH,
+        {
+          method: 'POST',
+          body: z.object({ userId: z.string().min(1), workspaceId: z.string().min(1) }),
+          // Called from services/app-sign-in.ts only, never routed.
+          metadata: { SERVER_ONLY: true },
+        },
+        async (ctx) => {
+          const adapter = ctx.context.internalAdapter;
+          const user = await adapter.findUserById(ctx.body.userId);
+          if (!user) throw new APIError('NOT_FOUND', { message: 'No such account' });
+          const session = await adapter.createSession(user.id, false, {
+            activeOrganizationId: ctx.body.workspaceId,
+          });
+          // Without the organization plugin (a self-hosted install) better-auth
+          // drops a field it does not know; the column is the core's.
+          await asDirectory(() =>
+            db
+              .update(schema.sessions)
+              .set({ activeOrganizationId: ctx.body.workspaceId })
+              .where(eq(schema.sessions.id, session.id)),
+          );
+          await setSessionCookie(ctx, { session, user });
+          return ctx.json({ session: { id: session.id } });
+        },
+      ),
     },
   } satisfies BetterAuthPlugin;
+}
+
+/**
+ * Marks the devices that held this session revoked, in the session's
+ * organization (the implicit one on a self-hosted install). The device row
+ * keeps its name for the Devices list's history; the foreign key clears its
+ * session once the row is gone.
+ */
+async function revokeSessionDevices(
+  db: Db,
+  config: Config,
+  session: { id: string; userId: string },
+): Promise<void> {
+  const workspaceId =
+    config.deployment === 'self_hosted'
+      ? (await ensureWorkspace(db)).id
+      : activeOrganizationOf(session);
+  if (!workspaceId) return;
+  await inWorkspace(workspaceId, async () => {
+    const revoked = await db
+      .update(schema.devices)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(schema.devices.workspaceId, workspaceId),
+          eq(schema.devices.sessionId, session.id),
+          isNull(schema.devices.revokedAt),
+        ),
+      )
+      .returning({
+        id: schema.devices.id,
+        name: schema.devices.name,
+        platform: schema.devices.platform,
+      });
+    for (const device of revoked) {
+      await recordAudit(db, {
+        workspaceId,
+        actor: { type: 'user', id: session.userId },
+        action: 'device.revoked',
+        targetType: 'device',
+        targetId: device.id,
+        metadata: { name: device.name, platform: device.platform, via: 'session_ended' },
+      });
+    }
+  });
 }
 
 /** The session's active organization (the organization plugin's field), if any. */

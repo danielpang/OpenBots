@@ -15,7 +15,7 @@ import { createInfra } from './infra/index.js';
 import { schema, type Db } from './db/client.js';
 import { inWorkspace, scopedDb } from './db/scope.js';
 import type { ServerExtensions } from './extensions.js';
-import { createLogger } from './logger.js';
+import { createLogger, type Logger } from './logger.js';
 import { generateMasterKey } from './secrets.js';
 import { startTestS3, type TestS3 } from './storage/test-s3.js';
 import { attachGateway } from './ws/gateway.js';
@@ -104,11 +104,13 @@ export interface TestAppOptions {
   extensions?: ServerExtensions;
   /** Apple's signing keys and clock, for Sign in with Apple tests (apple.ts). */
   apple?: AppleProviderOptions;
+  /** A logger to read what the server logs; silent by default. */
+  logger?: Logger;
 }
 
 export async function createTestApp(
   env: Record<string, string> = {},
-  { rateLimit = false, extensions, apple }: TestAppOptions = {},
+  { rateLimit = false, extensions, apple, logger: testLogger }: TestAppOptions = {},
 ): Promise<TestApp> {
   const testDb = await createTestDb();
   const ownFilesDir = env.OPENBOTS_FILES_DIR
@@ -127,7 +129,7 @@ export async function createTestApp(
     ...(s3 ? s3.env() : {}),
     ...env,
   });
-  const logger = createLogger('silent');
+  const logger = testLogger ?? createLogger('silent');
   // The app works under row-level security (db/scope.ts); tests set up and
   // check rows with `t.db`, the database owner's handle, which has none.
   const owner = testDb.db;

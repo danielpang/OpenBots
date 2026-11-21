@@ -37,6 +37,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "eslint": "catalog:",
+    "jose": "6.2.12",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

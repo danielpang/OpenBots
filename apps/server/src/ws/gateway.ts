@@ -227,6 +227,7 @@ export async function attachGateway(
       for (const client of clients) {
         yield {
           apiKeyId: client.user.apiKeyId,
+          sessionId: client.user.sessionId,
           close: (code: number, reason: string) => client.socket.close(code, reason),
         };
       }

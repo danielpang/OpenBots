@@ -416,6 +416,7 @@ export async function attachComputerProxies(
       for (const [client, target] of open) {
         yield {
           apiKeyId: target.user.apiKeyId,
+          sessionId: target.user.sessionId,
           close: (code: number, reason: string) => client.close(code, reason),
         };
       }
