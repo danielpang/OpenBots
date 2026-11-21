@@ -9,7 +9,7 @@
 #   devices          list paired devices, or `devices revoke <id>`
 #   relay            this server's relay host id and whether the relay sees it linked
 #   artifacts        take a public Artifact link down, or restore it
-#   computers        support only: a member's retired computers, or `computers restore <id>`
+#   computers        support only: old computers not deleted yet, or `computers retry <id>`
 #   docker-guard     run the docker guard in front of the socket proxy (compose service docker-guard)
 #   anything else    run it as a command, e.g. `sh`
 #

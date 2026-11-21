@@ -291,7 +291,6 @@ describe('stdio connectors in the computer (managed)', () => {
         providerRef: `elsewhere-${computer.id}`,
         status: 'deleted',
         retiredAt: since,
-        deleteAfter: since,
         fence: fenceOf(computer.agentToken),
       })
       .returning();

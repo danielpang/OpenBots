@@ -7,7 +7,6 @@ import {
   pgTable,
   text,
   unique,
-  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -33,8 +32,8 @@ export const computers = pgTable(
     spec: jsonb('spec').notNull().default({}),
     /**
      * What names the machine where the provider names it (Sprites), instead of
-     * the row's id (`ComputerSpec.machineKey`): a full reset that keeps the
-     * old machine gives the row a new one, so its next machine is a new one.
+     * the row's id (`ComputerSpec.machineKey`): a full reset gives the row a
+     * new one, so its next machine is a new one while the old one is deleted.
      * A column of its own, not part of `spec`, which many paths write whole.
      */
     machineKey: text('machine_key'),
@@ -125,20 +124,20 @@ export const computerUsageIntervals = pgTable(
 );
 
 /**
- * Machines a full reset took out of service but kept (plan 9.5, the owner's
- * decision): one row per retired machine, kept `RETIRED_COMPUTER_DAYS` (7)
- * so support can restore it (`openbots computers restore`), then deleted for
- * good by the retired-computers job (services/computer-retire.ts). Only on a
- * provider that can retire a machine (Sprites); Docker removes it at once.
+ * The old machine of a full reset, until it is deleted (plan 9.5; the
+ * owner's decision: a full reset deletes the old machine). One row per
+ * machine a full reset took off a member's computer on a provider that names
+ * machines by key (Sprites), written in the transaction that takes it off;
+ * the reset deletes it at once, and the retired-computers job retries a
+ * deletion that failed or never ran (services/computer-retire.ts). Docker
+ * removes the machine before its reset answers and records nothing here.
  *
- * `status`: `retiring` (recorded; out of reach once `sealed_at` is set, the
- * steps inside it not yet done), `retired`, `deleting` (claimed by the job),
- * `deleted`, `restoring` (an operator's restore under way, leased by
- * `next_attempt_at`) or `restored` (the member's computer again). The row
- * outlives the machine as the record of it. The organization cannot be
- * deleted while it has rows (`restrict`): there is no organization deletion
- * yet, and whatever adds one must call `purgeRetiredComputers` first, so no
- * machine is left behind unrecorded.
+ * `status`: `deleting` until a deletion succeeded, then `deleted`; the row
+ * outlives the machine as the record of it. A row the job gave up on stays
+ * `deleting` with `gave_up_at` set until an operator retries it. The
+ * organization cannot be deleted while it has rows (`restrict`): there is no
+ * organization deletion yet, and whatever adds one must delete the machines
+ * first, so none is left behind unrecorded.
  */
 export const retiredComputers = pgTable(
   'retired_computers',
@@ -155,19 +154,12 @@ export const retiredComputers = pgTable(
     provider: computerProvider('provider').notNull(),
     /** The machine as the provider names it (the Sprite's name). */
     providerRef: text('provider_ref').notNull(),
-    /** The `machineKey` it was made under, for a restore to make it the computer's again. */
-    machineKey: text('machine_key'),
-    agentUrl: text('agent_url'),
-    /** The checkpoint taken just before it was retired; null if that failed. */
-    checkpointId: text('checkpoint_id'),
     status: text('status').notNull(),
+    /** When the reset took it off the computer. */
     retiredAt: timestamptz('retired_at').notNull(),
-    deleteAfter: timestamptz('delete_after').notNull(),
     attempts: integer('attempts').notNull().default(0),
-    /** When the job may next take it (a retry's backoff, or a claim's lease). */
+    /** When the job may next take it: a retry's backoff, or a claim's lease. */
     nextAttemptAt: timestamptz('next_attempt_at'),
-    /** When the machine was taken out of reach (`ComputerProvider.retire`). */
-    sealedAt: timestamptz('sealed_at'),
     /**
      * When the job stopped retrying it after `RETIRED_MAX_ATTEMPTS`; the sweep
      * leaves it alone until an operator retries it (`openbots computers retry`).
@@ -176,52 +168,19 @@ export const retiredComputers = pgTable(
     lastAttemptAt: timestamptz('last_attempt_at'),
     lastError: text('last_error'),
     deletedAt: timestamptz('deleted_at'),
-    restoredAt: timestamptz('restored_at'),
-    /**
-     * Who holds the record now (the reset that made it, a job, an undo, a
-     * restore): set by the conditional update that took it, and required by
-     * every write that follows, so one that lost the record writes nothing.
-     */
-    claim: uuid('claim'),
     /**
      * The SHA-256, hex, of the computer's sealed agent token when the machine
      * was taken off it (computer-fence.ts): any process refuses that token
      * from the moment the record commits, whatever it missed on the bus.
      */
     fence: text('fence'),
-    /**
-     * Why and by whom it was retired, and the member's reset if one did it
-     * (`RetireContext`): for its audit and the reset's cleanup, written by
-     * whoever finishes it, in any process.
-     */
-    context: jsonb('context'),
-    /**
-     * When the retire's audit (and a reset's) and the reset's cleanup were
-     * written, with the member's computer released: once, by whoever sealed it.
-     */
-    auditedAt: timestamptz('audited_at'),
-    /**
-     * The member asked for it to be deleted at once rather than kept: written
-     * with the record (`delete_after` is then its retire time), honoured by
-     * every actor that finishes it, and never restorable.
-     */
-    deleteNow: boolean('delete_now').notNull().default(false),
-    /**
-     * When its steps inside were run once more, past the longest a
-     * provisioning the reset cancelled could still run (computer-retire.ts).
-     */
-    checkedAt: timestamptz('checked_at'),
     createdAt: createdAt(),
   },
   (t) => [
     index('retired_computers_owner').on(t.workspaceId, t.ownerId, t.retiredAt),
-    index('retired_computers_due').on(t.status, t.deleteAfter),
+    index('retired_computers_due').on(t.status, t.nextAttemptAt),
     index('retired_computers_fence')
       .on(t.createdAt)
       .where(sql`fence is not null`),
-    // One live record per machine: two resets racing cannot record it twice.
-    uniqueIndex('retired_computers_live_ref')
-      .on(t.provider, t.providerRef)
-      .where(sql`status in ('retiring', 'retired', 'deleting', 'restoring')`),
   ],
 );
