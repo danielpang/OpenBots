@@ -92,6 +92,27 @@ export async function pairHost(
   link: PairingLink,
   options: PairHostOptions,
 ): Promise<{ host: SavedHost; secrets: HostSecrets; setupNeeded: boolean }> {
+  const host: SavedHost = {
+    id: link.host,
+    name: link.name,
+    kind: 'paired',
+    directUrls: link.direct,
+    relayUrl: link.relay,
+    serverPublicKey: link.key,
+  };
+  return pairWithCode(host, link.code, options);
+}
+
+/**
+ * Spends a one-time code at `POST /api/v1/devices/pair` for this device's own
+ * API key: a QR pairing's, or an OpenBots Cloud sign-in's from the browser,
+ * which also needs the PKCE verifier (`codeVerifier`).
+ */
+export async function pairWithCode(
+  host: SavedHost,
+  code: string,
+  options: PairHostOptions & { codeVerifier?: string },
+): Promise<{ host: SavedHost; secrets: HostSecrets; setupNeeded: boolean }> {
   if (!options.deviceName.trim() || options.deviceName.trim().length > 100)
     throw new Error('Enter a device name (up to 100 characters)');
   const device = generateDeviceKey();
@@ -102,26 +123,19 @@ export async function pairHost(
     devicePrivateKey: base64urlEncode(device.privateKey),
     pushKey: base64urlEncode(pushKey),
   };
-  const host: SavedHost = {
-    id: link.host,
-    name: link.name,
-    kind: 'paired',
-    directUrls: link.direct,
-    relayUrl: link.relay,
-    serverPublicKey: link.key,
-  };
   const transport = await connectHost(host, secrets, { ...options, pairing: true });
   try {
     const response = await transport.fetch('/api/v1/devices/pair', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        code: link.code,
+        code,
         name: options.deviceName.trim(),
         platform: 'ios',
         publicKey: base64urlEncode(device.publicKey),
         pushKey: secrets.pushKey,
         ...(options.ownerName?.trim() ? { ownerName: options.ownerName.trim() } : {}),
+        ...(options.codeVerifier ? { codeVerifier: options.codeVerifier } : {}),
       }),
     });
     const result = (await response.json()) as {

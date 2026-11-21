@@ -16,6 +16,8 @@ jest.mock('expo-router', () => ({ router: { push: (...args: unknown[]) => mockPu
 jest.mock('../api/provider', () => ({ useMobile: jest.fn() }));
 jest.mock('../hosts/pairing', () => ({ parsePairingLink: jest.fn() }));
 jest.mock('../hosts/connection-qr', () => ({ parseConnectionQr: jest.fn() }));
+jest.mock('../api/cloud-sign-in', () => ({ CloudSignInCancelled: class extends Error {} }));
+jest.mock('expo-apple-authentication', () => ({}));
 jest.mock('@expo/vector-icons', () => ({ Ionicons: () => null }));
 
 beforeEach(() => {

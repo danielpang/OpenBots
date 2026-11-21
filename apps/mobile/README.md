@@ -35,6 +35,10 @@ Restart the server after configuring it, then generate a fresh pairing code. The
 
 `EXPO_PUBLIC_OPENBOTS_CLOUD_URL` configures the managed-account sign-in destination. That option is disabled when unset. No hosted service URL is assumed.
 
+With it set, the welcome screen offers "Sign in to OpenBots Cloud" beside pairing. It opens the hosted sign-in in an authentication session (`expo-web-browser`), where the person signs in or up and confirms; the session ends at `openbots://app-sign-in`, and the app trades the one-time code, with the PKCE verifier only it holds, for its own device key (`src/api/cloud-sign-in.ts`). The key is in the Keychain like a paired one, Devices on the web revokes it, and Settings signs out (which revokes it too). A revoked key makes the app forget the account and say so.
+
+Native Sign in with Apple is off unless the build sets `OPENBOTS_IOS_APPLE_SIGN_IN=1`, which adds the Sign in with Apple entitlement (the App ID needs that capability first) and the `expo-apple-authentication` plugin. The button then shows only when OpenBots Cloud says `nativeAppleSignIn` (the server has `APPLE_APP_BUNDLE_ID` and the other Apple settings) and the device supports it. Without either, Apple is still offered in the browser sign-in when the server has it.
+
 ### Clean release builds (no developer tools)
 
 Development builds intentionally include Expo's launcher, floating Tools button, source explorer and developer menu. Release builds omit that development UI and bundle JavaScript into the app, so they do not need Metro.

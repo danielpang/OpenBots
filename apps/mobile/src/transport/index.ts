@@ -183,6 +183,18 @@ export async function createTunnelTransport(
   };
 }
 
+/**
+ * The server answered, and refused this device's key: it was revoked (from
+ * Devices on the web), or the account is gone. Only for an OpenBots Cloud
+ * account, which has no relay to try instead; the app then forgets the host.
+ */
+export class CredentialRejectedError extends Error {
+  constructor() {
+    super('You were signed out of OpenBots Cloud on this device. Sign in again to go on.');
+    this.name = 'CredentialRejectedError';
+  }
+}
+
 /** Select a reachable direct path, then open the pinned encrypted relay. Mutations are never retried. */
 export async function connectHost(
   host: SavedHost,
@@ -203,9 +215,12 @@ export async function connectHost(
         signal: controller.signal,
       });
       if (response.ok) return transport;
+      if (response.status === 401 && host.kind === 'account' && !options.pairing)
+        throw new CredentialRejectedError();
       throw new Error(`Server answered ${response.status}`);
     } catch (error) {
       transport?.close();
+      if (error instanceof CredentialRejectedError) throw error;
       failures.push(error);
     } finally {
       clearTimeout(timer);

@@ -1,10 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Image, Linking, View } from 'react-native';
 import { defaultDeviceName } from '../components/adaptive-layout';
 import { router, useLocalSearchParams } from 'expo-router';
 import Constants from 'expo-constants';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useMobile } from '../api/provider';
+import { APPLE_SIGN_IN_BUILD, CLOUD_URL, useMobile } from '../api/provider';
+import { CloudSignInCancelled } from '../api/cloud-sign-in';
 import { parsePairingLink } from '../hosts/pairing';
 import { parseConnectionQr } from '../hosts/connection-qr';
 import { Button, Card, Empty, ErrorNote, Field, Icon, Label, Page } from '../components/ui';
@@ -13,6 +15,83 @@ const cloudUrl =
   typeof Constants.expoConfig?.extra?.cloudUrl === 'string'
     ? Constants.expoConfig.extra.cloudUrl
     : undefined;
+/**
+ * Whether to offer native Sign in with Apple: this build has the entitlement,
+ * the device can, and OpenBots Cloud says it is configured. Anything else
+ * (offline, an older server) leaves the button out; the browser sign-in
+ * still offers Apple when the server has it.
+ */
+export function useNativeApple(cloudUrl: string | null, fetchImpl: typeof fetch = fetch) {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    if (!cloudUrl || !APPLE_SIGN_IN_BUILD) return;
+    let disposed = false;
+    void (async () => {
+      try {
+        if (!(await AppleAuthentication.isAvailableAsync())) return;
+        const res = await fetchImpl(new URL('/api/v1/capabilities', cloudUrl).toString());
+        const capabilities = (await res.json()) as { nativeAppleSignIn?: boolean };
+        if (!disposed) setAvailable(res.ok && capabilities.nativeAppleSignIn === true);
+      } catch {
+        // No button.
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [cloudUrl]);
+  return available;
+}
+
+export function CloudSignInCard() {
+  const mobile = useMobile();
+  const apple = useNativeApple(CLOUD_URL);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  if (!CLOUD_URL) return null;
+  async function run(signIn: () => Promise<void>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await signIn();
+      router.replace('/(tabs)/bots');
+    } catch (cause) {
+      if (!(cause instanceof CloudSignInCancelled)) setError(cause);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Card>
+      <Label size={20} weight="600">
+        OpenBots Cloud
+      </Label>
+      <Label muted>
+        Sign in or create your account in the browser. This device gets its own key, which you can
+        revoke from Devices on the web.
+      </Label>
+      <ErrorNote error={error} />
+      <Button
+        title="Sign in to OpenBots Cloud"
+        icon="cloud-outline"
+        loading={busy}
+        onPress={() => void run(() => mobile.signInToCloud())}
+      />
+      {apple ? (
+        <AppleAuthentication.AppleAuthenticationButton
+          buttonType={AppleAuthentication.AppleAuthenticationButtonType.CONTINUE}
+          buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
+          cornerRadius={12}
+          style={{ height: 48, opacity: busy ? 0.5 : 1 }}
+          onPress={() => {
+            if (!busy) void run(() => mobile.signInWithApple());
+          }}
+        />
+      ) : null}
+    </Card>
+  );
+}
+
 export function WelcomeScreen() {
   const [, requestCameraPermission, getCameraPermission] = useCameraPermissions();
   const [requestingCamera, setRequestingCamera] = useState(false);
@@ -74,6 +153,7 @@ export function WelcomeScreen() {
           Welcome to OpenBots. Connect to OpenBots on your computer or your server.
         </Label>
       </View>
+      <CloudSignInCard />
       <Card>
         <Label size={20} weight="600">
           Pair your device

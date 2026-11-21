@@ -7,7 +7,25 @@ export function SettingsScreen() {
   const mobile = useMobile();
   const c = useTheme();
   const appearance = useAppearance();
-  function remove(id: string, name: string) {
+  function remove(id: string, name: string, kind: string) {
+    if (kind === 'account') {
+      Alert.alert(
+        'Sign out of OpenBots Cloud?',
+        'This device stops using your account and forgets its key. Sign in again any time.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Sign out',
+            style: 'destructive',
+            onPress: () =>
+              void mobile
+                .signOut(id)
+                .catch((error) => Alert.alert('Could not sign out', error.message)),
+          },
+        ],
+      );
+      return;
+    }
     Alert.alert(
       `Remove ${name}?`,
       'This device will forget its stored credentials for this server.',
@@ -59,8 +77,10 @@ export function SettingsScreen() {
               </View>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Remove ${host.name}`}
-                onPress={() => remove(host.id, host.name)}
+                accessibilityLabel={
+                  host.kind === 'account' ? `Sign out of ${host.name}` : `Remove ${host.name}`
+                }
+                onPress={() => remove(host.id, host.name, host.kind)}
                 style={{ padding: 7 }}
               >
                 <Icon name="trash-outline" size={19} color={c.mutedForeground} />
