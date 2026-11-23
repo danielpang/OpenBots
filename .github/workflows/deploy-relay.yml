@@ -3,7 +3,7 @@
 # No tag or release is needed. The image is built here for linux/amd64 (Fly
 # Machines' architecture), pushed to GHCR as
 #   ghcr.io/<owner in lower case>/openbots/relay:sha-<commit sha>
-# and Fly pulls it from there, rolling it out one Machine at a time
+# and Fly pulls it from there, replacing the relay's one Machine
 # (deploy/relay/fly.toml [deploy]). The package must be public, since Fly
 # pulls it without credentials.
 #
@@ -104,7 +104,9 @@ jobs:
       - name: Deploy to Fly
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl deploy --config deploy/relay/fly.toml --image "$IMAGE" --wait-timeout 10m
+        # --ha=false: on an app with no Machines yet, create one, not two. The
+        # relay runs as a single Machine (SINGLE_SERVER_DEPLOY in fly.toml).
+        run: flyctl deploy --config deploy/relay/fly.toml --image "$IMAGE" --ha=false --wait-timeout 10m
 
       # /ready answers 503 until the Machine takes connections, so it gets a minute.
       - name: Check the relay answers at its hostname

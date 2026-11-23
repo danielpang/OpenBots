@@ -10,6 +10,8 @@ describe('config', () => {
       logLevel: 'info',
       apnsMissing: [],
       minClusterSize: 1,
+      singleServer: false,
+      redisUrlIgnored: false,
       hostBudgetShare: 0.125,
       replay: 'off',
       redisCommandTimeoutMs: 2_000,
@@ -96,6 +98,36 @@ describe('config', () => {
     for (const bad of ['0', '-0.1', '1.5', 'half']) {
       expect(() => loadConfig({ RELAY_HOST_BUDGET_SHARE: bad })).toThrow(/RELAY_HOST_BUDGET_SHARE/);
     }
+  });
+
+  it('runs one machine without Redis or replays under SINGLE_SERVER_DEPLOY, even on Fly', () => {
+    const onFly = {
+      FLY_MACHINE_ID: '3d8d9e1c2a5e78',
+      RELAY_REDIS_URL: 'redis://redis.internal:6379',
+    };
+    expect(loadConfig(onFly)).toMatchObject({ singleServer: false, replay: 'fly' });
+    expect(loadConfig(onFly).redisUrl).toBe('redis://redis.internal:6379');
+
+    const single = loadConfig({ ...onFly, SINGLE_SERVER_DEPLOY: 'true' });
+    expect(single.redisUrl).toBeUndefined();
+    expect(single).toMatchObject({ singleServer: true, redisUrlIgnored: true, replay: 'off' });
+    expect(single.nodeId).toBe('3d8d9e1c2a5e78');
+    expect(loadConfig({ SINGLE_SERVER_DEPLOY: 'true' }).redisUrlIgnored).toBe(false);
+    expect(loadConfig({ ...onFly, SINGLE_SERVER_DEPLOY: 'false' }).redisUrl).toBe(
+      'redis://redis.internal:6379',
+    );
+    expect(loadConfig({ SINGLE_SERVER_DEPLOY: '' }).singleServer).toBe(false);
+    expect(() => loadConfig({ SINGLE_SERVER_DEPLOY: 'maybe' })).toThrow(/SINGLE_SERVER_DEPLOY/);
+  });
+
+  it('refuses SINGLE_SERVER_DEPLOY with settings that need several machines', () => {
+    expect(() => loadConfig({ SINGLE_SERVER_DEPLOY: 'true', RELAY_REPLAY: 'fly' })).toThrow(
+      /SINGLE_SERVER_DEPLOY/,
+    );
+    expect(() => loadConfig({ SINGLE_SERVER_DEPLOY: 'true', RELAY_MIN_CLUSTER_SIZE: '2' })).toThrow(
+      /SINGLE_SERVER_DEPLOY/,
+    );
+    expect(loadConfig({ SINGLE_SERVER_DEPLOY: 'true', RELAY_REPLAY: 'off' }).replay).toBe('off');
   });
 
   it('refuses cluster timings that could not keep a lease', () => {

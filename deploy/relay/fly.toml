@@ -1,14 +1,16 @@
-# The shared OpenBots relay on Fly Machines (deploy/relay/README.md,
-# docs/plans/MOBILE_AND_VM_PLAN.md 5.8). Several Machines serve one hostname. Redis
-# says which Machine owns each host id; a Machine that gets a connection for a
-# host another Machine owns answers with `fly-replay`, and Fly's proxy replays
-# it on the owner.
+# The shared OpenBots relay on Fly Machines (deploy/relay/README.md). It runs
+# as exactly one Machine with SINGLE_SERVER_DEPLOY=true: the registry is in
+# memory, nothing calls Redis, and every server (the Mac app) and every phone
+# (the iOS app) meets on that one Machine. A second Machine would split them,
+# and a phone that lands on the other one gets 4404, so keep the count at 1.
 #
 #   fly launch --copy-config --no-deploy --name <your app>
-#   fly redis create                       # or a Redis Machine on the private network
-#   fly secrets set RELAY_REDIS_URL=redis://... RELAY_METRICS_TOKEN=...
-#   fly deploy --image <image>             # the first deploy, by hand
-#   fly scale count 2 --region iad,fra     # the most Machines the proxy may start
+#   fly secrets set RELAY_METRICS_TOKEN=...
+#   fly deploy --image <image> --ha=false  # the first deploy, by hand
+#   fly scale count 1 --yes                # and keep it there
+#
+# To go back to several Machines, see "Several Machines" in the README: it
+# needs Redis, SINGLE_SERVER_DEPLOY unset, and the proxy settings below.
 #
 # `fly launch` replaces `app` and `primary_region` with yours. After that,
 # .github/workflows/deploy-relay.yml builds and deploys the relay on every push
@@ -18,10 +20,10 @@ app = "openbots-relay"
 primary_region = "iad"
 
 # A deploy or a restart sends SIGTERM. The relay then drains: it reports not
-# ready, takes no new upgrades or leases, gives up its leases, and after the
-# grace period (RELAY_DRAIN_GRACE_MS, 20 seconds) closes what is left with
-# 1012, so servers and phones reconnect to another Machine. The kill timeout
-# must outlast the grace period, or Fly kills the Machine mid drain.
+# ready, takes nothing new, and after the grace period (RELAY_DRAIN_GRACE_MS,
+# 20 seconds) closes what is left with 1012, so servers and phones reconnect
+# once the new Machine is up. The kill timeout must outlast the grace period,
+# or Fly kills the Machine mid drain.
 kill_signal = "SIGTERM"
 kill_timeout = 30
 
@@ -31,7 +33,9 @@ kill_timeout = 30
 # `fly releases --image` to see which image each release ran.
 
 [deploy]
-  # One Machine at a time, so the others take its hosts while it drains.
+  # The one Machine is replaced in place: it drains, then the new image
+  # starts. Servers and phones are without the relay for that gap (up to the
+  # grace period plus a boot) and reconnect with their usual backoff.
   strategy = "rolling"
   max_unavailable = 1
 
@@ -45,12 +49,15 @@ kill_timeout = 30
   # Bytes in flight across the Machine's sockets: 512 MiB, inside the
   # Machine's memory below.
   RELAY_BUDGET_BYTES = "536870912"
-  # Keep this at 1. A rolling deploy takes one Machine out at a time, and a
-  # minimum of 2 would make the last Machine standing report not ready.
+  # Must be 1 with SINGLE_SERVER_DEPLOY; the relay refuses to start otherwise.
   RELAY_MIN_CLUSTER_SIZE = "1"
   RELAY_LOG_LEVEL = "info"
+  # One Machine: the registry stays in memory and nothing calls Redis, even if
+  # a RELAY_REDIS_URL secret is still set, and nothing is replayed.
+  SINGLE_SERVER_DEPLOY = "true"
   # Set as secrets, never here (`fly secrets set`; see the README):
-  #   RELAY_REDIS_URL       the registry. Required with more than one Machine
+  #   RELAY_REDIS_URL       the registry, only for several Machines. Not used
+  #                         while SINGLE_SERVER_DEPLOY is true
   #   RELAY_METRICS_TOKEN   bearer token for GET /metrics. Without it /metrics is 404
   #   RELAY_PRESENCE_TOKEN  optional: bearer token GET /v1/hosts/{id} then wants
   #   RELAY_APNS_KEY_ID, RELAY_APNS_TEAM_ID, RELAY_APNS_TOPIC
@@ -59,33 +66,29 @@ kill_timeout = 30
   #                         key file is written and none needs to be readable
   #                         by the relay's user
   # RELAY_NODE_ID stays unset on Fly: the relay takes the Machine's own
-  # FLY_MACHINE_ID, which is what `fly-replay: instance=` names. Replays are on
-  # because FLY_MACHINE_ID is set; RELAY_REPLAY need not be.
+  # FLY_MACHINE_ID. Replays are off with SINGLE_SERVER_DEPLOY, since there is
+  # no other Machine to replay to; RELAY_REPLAY must not be set to fly.
 
 [http_service]
   internal_port = 3200
   force_https = true
-  # Fly's proxy scales between min_machines_running and the Machines the app
-  # has (`fly scale count`): it starts a stopped Machine when the running ones
-  # pass the soft limit below, and stops one when the rest have room for its
-  # load. A stopped Machine gets SIGTERM and drains first (kill_timeout above),
-  # so its servers and phones reconnect to the one still running. It never
-  # creates Machines, so `fly scale count` sets the most there can be.
-  auto_stop_machines = "stop"
-  auto_start_machines = true
+  # The one Machine always runs. The proxy neither stops it when idle nor
+  # starts any other, so a stray stopped Machine (from `fly scale count` or an
+  # old deploy) is never brought up beside it to split servers from phones.
+  auto_stop_machines = "off"
+  auto_start_machines = false
   min_machines_running = 1
 
-  # Counted by connection, as the relay counts its sockets. Past the soft
-  # limit the proxy prefers other Machines; at the hard limit it sends none.
-  # The relay itself refuses upgrades with 503 at RELAY_MAX_SOCKETS.
+  # Counted by connection, as the relay counts its sockets. At the hard limit
+  # the proxy sends the Machine nothing more. The relay itself refuses
+  # upgrades with 503 at RELAY_MAX_SOCKETS.
   [http_service.concurrency]
     type = "connections"
     soft_limit = 16000
     hard_limit = 20000
 
   # Not ready while draining or at the socket ceiling: the proxy then sends
-  # this Machine nothing new. A Machine without Redis stays ready and serves on
-  # alone, so a Redis outage does not take every Machine out at once.
+  # this Machine nothing new.
   [[http_service.checks]]
     grace_period = "10s"
     interval = "10s"

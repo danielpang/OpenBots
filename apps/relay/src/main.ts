@@ -10,7 +10,8 @@ import { RedisRegistry } from './registry.js';
 import { PostHogTelemetry } from './telemetry.js';
 
 // The relay's entry: settings from the environment (config.ts), JSON logs on
-// stdout, the shared registry on Redis when `RELAY_REDIS_URL` is set, the
+// stdout, the shared registry on Redis when `RELAY_REDIS_URL` is set (and
+// `SINGLE_SERVER_DEPLOY` is not), the
 // flow, budget and drain settings (each module reads its own), and two ways
 // out. SIGTERM (a deploy, Fly's kill_signal) drains: not ready, nothing new,
 // leases given up, and after the grace period the rest closed with 1012.
@@ -44,7 +45,12 @@ if (config.apns) {
 const registry = config.redisUrl
   ? new RedisRegistry({ redis: config.redisUrl, commandTimeoutMs: config.redisCommandTimeoutMs })
   : undefined;
-if (!registry) logger.info('no RELAY_REDIS_URL: the registry is in memory, for this machine alone');
+if (config.singleServer) {
+  logger.info('SINGLE_SERVER_DEPLOY is set: one machine, the registry in memory, no replays');
+  if (config.redisUrlIgnored) logger.info('RELAY_REDIS_URL is set but not used');
+} else if (!registry) {
+  logger.info('no RELAY_REDIS_URL: the registry is in memory, for this machine alone');
+}
 
 const telemetry = config.posthog ? new PostHogTelemetry({ ...config.posthog, logger }) : undefined;
 if (telemetry) logger.info('POSTHOG_API_KEY set: sending anonymous usage data');
@@ -75,6 +81,7 @@ logger.info(
     push: apns !== undefined,
     nodeId: relay.nodeId,
     shared: registry !== undefined,
+    singleServer: config.singleServer,
     replay: config.replay,
   },
   'relay listening',
