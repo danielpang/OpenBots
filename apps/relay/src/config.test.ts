@@ -118,6 +118,17 @@ describe('config', () => {
     );
     expect(loadConfig({ SINGLE_SERVER_DEPLOY: '' }).singleServer).toBe(false);
     expect(() => loadConfig({ SINGLE_SERVER_DEPLOY: 'maybe' })).toThrow(/SINGLE_SERVER_DEPLOY/);
+    // A leftover URL in the wrong form is not checked when it is not used.
+    const stale = loadConfig({
+      SINGLE_SERVER_DEPLOY: 'true',
+      RELAY_REDIS_URL: 'redis.internal:6379',
+    });
+    expect(stale.redisUrl).toBeUndefined();
+    expect(stale.redisUrlIgnored).toBe(true);
+    expect(() => loadConfig({ RELAY_REDIS_URL: 'redis.internal:6379' })).toThrow(/RELAY_REDIS_URL/);
+    expect(() =>
+      loadConfig({ SINGLE_SERVER_DEPLOY: 'maybe', RELAY_REDIS_URL: 'redis.internal:6379' }),
+    ).toThrow(/RELAY_REDIS_URL/);
   });
 
   it('refuses SINGLE_SERVER_DEPLOY with settings that need several machines', () => {

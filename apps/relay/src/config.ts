@@ -163,6 +163,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       return value === undefined || value === '' ? [] : [[name, value]];
     }),
   );
+  // A single server relay never uses RELAY_REDIS_URL, so a leftover value is
+  // not checked either: a stale secret in the wrong form must not stop it.
+  const single = EnvSchema.shape.SINGLE_SERVER_DEPLOY.safeParse(present.SINGLE_SERVER_DEPLOY);
+  const redisUrlIgnored = single.success && single.data && 'RELAY_REDIS_URL' in present;
+  if (redisUrlIgnored) delete present.RELAY_REDIS_URL;
   const parsed = EnvSchema.safeParse(present);
   if (!parsed.success) {
     const problems = parsed.error.issues.map(
@@ -189,7 +194,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     minClusterSize: e.RELAY_MIN_CLUSTER_SIZE,
     hostBudgetShare: e.RELAY_HOST_BUDGET_SHARE,
     singleServer: e.SINGLE_SERVER_DEPLOY,
-    redisUrlIgnored: e.SINGLE_SERVER_DEPLOY && e.RELAY_REDIS_URL !== undefined,
+    redisUrlIgnored,
     replay: e.SINGLE_SERVER_DEPLOY ? 'off' : (e.RELAY_REPLAY ?? (e.FLY_MACHINE_ID ? 'fly' : 'off')),
     redisCommandTimeoutMs: e.RELAY_REDIS_COMMAND_TIMEOUT_MS,
     cluster: {
@@ -199,7 +204,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       heartbeatMs: e.RELAY_NODE_HEARTBEAT_MS,
     },
   };
-  if (e.RELAY_REDIS_URL && !e.SINGLE_SERVER_DEPLOY) config.redisUrl = e.RELAY_REDIS_URL;
+  if (e.RELAY_REDIS_URL) config.redisUrl = e.RELAY_REDIS_URL;
   if (e.RELAY_METRICS_TOKEN) config.metricsToken = e.RELAY_METRICS_TOKEN;
   if (e.POSTHOG_API_KEY) {
     config.posthog = {

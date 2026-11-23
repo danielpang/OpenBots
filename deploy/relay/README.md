@@ -100,6 +100,8 @@ Then the new Machine starts. Until it answers, servers and phones cannot connect
 
 A crash or a host failure on Fly's side is an outage too, until Fly restarts the Machine. That is the price of not running Redis.
 
+A restart also resets the per host limits (stream opens and pushes an hour, bytes a minute), which live in the Machine's memory, so every host starts a fresh window after each deploy. Several relay deploys in one hour loosen those limits by that much.
+
 ## Several Machines
 
 To run the shared relay as several Machines again (for more capacity than one Machine has, or to survive a Machine going away), all of these change together:
@@ -140,7 +142,7 @@ With one Machine, that is the whole relay. With several, it reaches whichever Ma
 | `hosts_alone`, `served_alone_total`  | Hosts served on this Machine alone while Redis is away             |
 | `push_failures_total`                | Pushes answered `error` because sending them failed                |
 
-Plus Node's process metrics (CPU, memory, event loop lag) under the same prefix. Watch `shed_peers_total` and `rejections_total{reason="bytes"}`: a steady rise means the Machine is short of memory or phones are on poor networks. With one Machine, `cluster_size` stays at 1 and the lease and registry series stay flat.
+Plus Node's process metrics (CPU, memory, event loop lag) under the same prefix. Watch `shed_peers_total` and `rejections_total{reason="bytes"}`: a steady rise means the Machine is short of memory or phones are on poor networks. With one Machine, `cluster_size` stays at 1, and `lease_losses_total` and `registry_degraded` stay flat outside deploys. The relay still holds an in-memory lease for each linked host, so `hosts_owned` follows the number of linked servers and `lease_renewals_total{result="ok"}` keeps rising; that is normal.
 
 ## What the relay sees and stores
 
