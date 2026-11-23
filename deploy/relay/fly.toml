@@ -72,11 +72,13 @@ kill_timeout = 30
 [http_service]
   internal_port = 3200
   force_https = true
-  # The one Machine always runs. The proxy neither stops it when idle nor
-  # starts any other, so a stray stopped Machine (from `fly scale count` or an
-  # old deploy) is never brought up beside it to split servers from phones.
+  # The one Machine always runs: the proxy never stops it when idle. If it
+  # does stop (a drain exits cleanly, Fly host maintenance, `fly machine
+  # stop`), the proxy starts it again on the next request. Keep the count at
+  # 1 (`fly scale count 1`): with a second, stopped Machine, the proxy could
+  # start that one too and split servers from phones.
   auto_stop_machines = "off"
-  auto_start_machines = false
+  auto_start_machines = true
   min_machines_running = 1
 
   # Counted by connection, as the relay counts its sockets. At the hard limit

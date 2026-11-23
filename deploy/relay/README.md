@@ -71,7 +71,7 @@ fly tokens create deploy -a <your app>    # then: gh secret set FLY_API_TOKEN
 
 Run it by hand to redeploy `main`. Do not also connect the repository in Fly's dashboard, or every push deploys twice. Self-hosted relays are unaffected: they run the GHCR image each release publishes.
 
-The proxy never stops the Machine when it is idle (`auto_stop_machines = "off"`) and never starts another one (`auto_start_machines = false`), so a stray stopped Machine is not brought up beside it.
+The proxy never stops the Machine when it is idle (`auto_stop_machines = "off"`). If the Machine stops anyway (a host maintenance on Fly's side, `fly machine stop`, or a drain that exited), the proxy starts it again on the next request (`auto_start_machines = true`), so the relay comes back on its own. That is also why the count must stay at 1: the proxy would start a second, stopped Machine just the same, and servers and phones could then land on different Machines.
 
 The Machine takes up to 20,000 sockets (host links and phone streams together, `RELAY_MAX_SOCKETS`), and at 20,000 the proxy sends it no more (`[http_service.concurrency]`). It also holds at most 512 MiB of bytes in flight (`RELAY_BUDGET_BYTES`), which is why it has 2 GB of memory; raise both together. To carry more, give it a bigger size (`[[vm]]` in `fly.toml`) before you reach for more Machines. `openbots_relay_sockets` and `rejections_total{reason="sockets"}` show how close it is.
 
@@ -105,7 +105,7 @@ A crash or a host failure on Fly's side is an outage too, until Fly restarts the
 To run the shared relay as several Machines again (for more capacity than one Machine has, or to survive a Machine going away), all of these change together:
 
 1. Create a Redis close to the primary region (`fly redis create`, or a Redis Machine of your own on the private network) and set `fly secrets set RELAY_REDIS_URL='redis://default:<password>@<host>:6379'`.
-2. In `fly.toml`, remove `SINGLE_SERVER_DEPLOY` (or set it to `"false"`), and let the proxy start and stop Machines: `auto_stop_machines = "stop"`, `auto_start_machines = true`.
+2. In `fly.toml`, remove `SINGLE_SERVER_DEPLOY` (or set it to `"false"`), and let the proxy stop idle Machines: `auto_stop_machines = "stop"` (`auto_start_machines` is already `true`).
 3. Drop `--ha=false` from the workflow if you want Fly's default of two Machines on a new app, and scale: `fly scale count 2`, or `fly scale count 4 --region iad,fra,sin`.
 
 Then one Machine owns each host id through a lease in Redis, and a Machine that gets a connection for a host another one owns answers with `fly-replay`, so Fly's proxy sends it to the owner. How that works, and what happens when Redis or a Machine goes away, is in [Several machines](../../apps/relay/README.md#several-machines). Replays work only on Fly; behind any other proxy, several machines need sticky routing by host id in your load balancer.
