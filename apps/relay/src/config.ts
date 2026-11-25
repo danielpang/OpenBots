@@ -20,6 +20,12 @@ import { z } from 'zod';
 // the relay keeps its registry in memory and is a cluster of one, as a
 // self-hosted relay is. The node id defaults to Fly's `FLY_MACHINE_ID`, and
 // to a random one where that is not set.
+//
+// `SINGLE_SERVER_DEPLOY=true` says the relay is one machine and always will be
+// (the shared relay on Fly runs this way): the registry stays in memory even
+// when `RELAY_REDIS_URL` is set, so nothing calls Redis, and nothing is
+// replayed, since there is no other machine to replay to. A server and its
+// phones then always meet on this machine.
 
 export const RELAY_ENV_VARS = [
   'RELAY_PORT',
@@ -34,6 +40,7 @@ export const RELAY_ENV_VARS = [
   'RELAY_APNS_ENVIRONMENT',
   'RELAY_LOG_LEVEL',
   'RELAY_REDIS_URL',
+  'SINGLE_SERVER_DEPLOY',
   'RELAY_NODE_ID',
   'RELAY_MIN_CLUSTER_SIZE',
   'RELAY_LEASE_MS',
@@ -73,6 +80,7 @@ const EnvSchema = z.object({
     .string()
     .regex(/^rediss?:\/\//, 'must be a redis:// or rediss:// URL')
     .optional(),
+  SINGLE_SERVER_DEPLOY: z.stringbool().default(false),
   RELAY_NODE_ID: z
     .string()
     .regex(/^[A-Za-z0-9._-]{1,64}$/, 'letters, digits, dot, dash or underscore')
@@ -125,6 +133,10 @@ export interface RelayConfig {
   apnsMissing: string[];
   /** The shared registry; unset means one in memory, for this relay alone. */
   redisUrl?: string;
+  /** `SINGLE_SERVER_DEPLOY`: one machine, so no Redis (even with `RELAY_REDIS_URL`) and no replays. */
+  singleServer: boolean;
+  /** `RELAY_REDIS_URL` was set and is not used, because of `singleServer`. */
+  redisUrlIgnored: boolean;
   /** `RELAY_NODE_ID`, else `FLY_MACHINE_ID`; unset means a random one. */
   nodeId?: string;
   minClusterSize: number;
@@ -151,6 +163,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       return value === undefined || value === '' ? [] : [[name, value]];
     }),
   );
+  // A single server relay never uses RELAY_REDIS_URL, so a leftover value is
+  // not checked either: a stale secret in the wrong form must not stop it.
+  const single = EnvSchema.shape.SINGLE_SERVER_DEPLOY.safeParse(present.SINGLE_SERVER_DEPLOY);
+  const redisUrlIgnored = single.success && single.data && 'RELAY_REDIS_URL' in present;
+  if (redisUrlIgnored) delete present.RELAY_REDIS_URL;
   const parsed = EnvSchema.safeParse(present);
   if (!parsed.success) {
     const problems = parsed.error.issues.map(
@@ -176,7 +193,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     apnsMissing: missing.length === 4 ? [] : missing,
     minClusterSize: e.RELAY_MIN_CLUSTER_SIZE,
     hostBudgetShare: e.RELAY_HOST_BUDGET_SHARE,
-    replay: e.RELAY_REPLAY ?? (e.FLY_MACHINE_ID ? 'fly' : 'off'),
+    singleServer: e.SINGLE_SERVER_DEPLOY,
+    redisUrlIgnored,
+    replay: e.SINGLE_SERVER_DEPLOY ? 'off' : (e.RELAY_REPLAY ?? (e.FLY_MACHINE_ID ? 'fly' : 'off')),
     redisCommandTimeoutMs: e.RELAY_REDIS_COMMAND_TIMEOUT_MS,
     cluster: {
       leaseMs: e.RELAY_LEASE_MS,
@@ -203,6 +222,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   if (renewMs >= leaseMs || heartbeatMs >= nodeTtlMs) {
     throw new Error(
       'Invalid relay configuration:\n- RELAY_LEASE_RENEW_MS must be below RELAY_LEASE_MS, and RELAY_NODE_HEARTBEAT_MS below RELAY_NODE_TTL_MS',
+    );
+  }
+  if (e.SINGLE_SERVER_DEPLOY && (e.RELAY_REPLAY === 'fly' || e.RELAY_MIN_CLUSTER_SIZE > 1)) {
+    throw new Error(
+      'Invalid relay configuration:\n- SINGLE_SERVER_DEPLOY runs one machine alone: RELAY_REPLAY=fly and a RELAY_MIN_CLUSTER_SIZE above 1 need several',
     );
   }
   if (missing.length === 0) {

@@ -77,7 +77,7 @@ curl -fsS https://relay.example.com/healthz
 
 A Cloudflare Tunnel (with the Compose profile, its service is `http://relay:3200`) or another
 WebSocket-capable TLS proxy can replace Caddy. Keep its backend
-private and configure trusted client-address forwarding. For a managed multi-machine relay, use
+private and configure trusted client-address forwarding. For a managed relay on Fly.io, use
 the [Fly deployment guide](../deploy/relay/README.md) instead.
 
 ## 4. Point OpenBots at your relay
