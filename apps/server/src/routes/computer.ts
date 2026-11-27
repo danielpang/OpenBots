@@ -17,10 +17,12 @@ import {
   computerAvailable,
   getComputer,
   IDLE_TIMEOUT_RANGE_MIN,
+  idleSettingsApply,
   listScreens,
   restartComputer,
   runningComputer,
   setScreenControl,
+  shownProvider,
   startComputer,
   stopComputer,
   updateComputerSettings,
@@ -53,13 +55,30 @@ const ScreenSchema = z
   })
   .openapi('Screen');
 
+/**
+ * The provider as the API names it. Which sandbox vendor the hosted service
+ * runs on is not something it tells its users, and no client acts on the
+ * value, so a hosted computer reads as what it is to them: a machine
+ * somewhere else. This also keeps the field's values as released apps know
+ * them.
+ */
+const PublicProviderSchema = z.enum(['docker', 'remote']);
+
 const ComputerSchema = z
   .object({
     id: z.uuid(),
-    provider: z.enum(['docker', 'remote']),
+    provider: PublicProviderSchema,
     status: ComputerStatusSchema,
     alwaysOn: z.boolean(),
     idleTimeoutMin: z.number().int().nullable(),
+    idleSettings: z.boolean().openapi({
+      description:
+        'Whether `alwaysOn` and `idleTimeoutMin` apply. False on the hosted service, where a computer pauses itself shortly after its last use and wakes on the next',
+    }),
+    error: z.string().nullable().openapi({
+      description:
+        'Why the last setup in the background failed (the hosted service), while the status is `error`',
+    }),
     lastUsedAt: z.iso.datetime().nullable(),
     createdAt: z.iso.datetime(),
     screens: z.array(ScreenSchema),
@@ -135,10 +154,12 @@ function toScreen(row: ScreenRow): z.infer<typeof ScreenSchema> {
 function toComputer(row: ComputerRow, screens: ScreenRow[]): z.infer<typeof ComputerSchema> {
   return {
     id: row.id,
-    provider: row.provider,
+    provider: shownProvider(row.provider),
     status: ComputerStatusSchema.catch('error').parse(row.status),
     alwaysOn: row.alwaysOn,
     idleTimeoutMin: row.idleTimeoutMin,
+    idleSettings: idleSettingsApply(row),
+    error: row.status === 'error' ? ((row.spec as { error?: string } | null)?.error ?? null) : null,
     lastUsedAt: iso(row.lastUsedAt),
     createdAt: iso(row.createdAt)!,
     screens: screens.map(toScreen),
@@ -202,6 +223,25 @@ const computerResponse = (description: string) => ({
 const unavailable = problemResponse(
   'No computer provider, or the computer could not start (`COMPUTER_UNAVAILABLE`)',
 );
+const settingUp = computerResponse(
+  'Being made or started in the background (the hosted service): `creating`, `starting` or `updating`. `computer.status` says when it is running, or `error`',
+);
+
+/**
+ * A start that a provisioning job finishes in the background (Sprites)
+ * answers 202 with the computer as it is now, instead of an error.
+ */
+async function started(c: Context<AppEnv>, starting: Promise<{ computer: ComputerRow }>) {
+  try {
+    const { computer } = await starting;
+    return c.json(await computerOut(c, computer), 200);
+  } catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'COMPUTER_STARTING') throw error;
+    const row = await getComputer(c.var.deps, c.var.user);
+    if (!row) throw error;
+    return c.json(await computerOut(c, row), 202);
+  }
+}
 
 export const computerRoutes = createRouter()
   .openapi(
@@ -238,7 +278,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Keep the computer on, or set how long it idles before it stops',
       description:
-        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change.',
+        'The idle sweep stops a computer unused for `idleTimeoutMin` minutes unless `alwaysOn`; its files are kept (plan 9.5). The next sweep applies a change. Saved but without effect where `idleSettings` is false (the hosted service).',
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -283,12 +323,14 @@ export const computerRoutes = createRouter()
       summary: 'Start the computer, creating it on first use',
       middleware: [requireUser] as const,
       security: authenticated,
-      responses: { 200: computerResponse('Running'), ...authProblems, 503: unavailable },
+      responses: {
+        200: computerResponse('Running'),
+        202: settingUp,
+        ...authProblems,
+        503: unavailable,
+      },
     }),
-    async (c) => {
-      const { computer } = await startComputer(c.var.deps, c.var.user);
-      return c.json(await computerOut(c, computer), 200);
-    },
+    async (c) => started(c, startComputer(c.var.deps, c.var.user)),
   )
   .openapi(
     createRoute({
@@ -349,6 +391,7 @@ export const computerRoutes = createRouter()
       security: authenticated,
       responses: {
         200: computerResponse('Running'),
+        202: settingUp,
         ...authProblems,
         404: problemResponse('The account has no computer yet'),
         503: unavailable,
@@ -357,8 +400,7 @@ export const computerRoutes = createRouter()
     async (c) => {
       const row = await getComputer(c.var.deps, c.var.user);
       if (!row) throw notFound('The account has no computer yet');
-      const { computer } = await restartComputer(c.var.deps, c.var.user, row);
-      return c.json(await computerOut(c, computer), 200);
+      return started(c, restartComputer(c.var.deps, c.var.user, row));
     },
   )
   .openapi(
@@ -368,7 +410,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Rescue unpushed work before a reset',
       description:
-        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker computers only (409 `RESET_UNSUPPORTED`).',
+        'The first step of a reset (GH5): queues the rescue job over every repository on the computer, which starts it if it is off and pushes unpushed commits and uncommitted changes to rescue branches. Poll GET /computer/reset/{requestId}, show what could not be saved and the coding sessions that would stop, then confirm with POST /computer/reset within fifteen minutes. Docker and hosted computers only (409 `RESET_UNSUPPORTED`).',
       middleware: [requireUser] as const,
       security: authenticated,
       responses: {
@@ -412,7 +454,7 @@ export const computerRoutes = createRouter()
       tags: ['computer'],
       summary: 'Reset the computer: a fresh home, after the rescue',
       description:
-        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
+        "Confirms a reset prepared with POST /computer/reset/prepare whose rescue is `done`, within fifteen minutes of the prepare. Stops the computer and every coding session on it, removes the container and its home volume (/home/bot: files, clones, worktrees), marks every checkout `missing` and clears the sessions' worktrees. The state volume, with the browser cookie store and the coding agents' sign-ins, is kept unless `resetSignIns`. A reset with `resetSignIns` is a full reset: the old computer is deleted with everything on it and cannot be brought back, so only a person may ask for one: a signed-in session or a paired device, not an API key (403 `PERSON_REQUIRED`). On the hosted service the old computer's deletion finishes after the reset answers and is retried until it is done; the computer can be started again at once, on a new machine. A start or an update under way is cancelled by the reset, and a stop is waited out for at most two minutes (409 `COMPUTER_BUSY` until then). Audited as `computer.reset`. Nothing is made until the next start, which creates a fresh computer; its reconcile job then clones every repository marked `keep_cloned` again, and the rescue branches stay on the remote. A coding session started after the prepare, so not shown to the owner, refuses the reset (409 `CODING_SESSION_RUNNING`): prepare again.",
       middleware: [requireUser] as const,
       security: authenticated,
       request: {
@@ -425,7 +467,7 @@ export const computerRoutes = createRouter()
                   confirm: z.literal(true),
                   resetSignIns: z.boolean().optional().openapi({
                     description:
-                      "Also remove the cookie store and the coding agents' sign-ins on the computer",
+                      "A full reset: also remove the cookie store and the coding agents' sign-ins, deleting the computer with everything on it. Cannot be undone, and only a person may ask for it",
                   }),
                 })
                 .openapi('ComputerReset'),
@@ -437,9 +479,12 @@ export const computerRoutes = createRouter()
       responses: {
         202: computerResponse('Reset: stopped with no machine; the next start makes a fresh one'),
         ...authProblems,
+        403: problemResponse(
+          '`resetSignIns` from an API key: only a person may fully reset a computer (`PERSON_REQUIRED`)',
+        ),
         404: problemResponse('The account has no computer yet'),
         409: problemResponse(
-          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), or a computer that cannot be reset from here (`RESET_UNSUPPORTED`)',
+          'Not prepared, the rescue still running or the prepare too old (`RESET_NOT_PREPARED`), a coding session the owner was not shown (`CODING_SESSION_RUNNING`), a computer that cannot be reset from here (`RESET_UNSUPPORTED`), one being stopped for less than two minutes (`COMPUTER_BUSY`), or one another reset changed meanwhile (`COMPUTER_CHANGED`)',
         ),
         503: unavailable,
       },

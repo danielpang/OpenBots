@@ -14,7 +14,7 @@ import {
   type CoderWorld,
   type CoderIo,
 } from './__fixtures__/coders/setup.js';
-import { createCoderWorker } from './coder-runner.js';
+import { createCoderWorker, type CoderRunnerOptions } from './coder-runner.js';
 import { enqueueCoderJob, type CoderJob } from './coder-jobs.js';
 import { publishCoderControl } from './coder-control.js';
 
@@ -29,7 +29,12 @@ describe('session-scoped publishing', () => {
   let conflict = false;
   let failures = 0;
   let noOpenPr = false;
-  const options = { runWaitMs: 0, stopGraceMs: 20, sessionMinutes: 60, githubApi: '' };
+  const options: CoderRunnerOptions = {
+    runWaitMs: 0,
+    stopGraceMs: 20,
+    sessionMinutes: 60,
+    githubApi: '',
+  };
   beforeAll(async () => {
     w = await coderWorld('publishing@example.com');
     github = createServer((req, res) => {
@@ -542,7 +547,17 @@ describe('session-scoped publishing', () => {
 
   it('expires pending publication on time limit, without pushing after the agent exits', async () => {
     const before = posts.length;
-    options.sessionMinutes = 0.002;
+    // The limit is reached when the test says, once the publication waits
+    // for its approval: by the clock, a slow run reached it before the
+    // request was made, and the session ended with no approval to expire.
+    let expire!: () => void;
+    const armed = new Promise<void>((resolve) => {
+      options.armLimit = (fire) => {
+        expire = fire;
+        resolve();
+        return undefined;
+      };
+    });
     let exited = false;
     w.coder.agent = async (io) => {
       io.stdout(jsonl(initLine()));
@@ -555,6 +570,13 @@ describe('session-scoped publishing', () => {
     try {
       const { sessionId } = await w.newSession({ mode: 'pr' });
       await start(sessionId);
+      await armed;
+      await w.until(async () =>
+        expect(await approvals(sessionId)).toEqual([
+          expect.objectContaining({ status: 'pending' }),
+        ]),
+      );
+      expire();
       const row = await ended(sessionId);
       expect(exited).toBe(true);
       expect(row.error).toContain('minute limit');
@@ -566,7 +588,7 @@ describe('session-scoped publishing', () => {
         (await w.call('POST', `/approvals/${approval!.id}/decide`, { decision: 'approve' })).status,
       ).not.toBe(200);
     } finally {
-      options.sessionMinutes = 60;
+      delete options.armLimit;
     }
   });
   it('does not publish a final commit when its fresh approval is declined', async () => {

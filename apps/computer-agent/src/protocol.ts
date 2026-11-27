@@ -5,6 +5,14 @@ import { z } from 'zod';
 
 export const MAX_SCREEN = 89;
 
+/**
+ * Where a client may send the agent token instead of `Authorization: Bearer`:
+ * in front of the agent sits a proxy that takes `Authorization` for itself
+ * (a private Sprite URL wants the Sprites org token there), so the agent
+ * token goes in this header.
+ */
+export const AGENT_TOKEN_HEADER = 'x-openbots-agent-token';
+
 export const ScreenNumberSchema = z.coerce.number().int().min(0).max(MAX_SCREEN);
 
 // --- POST /exec ----------------------------------------------------------------

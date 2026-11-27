@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# A stand-in for the Sprite runtime's sprite-env, for testing provision.sh in
+# a plain container (docker/sprites/test/provision.test.sh). It knows only
+# `services get|list|create|start|stop|restart|delete`, keeps definitions in
+# $SPRITE_ENV_STUB_DIR and starts a service's command in its own session,
+# logging where the runtime does (/.sprite/logs/services/<name>.log). Every
+# call is appended to calls.log so a test can check the arguments. Unlike the
+# runtime it does not restart a service that dies, and it does not route a URL.
+set -euo pipefail
+
+STATE="${SPRITE_ENV_STUB_DIR:-/var/lib/sprite-env-stub}"
+LOGS=/.sprite/logs/services
+mkdir -p "$STATE/services" "$LOGS"
+printf '%s\n' "$*" >>"$STATE/calls.log"
+
+[ "${1:-}" = services ] || {
+  echo "stub sprite-env: only 'services' is implemented" >&2
+  exit 2
+}
+shift
+cmd="${1:-}"
+shift || true
+
+def() { printf '%s/services/%s' "$STATE" "$1"; }
+running() { [ -f "$(def "$1").pid" ] && kill -0 "$(cat "$(def "$1").pid")" 2>/dev/null; }
+
+start() {
+  local name="$1" dir cmd args=() envs=()
+  # shellcheck disable=SC1090
+  . "$(def "$name")"
+  [ -n "${args_csv:-}" ] && IFS=, read -r -a args <<<"$args_csv"
+  [ -n "${env_csv:-}" ] && IFS=, read -r -a envs <<<"$env_csv"
+  dir="${dir:-/}"
+  (
+    cd "$dir"
+    exec setsid env "${envs[@]}" "$cmd" "${args[@]}" \
+      > >(sed -u "s/^/$(date -u +%FT%TZ) [stdout] /" >>"$LOGS/$name.log") \
+      2> >(sed -u "s/^/$(date -u +%FT%TZ) [stderr] /" >>"$LOGS/$name.log")
+  ) </dev/null &
+  echo $! >"$(def "$name").pid"
+}
+
+stop() {
+  local name="$1" pid
+  running "$name" || return 0
+  pid="$(cat "$(def "$name").pid")"
+  # setsid made the service its own process group.
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 50); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  rm -f "$(def "$name").pid"
+}
+
+case "$cmd" in
+  list)
+    for f in "$STATE"/services/*; do
+      case "$f" in *.pid | *'*') continue ;; esac
+      basename "$f"
+    done
+    ;;
+  get)
+    [ -f "$(def "$1")" ] || {
+      echo "service not found" >&2
+      exit 1
+    }
+    cat "$(def "$1")"
+    if running "$1"; then echo "status=running"; else echo "status=stopped"; fi
+    ;;
+  create)
+    name="$1"
+    shift
+    cmd_path='' args_csv='' env_csv='' dir='' http_port='' needs=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cmd) cmd_path="$2" && shift 2 ;;
+        --args) args_csv="$2" && shift 2 ;;
+        --env) env_csv="$2" && shift 2 ;;
+        --dir) dir="$2" && shift 2 ;;
+        --http-port) http_port="$2" && shift 2 ;;
+        --needs) needs="$2" && shift 2 ;;
+        --duration) shift 2 ;;
+        --no-stream) shift ;;
+        *)
+          echo "stub sprite-env: unknown flag $1" >&2
+          exit 2
+          ;;
+      esac
+    done
+    [ -n "$cmd_path" ] || {
+      echo "--cmd is required" >&2
+      exit 2
+    }
+    if [ -n "$http_port" ]; then
+      for f in "$STATE"/services/*; do
+        case "$f" in *.pid | *'*') continue ;; esac
+        [ "$(basename "$f")" = "$name" ] && continue
+        if grep -q '^http_port=.' "$f"; then
+          echo "409: another service already has an HTTP port configured" >&2
+          exit 1
+        fi
+      done
+    fi
+    stop "$name"
+    {
+      printf 'cmd=%q\n' "$cmd_path"
+      printf 'args_csv=%q\n' "$args_csv"
+      printf 'env_csv=%q\n' "$env_csv"
+      printf 'dir=%q\n' "$dir"
+      printf 'http_port=%q\n' "$http_port"
+      printf 'needs=%q\n' "$needs"
+    } >"$(def "$name")"
+    start "$name"
+    ;;
+  start) running "$1" || start "$1" ;;
+  stop) stop "$1" ;;
+  restart)
+    stop "$1"
+    start "$1"
+    ;;
+  delete)
+    stop "$1"
+    rm -f "$(def "$1")"
+    ;;
+  *)
+    echo "stub sprite-env: unknown command services $cmd" >&2
+    exit 2
+    ;;
+esac

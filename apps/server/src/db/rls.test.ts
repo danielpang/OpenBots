@@ -357,6 +357,54 @@ describe('row-level security between organizations', () => {
     });
   });
 
+  it("keeps each organization's retired computers to it", async () => {
+    const retired = (workspaceId: string, ref: string) =>
+      t.db
+        .insert(schema.retiredComputers)
+        .values({
+          workspaceId,
+          ownerId: owner,
+          provider: 'sprites',
+          providerRef: ref,
+          status: 'deleting',
+          retiredAt: new Date(),
+        })
+        .returning({ id: schema.retiredComputers.id })
+        .then(([row]) => row!.id);
+    const mine = await retired(orgA, 'ob-rls-a');
+    const theirs = await retired(orgB, 'ob-rls-b');
+    await as<{ id: string }>(t.db, APP_ROLE, orgA, async (q) => {
+      expect((await q(sql`select id from retired_computers`)).map((r) => r.id)).toEqual([mine]);
+      expect(
+        await q(
+          sql`update retired_computers set status = 'deleted' where id = ${theirs} returning id`,
+        ),
+      ).toEqual([]);
+      expect(await q(sql`delete from retired_computers where id = ${theirs} returning id`)).toEqual(
+        [],
+      );
+    });
+    const insert = await failure(t.db, (tx) =>
+      as(tx, APP_ROLE, orgA, (q) =>
+        q(
+          sql`insert into retired_computers (workspace_id, owner_id, provider, provider_ref, status, retired_at)
+              values (${orgB}, ${owner}, 'sprites', 'ob-rls-c', 'deleting', now())`,
+        ),
+      ),
+    );
+    expect(insert).toMatch(/row-level security/);
+    await as<{ n: number }>(t.db, APP_ROLE, null, async (q) => {
+      const [row] = await q(sql`select count(*)::int as n from retired_computers`);
+      expect(row!.n).toBe(0);
+    });
+    const [b] = await t.db
+      .select()
+      .from(schema.retiredComputers)
+      .where(sql`id = ${theirs}`);
+    expect(b).toMatchObject({ status: 'deleting' });
+    await t.db.delete(schema.retiredComputers).where(sql`provider_ref like 'ob-rls-%'`);
+  });
+
   it('runs a job in the organization that queued it, and refuses one for another or for none', async () => {
     const infra = createInfra({});
     try {

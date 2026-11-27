@@ -4,19 +4,22 @@ import {
   type EventBus,
   type RepoRescueResult,
 } from '@openbots/shared';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { AppDeps, CurrentUser } from '../context.js';
-import { schema } from '../db/client.js';
+import { schema, type Db } from '../db/client.js';
 import { DomainError, notFound } from '../errors.js';
-import { recordAudit, userActor } from './audit.js';
+import { userActor } from './audit.js';
 import {
   assertResettable,
+  checkpointBeforeReset,
   computerAvailable,
   computerUnavailable,
-  destroyComputer,
   getComputer,
+  resetMachine,
   type ComputerRow,
 } from './computer.js';
+import { auditReset, cleanupAfterReset, type ResetRecord } from './computer-retire.js';
+import { assertPerson } from './person.js';
 import {
   RESCUE_CHANNEL,
   rescueStatus,
@@ -34,8 +37,14 @@ import {
 // stops the computer and its coding sessions, removes the container and its
 // home volume (the state volume, with the cookie store and the coding agents'
 // sign-ins, only on request), marks every checkout `missing`, clears the
-// sessions' worktree paths and records `computer.reset`. The next start makes
-// a fresh computer, and its reconcile clones the `keep_cloned` repositories
+// sessions' worktree paths and records `computer.reset`. A reset that keeps
+// the sign-ins and the machine (Sprites) records the id of the checkpoint
+// taken first, so an operator can undo it. A full reset (`resetSignIns`)
+// deletes the old computer and everything on it, and nothing brings it back,
+// so only a person may ask for one (`assertPerson`); on a provider that names
+// machines by key (Sprites) the deletion finishes after the reset answers and
+// is retried until it is done (computer-retire.ts). The next start makes a
+// fresh computer, and its reconcile clones the `keep_cloned` repositories
 // again.
 //
 // A prepare reaches every process over the bus, as the rescue's results do,
@@ -215,7 +224,11 @@ const notPrepared = (message: string) => new DomainError(409, 'RESET_NOT_PREPARE
 
 export interface ResetOptions {
   requestId: string;
-  /** Removes the cookie store and the coding agents' sign-ins too. */
+  /**
+   * A full reset: the computer is deleted with everything on it, the cookie
+   * store and the coding agents' sign-ins too, and the next start makes a new
+   * one. Only a person may ask for it (403 `PERSON_REQUIRED` for an API key).
+   */
   resetSignIns?: boolean;
 }
 
@@ -229,10 +242,14 @@ export interface ResetOptions {
  */
 export async function resetComputer(
   deps: AppDeps,
-  owner: Owner,
+  owner: Owner & { apiKeyId?: string | null },
   { requestId, resetSignIns = false }: ResetOptions,
 ): Promise<ComputerRow> {
   const row = await computerOf(deps, owner);
+  // Nothing can bring a computer a full reset deleted back, so a person asks
+  // for it: a session, or the member's own paired phone or Mac app, never a
+  // script or a Bot.
+  if (resetSignIns) await assertPerson(deps.db, owner, 'fully reset the computer');
   await listen(deps);
   prune();
   const record = prepared.get(requestId);
@@ -257,55 +274,28 @@ export async function resetComputer(
   }
   prepared.delete(requestId);
   const by = userActor(owner);
-  const reset = await destroyComputer(deps, row, { signIns: resetSignIns }, by);
-  await deps.db.transaction(async (tx) => {
-    const checkouts = await tx
-      .update(schema.repoCheckouts)
-      .set({ state: 'missing', error: null, updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.computerId, row.id))
-      .returning({ id: schema.repoCheckouts.id });
-    await tx
-      .update(schema.codingSessions)
-      .set({ worktreePath: null })
-      .where(
-        and(
-          eq(schema.codingSessions.ownerId, owner.id),
-          eq(schema.codingSessions.workspaceId, owner.workspaceId),
-        ),
-      );
-    if (resetSignIns) {
-      // Sign-ins the CLIs held on the state volume are gone; a Settings > Models key is not.
-      await tx
-        .update(schema.coderAccounts)
-        .set({
-          authKind: 'none',
-          accountLabel: null,
-          signedInAt: null,
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.coderAccounts.ownerId, owner.id),
-            eq(schema.coderAccounts.workspaceId, owner.workspaceId),
-            isNull(schema.coderAccounts.providerId),
-          ),
-        );
-    }
-    await recordAudit(tx, {
-      workspaceId: row.workspaceId,
-      actor: by,
-      action: 'computer.reset',
-      targetType: 'computer',
-      targetId: row.id,
-      metadata: {
-        requestId,
-        signIns: resetSignIns,
-        checkouts: checkouts.length,
-        unsaved: unsavedWork(done.results).length,
-        rescueFailed: !!done.error,
-      },
+  const checkpoint = await checkpointBeforeReset(deps, row, { signIns: resetSignIns });
+  const audit: ResetRecord = {
+    requestId,
+    signIns: resetSignIns,
+    unsaved: unsavedWork(done.results).length,
+    rescueFailed: !!done.error,
+    // The disk as it was, for an operator to undo a mistaken reset (Sprites).
+    ...(checkpoint ? { checkpoint } : {}),
+  };
+  const { computer: reset, retired } = await resetMachine(
+    deps,
+    row,
+    { signIns: resetSignIns, reset: audit },
+    by,
+  );
+  // An old machine deleted through a record took the reset's cleanup and
+  // audit into the transaction that took it off the computer (computer-retire.ts).
+  if (!retired) {
+    await deps.db.transaction(async (tx) => {
+      const checkouts = await cleanupAfterReset(tx as unknown as Db, row, resetSignIns);
+      await auditReset(tx as unknown as Db, row, by, { ...audit, checkouts });
     });
-  });
+  }
   return reset;
 }

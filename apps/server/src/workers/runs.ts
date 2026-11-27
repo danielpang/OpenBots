@@ -82,7 +82,7 @@ import {
 } from '../services/chats.js';
 import { coderServices } from '../services/coder-tool.js';
 import { CODER_WIDGET_KINDS, resumeIfCoderWidgetDone } from '../services/coder-widget-actions.js';
-import { computerAvailable, computerServices } from '../services/computer.js';
+import { computerAvailable, computerServices, computerUseScope } from '../services/computer.js';
 import { attachmentServices, loadContextAttachments } from '../services/files.js';
 import {
   loginExpiresAt,
@@ -224,6 +224,9 @@ async function processRun(
 
   const controller = new AbortController();
   running.set(run.id, controller);
+  // The run's use of the computer, from its first computer call to its end
+  // however it ends: holds a Sprite awake and records the usage (plan 9.5).
+  const computerUse = computerUseScope(deps, 'run');
   let messageId: string | null = null;
   // Set when another worker took the run over (K4): this one stops and leaves the run alone.
   let lost = false;
@@ -315,6 +318,7 @@ async function processRun(
               runId: run.id,
               signal: controller.signal,
               recordStep: steps.record,
+              use: computerUse,
               onComputerStarted: (durationMs, updated) =>
                 postComputerStarted(deps, run, durationMs, updated),
               ...(options.takeoverWaitMs !== undefined
@@ -659,6 +663,7 @@ async function processRun(
     await failRun(deps, run, messageId, error);
   } finally {
     running.delete(run.id);
+    await computerUse.end();
   }
 }
 

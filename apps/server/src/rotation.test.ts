@@ -14,12 +14,17 @@ import {
   encryptSecret,
   generateMasterKey,
   keyringFromConfig,
+  masterKey,
 } from './secrets.js';
 
 // Plan 4.9: re-sealing every stored secret under a new master key.
 
 const oldKey = generateMasterKey();
-const newKey = generateMasterKey();
+// A key id is one byte, so two random keys share one about once in 256 runs.
+// The tests tell a re-sealed secret from the old one by its id: the new key
+// gets an id of its own.
+let newKey = generateMasterKey();
+while (masterKey(newKey).id === masterKey(oldKey).id) newKey = generateMasterKey();
 const before = { masterKey: oldKey, previousMasterKeys: [] };
 const rotating = { masterKey: newKey, previousMasterKeys: [oldKey] };
 const after = { masterKey: newKey, previousMasterKeys: [] };

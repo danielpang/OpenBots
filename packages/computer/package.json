@@ -21,10 +21,12 @@
     "build": "tsc -p tsconfig.build.json",
     "docker-guard": "OPENBOTS_DOCKER_UPSTREAM=${OPENBOTS_DOCKER_UPSTREAM:-unix:///var/run/docker.sock} OPENBOTS_DOCKER_GUARD_HOST=${OPENBOTS_DOCKER_GUARD_HOST:-127.0.0.1} tsx --conditions=@openbots/source src/docker-guard-main.ts",
     "lint": "eslint .",
+    "sprites-smoke": "tsx --conditions=@openbots/source scripts/sprites-smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fly/sprites": "0.2.4",
     "@openbots/computer-agent": "workspace:*",
     "@openbots/shared": "workspace:*",
     "dockerode": "^4.0.12",

@@ -37,6 +37,7 @@ import { inEveryOrganization, startWorkers } from './workers.js';
 import { openAppDb } from './db/app-role.js';
 import { attachComputerProxies, isComputerSocketPath } from './ws/computer.js';
 import { attachGateway } from './ws/gateway.js';
+import { endAllComputerUses } from './services/computer-use.js';
 import type { ServerExtensions } from './extensions.js';
 import { ensureWorkspace } from './workspace.js';
 
@@ -70,7 +71,14 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
   protectFilesDir(config.filesDir);
   // Migrations as the tables' owner; then the app works under row-level
   // security, as openbots_app (db/app-role.ts, db/scope.ts).
-  const owner = createDb(config.databaseUrl);
+  const owner = createDb(
+    config.databaseUrl,
+    {},
+    config.databaseDirectUrl ? { sessionUrl: config.databaseDirectUrl } : {},
+  );
+  // Session locks (the checkout lock) need a direct connection: refused,
+  // and said so now, where the database URL goes through a pooler.
+  if (owner.sessionLockProblem) logger.error(owner.sessionLockProblem);
   await migrate(owner);
   const db = await openAppDb(owner, config, logger);
   // A self-hosted install is one implicit organization (plan 21.2).
@@ -194,6 +202,10 @@ export async function runServer(extensions: ServerExtensions = {}): Promise<void
     process.once(signal, async () => {
       logger.info({ signal }, 'shutting down');
       await Promise.allSettled(stops.map((stop) => stop()));
+      // Holds released and usage intervals closed now, not left to expire.
+      await endAllComputerUses().catch((err: unknown) =>
+        logger.warn({ err }, 'ending computer uses failed'),
+      );
       await closeMcpManager(deps);
       await infra.close();
       await db.close();

@@ -5,7 +5,7 @@ import type { AppEnv } from './context.js';
 import type { Db } from './db/client.js';
 import type { Infra } from './infra/index.js';
 import type { Logger } from './logger.js';
-import type { Limits } from '@openbots/shared';
+import type { ComputerProviderName, Limits } from '@openbots/shared';
 import type { Workspace } from './workspace.js';
 
 // Extension points for the managed build (plan 21.5). The core never imports
@@ -17,6 +17,21 @@ export interface ExtensionContext {
   db: Db;
   logger: Logger;
   infra: Infra;
+}
+
+/** A stretch of a member's computer use that ended (services/computer-usage.ts). */
+export interface ComputerUsageEvent {
+  workspaceId: string;
+  ownerId: string;
+  computerId: string;
+  provider: ComputerProviderName;
+  startedAt: Date;
+  endedAt: Date;
+  /**
+   * Seconds of the interval no earlier closed interval of the computer
+   * covered: summed per computer, the time it was in use, each second once.
+   */
+  seconds: number;
 }
 
 export interface ServerExtensions {
@@ -47,4 +62,10 @@ export interface ServerExtensions {
    * it, never raise them above it.
    */
   limitsCeiling?(workspace: Workspace, config: Config): Limits;
+  /**
+   * Called once each time a computer usage interval closes, after it is
+   * stored (plan 9.5): for usage billing. A throw is logged, never retried,
+   * and the interval stays; the ledger table is the record to reconcile from.
+   */
+  onComputerUsage?(event: ComputerUsageEvent): void | Promise<void>;
 }

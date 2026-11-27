@@ -1,9 +1,11 @@
+import { rmSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { schema } from '../db/client.js';
 import { STASH, WORKTREE, WORKTREES, useRepoJobsWorld } from './__fixtures__/coders/repo-jobs.js';
+import { realRepo } from './__fixtures__/coders/real-git.js';
 import { gitArgs, REPO_PATH, defaultGit } from './__fixtures__/coders/setup.js';
-import { rescueRepos } from './repos-rescue.js';
+import { rescueRepos, unsavedWork } from './repos-rescue.js';
 import { runnerSessionIds } from './git-credentials.js';
 
 // Rescue before loss (GH5), against a scripted `/coder` (repo-jobs.ts).
@@ -102,6 +104,100 @@ describe('repository rescue', () => {
         note: 'Nothing to save: everything is pushed',
       }),
     ]);
+  });
+
+  it('a checkout lock lost part way reports work it could not check, never nothing to save', async () => {
+    await j.readyCheckout();
+    // Unpushed work in both worktrees, which the rescue never gets to read.
+    j.gitBy((args, at) => {
+      if (args.includes('worktree')) return { code: 0, stdout: WORKTREES };
+      if (args.includes('--remotes')) return { code: 0, stdout: 'def1234 Try a fix\n' };
+      if (args.includes('status')) return { code: 0, stdout: at === WORKTREE ? ' M a.ts\n' : '' };
+      return undefined;
+    });
+    // The lock is lost (its signal aborts) as the first worktree is checked.
+    const lost = new AbortController();
+    const db = Object.assign(Object.create(j.w.t.deps.db) as typeof j.w.t.deps.db, {
+      withSessionLock: <T>(_key: string, fn: (signal?: AbortSignal) => Promise<T>) =>
+        fn(lost.signal),
+    });
+    const coder = j.w.coder.coder;
+    j.w.coder.coder = (launch, handlers) => {
+      if (launch.command === 'git' && gitArgs(launch.args).includes('symbolic-ref')) lost.abort();
+      return coder(launch, handlers);
+    };
+    let results;
+    try {
+      results = await j.inOrg(() => rescueRepos({ ...j.w.t.deps, db }, j.w.ownerId, j.computerId));
+    } finally {
+      j.w.coder.coder = coder;
+    }
+    expect(results.map((r) => r.note)).not.toContain('Nothing to save: everything is pushed');
+    expect(results).toEqual([
+      expect.objectContaining({
+        branch: null,
+        pushed: false,
+        note: expect.stringMatching(/^Could not check for unsaved work: /),
+      }),
+      expect.objectContaining({
+        branch: null,
+        pushed: false,
+        note: expect.stringMatching(/^Could not check for unsaved work on bot\/x: /),
+      }),
+    ]);
+    // The reset counts both as unsaved work.
+    expect(unsavedWork(results)).toHaveLength(2);
+  });
+
+  it('a session worktree removed by hand: its branch is saved from the checkout, no "could not check"', async () => {
+    await j.readyCheckout();
+    const repo = realRepo();
+    try {
+      // A session's worktree with a commit never pushed, then its directory
+      // removed by hand: git still lists it, as prunable.
+      repo.git(['worktree', 'add', '--quiet', '-b', 'bot/x', '.worktrees/bot-x']);
+      repo.git(
+        ['commit', '--quiet', '--allow-empty', '-m', 'Try a fix'],
+        `${repo.root}/.worktrees/bot-x`,
+      );
+      rmSync(`${repo.root}/.worktrees/bot-x`, { recursive: true });
+      expect(repo.git(['worktree', 'list', '--porcelain'])).toMatch(/\nprunable /);
+      j.gitBy(repo.answer);
+      const results = await j.inOrg(() =>
+        rescueRepos(j.w.t.deps, j.w.ownerId, j.computerId, new Date('2026-11-05T10:30:00Z')),
+      );
+      const saved = 'openbots/rescue/2026-11-05T10-30/relay/bot-x';
+      expect(results).toEqual([
+        {
+          repoId: j.w.repoId,
+          fullName: 'acme/relay',
+          branch: saved,
+          pushed: true,
+          note: `Saved 1 unpushed commit on bot/x to ${saved}`,
+        },
+      ]);
+      // On origin now, the commit the worktree held.
+      expect(repo.git(['log', '-1', '--format=%s', `origin/${saved}`]).trim()).toBe('Try a fix');
+      // Pushed: a reset after it has nothing left to save.
+      const again = await j.inOrg(() => rescueRepos(j.w.t.deps, j.w.ownerId, j.computerId));
+      expect(again.map((r) => r.note)).toEqual(['Nothing to save: everything is pushed']);
+      expect(unsavedWork(again)).toEqual([]);
+    } finally {
+      repo.remove();
+    }
+  });
+
+  it('a checkout of an empty repository has nothing to save', async () => {
+    await j.readyCheckout();
+    const repo = realRepo({ empty: true });
+    try {
+      j.gitBy(repo.answer);
+      const results = await j.inOrg(() => rescueRepos(j.w.t.deps, j.w.ownerId, j.computerId));
+      expect(results.map((r) => r.note)).toEqual(['Nothing to save: everything is pushed']);
+      expect(unsavedWork(results)).toEqual([]);
+    } finally {
+      repo.remove();
+    }
   });
 
   it('leaves the worktree of a live session alone', async () => {

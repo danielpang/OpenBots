@@ -3,11 +3,12 @@ import { posix } from 'node:path';
 import type { ComputerAgentClient } from '@openbots/computer';
 import { REPOS_DIR } from '@openbots/computer';
 import { REPO_FULL_NAME } from '@openbots/shared';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from '../context.js';
-import { schema } from '../db/client.js';
+import { schema, sessionLockOf, type Db } from '../db/client.js';
 import { SYSTEM_ACTOR } from './audit.js';
-import { agentFor, startComputer } from './computer.js';
+import { agentFor, computerOff, shownFailure, startComputer } from './computer.js';
+import { fenceOf, isFenced } from './computer-fence.js';
 import { parseRepoUrl, type ParsedRepoUrl } from './repos.js';
 import {
   FETCH_USERNAME,
@@ -28,9 +29,11 @@ import {
 // Every git command runs through `runGit`: a `/coder` process of its own as
 // the `runner` user (uid 1801, group `coders`), whose environment a coding
 // session cannot read, and whose credential requests the runner answers
-// itself (git-credentials.ts, `runnerSessionIds`). One fetch per checkout runs at a time in this
-// process; two worker processes fetching the same repository at once is
-// left to git's own locks.
+// itself (git-credentials.ts, `runnerSessionIds`). One operation per
+// checkout runs at a time across every process (`withCheckoutLock`: a
+// Postgres advisory lock), so a start's reconcile and a coding session's
+// clone never run git on the same path at once, and every write of a
+// checkout's state says what state it expects to replace.
 
 type CheckoutDeps = AppDeps;
 export type RepoRow = typeof schema.repos.$inferSelect;
@@ -57,6 +60,11 @@ export interface GitContext {
   owner: { id: string; workspaceId: string };
   /** The repository the commands work on: git's credentials are served for it only. */
   repoFullName?: string | null;
+  /**
+   * Ends every command run in this context: the checkout lock's, aborted
+   * when the lock is lost (`withCheckoutLock`).
+   */
+  signal?: AbortSignal;
 }
 
 export class GitError extends Error {
@@ -151,9 +159,10 @@ export async function runAsRunner(
     push = false,
     write = false,
     headChars,
-    signal,
+    signal: own,
   }: RunnerOptions = {},
 ): Promise<GitRun> {
+  const signal = own && ctx.signal ? AbortSignal.any([own, ctx.signal]) : (own ?? ctx.signal);
   if (signal?.aborted)
     return { code: null, stdout: '', stderr: '', error: `${command} was cancelled` };
   let cancel: (() => void) | undefined;
@@ -274,6 +283,33 @@ export async function git(ctx: GitContext, args: string[], options?: RunnerOptio
   const run = await runGit(ctx, args, options);
   if (run.code !== 0) throw new GitError(args, run);
   return run.stdout;
+}
+
+/**
+ * `runGit` for a question whose answer decides what happens to work: git's
+ * exit code and output, any code, but only once git ran to its end. A run
+ * that was cancelled (the checkout's lock lost), took too long or never
+ * started has no answer, and this throws a `GitError` for it rather than
+ * let a missing answer read as "nothing there".
+ */
+export async function askGit(ctx: GitContext, args: string[], options?: RunnerOptions) {
+  const run = await runGit(ctx, args, options);
+  if (run.code === null || run.error) throw new GitError(args, run);
+  return run;
+}
+
+/**
+ * The commit `ref` names in the repository at `at`, or null when it names
+ * none: an unborn HEAD (a repository with no commits yet, or a fresh clone
+ * of one) or a branch that is not there. `rev-parse --verify --quiet` exits
+ * 1 for those, an answer; any other exit, or no answer, throws.
+ */
+export async function commitOf(ctx: GitContext, at: string, ref = 'HEAD'): Promise<string | null> {
+  const args = ['-C', at, 'rev-parse', '--verify', '--quiet', ref];
+  const run = await askGit(ctx, args);
+  if (run.code === 1) return null;
+  if (run.code !== 0) throw new GitError(args, run);
+  return run.stdout.trim() || null;
 }
 
 /**
@@ -586,7 +622,8 @@ export function worktreePathFor(repoPath: string, branch: string): string {
   return posix.join(repoPath, '.worktrees', branchSlug(branch));
 }
 
-// One checkout operation at a time per (repository, computer) in this process.
+// One checkout operation at a time per (repository, computer), where the
+// database cannot lock across processes (PGlite: one process).
 const locks = new Map<string, Promise<unknown>>();
 
 /** For tests: forgets every checkout lock, as a fresh process would have none. */
@@ -594,13 +631,23 @@ export function resetCheckoutLocks(): void {
   locks.clear();
 }
 
-/** Runs `fn` alone among this process's operations on the checkout. */
+/**
+ * Runs `fn` alone among every process's operations on the checkout: under a
+ * Postgres advisory lock on the (repository, computer), held on a connection
+ * of its own, outside any transaction (db/client.ts `createDb`). Never call
+ * it inside itself for the same checkout. `fn`'s signal is aborted if the
+ * lock is lost while it runs (its connection went): put it on the git
+ * context (`GitContext.signal`), so every command ends.
+ */
 export function withCheckoutLock<T>(
+  deps: { db: Db },
   repoId: string,
   computerId: string,
-  fn: () => Promise<T>,
+  fn: (signal?: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  return locked(`${repoId}:${computerId}`, fn);
+  const across = sessionLockOf(deps.db);
+  if (across) return across(`openbots:checkout:${repoId}:${computerId}`, fn);
+  return locked(`${repoId}:${computerId}`, () => fn());
 }
 
 function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -664,7 +711,9 @@ export async function ensureCheckout(
     owner: { id: repo.ownerId, workspaceId: repo.workspaceId },
     repoFullName: remoteOf(repo).fullName,
   };
-  return locked(`${repoId}:${computerId}`, () => checkout(ctx, repo, computerId));
+  return withCheckoutLock(deps, repoId, computerId, (signal) =>
+    checkout(signal ? { ...ctx, signal } : ctx, repo, computerId),
+  );
 }
 
 /** A branch name git could have printed; anything else is not used. */
@@ -738,8 +787,8 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         .set({ defaultBranch: detected, updatedAt: new Date() })
         .where(eq(schema.repos.id, repo.id));
     }
-    const head = (await git(ctx, ['-C', path, 'rev-parse', 'HEAD'])).trim();
-    const counts = await runGit(ctx, [
+    const head = await commitOf(ctx, path);
+    const counts = await askGit(ctx, [
       '-C',
       path,
       'rev-list',
@@ -756,20 +805,22 @@ async function checkout(ctx: GitContext, repo: RepoRow, computerId: string): Pro
         state: dirty ? 'dirty' : behind > 0 ? 'behind' : 'ready',
         ahead: Number.isFinite(ahead) ? ahead : 0,
         behind: Number.isFinite(behind) ? behind : 0,
-        headSha: head || null,
+        headSha: head,
         lastFetchAt: new Date(),
         error: null,
         updatedAt: new Date(),
       })
-      .where(eq(schema.repoCheckouts.id, row!.id))
+      // Only over its own `cloning`: a reset that marked it `missing` meanwhile stands.
+      .where(and(eq(schema.repoCheckouts.id, row!.id), eq(schema.repoCheckouts.state, 'cloning')))
       .returning();
-    return { ...ready!, defaultBranch: branch };
+    if (!ready) throw new Error('The checkout changed while it was being made; try again');
+    return { ...ready, defaultBranch: branch };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = shownFailure(deps, error);
     await deps.db
       .update(schema.repoCheckouts)
       .set({ state: 'error', error: message.slice(0, 2_000), updatedAt: new Date() })
-      .where(eq(schema.repoCheckouts.id, row!.id));
+      .where(and(eq(schema.repoCheckouts.id, row!.id), eq(schema.repoCheckouts.state, 'cloning')));
     throw error;
   }
 }
@@ -820,7 +871,13 @@ export interface RunningComputer {
   agent: ComputerAgentClient;
 }
 
-/** The computer when it is running, never starting it. */
+/**
+ * The computer when it is running, never starting it; for the background
+ * jobs a start queues (the reconcile and the scan) and the refresh. Its agent
+ * asks the row again before each call: once the computer stopped, or a reset
+ * took its machine away, the job's next call fails (`COMPUTER_OFF`) instead
+ * of waking a paused Sprite or reaching one a reset is deleting.
+ */
 export async function runningOn(
   deps: AppDeps,
   computerId: string,
@@ -833,8 +890,37 @@ export async function runningOn(
   return {
     computer,
     owner: { id: computer.ownerId, workspaceId: computer.workspaceId },
-    agent: agentFor(deps, computer),
+    agent: whileRunning(deps, computer, agentFor(deps, computer)),
   };
+}
+
+/** `agent`, whose calls each check first that `computer` still runs on the same machine. */
+function whileRunning(
+  deps: AppDeps,
+  computer: ComputerRow,
+  agent: ComputerAgentClient,
+): ComputerAgentClient {
+  const machine = fenceOf(computer.agentToken);
+  const check = async () => {
+    const [now] = await deps.db
+      .select({ status: schema.computers.status, agentToken: schema.computers.agentToken })
+      .from(schema.computers)
+      .where(eq(schema.computers.id, computer.id));
+    if (now?.status !== 'running' || fenceOf(now.agentToken) !== machine || isFenced(computer)) {
+      throw computerOff();
+    }
+  };
+  return new Proxy(agent, {
+    get(target, prop, receiver) {
+      const value: unknown = Reflect.get(target, prop, receiver);
+      // `socket` only names the URL; the proxies that dial it check for themselves.
+      if (typeof value !== 'function' || prop === 'socket') return value;
+      return async (...args: unknown[]) => {
+        await check();
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
 }
 
 /** The runner's git context on `on`, for `repo` (no credential is served without one). */
@@ -859,12 +945,26 @@ export async function onDisk(ctx: GitContext, path: string): Promise<boolean> {
   return run.code === 0;
 }
 
-/** `git worktree list --porcelain`: each worktree's path and branch (null when detached). */
-export function parseWorktreeList(stdout: string): { path: string; branch: string | null }[] {
-  const out: { path: string; branch: string | null }[] = [];
+/** A worktree `git worktree list` names. */
+export interface ListedWorktree {
+  path: string;
+  /** Null when detached. */
+  branch: string | null;
+  /**
+   * Its directory is gone (removed by hand): git still lists it until
+   * `git worktree prune`, but there are no files there to read.
+   */
+  prunable?: true;
+}
+
+/** `git worktree list --porcelain`: each worktree's path and branch, and whether it is gone. */
+export function parseWorktreeList(stdout: string): ListedWorktree[] {
+  const out: ListedWorktree[] = [];
   for (const line of stdout.split('\n')) {
     if (line.startsWith('worktree ')) out.push({ path: line.slice(9).trim(), branch: null });
-    else if (line.startsWith('branch ') && out.length) {
+    else if ((line === 'prunable' || line.startsWith('prunable ')) && out.length) {
+      out[out.length - 1]!.prunable = true;
+    } else if (line.startsWith('branch ') && out.length) {
       out[out.length - 1]!.branch = line
         .slice(7)
         .trim()
@@ -874,11 +974,15 @@ export function parseWorktreeList(stdout: string): { path: string; branch: strin
   return out;
 }
 
-/** The sessions' worktrees of a checkout: every worktree but the main one. */
-export async function worktreesOf(ctx: GitContext, path: string) {
-  const list = await runGit(ctx, ['-C', path, 'worktree', 'list', '--porcelain'], {
+/**
+ * The sessions' worktrees of a checkout: every worktree but the main one,
+ * those whose directory is gone (`prunable`) included. Throws when git
+ * cannot list them: no list is not an empty one.
+ */
+export async function worktreesOf(ctx: GitContext, path: string): Promise<ListedWorktree[]> {
+  const list = await askGit(ctx, ['-C', path, 'worktree', 'list', '--porcelain'], {
     timeoutMs: SHORT_MS,
   });
-  if (list.code !== 0) return [];
+  if (list.code !== 0) throw new GitError(['-C', path, 'worktree', 'list'], list);
   return parseWorktreeList(list.stdout).filter((w) => posix.normalize(w.path) !== path);
 }

@@ -1,5 +1,8 @@
 import {
   DEFAULT_SANDBOX_IMAGE,
+  DEFAULT_SPRITES_NAME_PREFIX,
+  isEgressDomain,
+  isSpriteNamePrefix,
   resolveSandboxNetwork,
   type SandboxNetwork,
 } from '@openbots/computer';
@@ -89,6 +92,7 @@ const envSchema = z.object({
   OPENBOTS_MASTER_KEY: masterKey,
   OPENBOTS_MASTER_KEY_PREVIOUS: withDefault(masterKeyList, ''),
   DATABASE_URL: z.string().min(1),
+  DATABASE_DIRECT_URL: optional(z.string().min(1)),
   OPENBOTS_DB_APP_PASSWORD: optional(
     z.string().regex(/^[A-Za-z0-9_-]{16,128}$/, 'use 16 to 128 letters, digits, - or _'),
   ),
@@ -109,6 +113,29 @@ const envSchema = z.object({
   OPENBOTS_COMPUTER_AGENT_URL: optional(z.url()),
   OPENBOTS_COMPUTER_AGENT_TOKEN: optional(z.string()),
   OPENBOTS_COMPUTER_AGENT_SHARED: withDefault(z.stringbool(), 'false'),
+  // The sprites provider (the hosted service): one Fly Sprite per account.
+  OPENBOTS_SPRITES_TOKEN: optional(z.string()),
+  OPENBOTS_SPRITES_NAME_PREFIX: withDefault(
+    z.string().refine(isSpriteNamePrefix, {
+      message: 'must be a lower case letter, then up to 15 letters, digits or -',
+    }),
+    DEFAULT_SPRITES_NAME_PREFIX,
+  ),
+  OPENBOTS_SPRITES_PROVISION_DIR: optional(z.string()),
+  OPENBOTS_SPRITES_EGRESS: optional(
+    z
+      .string()
+      .transform((value) =>
+        value
+          .split(/[\s,]+/)
+          .map((domain) => domain.trim().toLowerCase())
+          .filter(Boolean),
+      )
+      .refine((domains) => domains.every(isEgressDomain), {
+        message: 'must be domains (example.com, *.example.com or *), separated by commas',
+      }),
+  ),
+  OPENBOTS_SPRITES_URL_AUTH: withDefault(z.enum(['public', 'sprite']), 'public'),
   OPENBOTS_DEPLOYMENT: withDefault(z.enum(['self_hosted', 'managed']), 'self_hosted'),
   // Set by the standalone image (docker/standalone.Dockerfile), not by hand.
   OPENBOTS_STANDALONE: withDefault(z.stringbool(), 'false'),
@@ -222,6 +249,12 @@ export interface Config {
   secretsFromEnvironment: string[];
   databaseUrl: string;
   /**
+   * DATABASE_DIRECT_URL: a direct connection to the same database, not
+   * through a pooler, for what needs a session of its own (the checkout
+   * locks, db/client.ts). Defaults to DATABASE_URL.
+   */
+  databaseDirectUrl?: string;
+  /**
    * OPENBOTS_DB_APP_PASSWORD: the app connects as openbots_app with it, a role
    * that owns nothing and does not bypass row-level security (db/app-role.ts).
    * Without it the app connects as DATABASE_URL's user and switches to that
@@ -251,6 +284,21 @@ export interface Config {
    * on the install use it (and share its files and logins).
    */
   computerAgent?: { url: string; token: string; shared: boolean };
+  /**
+   * The `sprites` computer provider (OPENBOTS_SPRITES_TOKEN; the hosted
+   * service): one Fly Sprite per account, made and provisioned through the
+   * Sprites API. Used when set and `computerAgent` is not, before Docker.
+   * `provisionDir` holds provision.sh, agent-bundle.tgz and VERSION
+   * (docker/sprites/); `egress` adds domains to the default allowlist;
+   * `urlAuth` is how the server reaches the agent (packages/computer/src/sprites.ts).
+   */
+  sprites?: {
+    token: string;
+    namePrefix: string;
+    provisionDir: string;
+    egress: string[];
+    urlAuth: 'public' | 'sprite';
+  };
   /**
    * What kind of install this is (OPENBOTS_DEPLOYMENT). `self_hosted`, the
    * default, is a personal install with one account, its owner: sign-up
@@ -376,6 +424,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       'invalid configuration:\n  OPENBOTS_DEPLOYMENT: the standalone image is a single-person install and runs self_hosted only; unset OPENBOTS_DEPLOYMENT or set it to self_hosted',
     );
   }
+  // A Sprite without the provisioning has no control agent to answer.
+  if (e.OPENBOTS_SPRITES_TOKEN && !e.OPENBOTS_SPRITES_PROVISION_DIR) {
+    throw new Error(
+      'invalid configuration:\n  OPENBOTS_SPRITES_PROVISION_DIR: needed with OPENBOTS_SPRITES_TOKEN, the directory holding provision.sh, agent-bundle.tgz and VERSION',
+    );
+  }
   if (e.OPENBOTS_LOCAL_TOKEN && e.OPENBOTS_DEPLOYMENT !== 'self_hosted') {
     throw new Error(
       'invalid configuration:\n  OPENBOTS_LOCAL_TOKEN: only a self-hosted install signs in with the Mac app; unset it for managed',
@@ -418,6 +472,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     previousMasterKeys: e.OPENBOTS_MASTER_KEY_PREVIOUS,
     secretsFromEnvironment: secrets.fromEnvironment,
     databaseUrl: e.DATABASE_URL,
+    ...(e.DATABASE_DIRECT_URL ? { databaseDirectUrl: e.DATABASE_DIRECT_URL } : {}),
     ...(e.OPENBOTS_DB_APP_PASSWORD ? { dbAppPassword: e.OPENBOTS_DB_APP_PASSWORD } : {}),
     redisUrl: e.REDIS_URL,
     dockerHost: e.DOCKER_HOST,
@@ -432,6 +487,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
           url: e.OPENBOTS_COMPUTER_AGENT_URL,
           token: e.OPENBOTS_COMPUTER_AGENT_TOKEN ?? '',
           shared: e.OPENBOTS_COMPUTER_AGENT_SHARED,
+        }
+      : undefined,
+    sprites: e.OPENBOTS_SPRITES_TOKEN
+      ? {
+          token: e.OPENBOTS_SPRITES_TOKEN,
+          namePrefix: e.OPENBOTS_SPRITES_NAME_PREFIX,
+          provisionDir: e.OPENBOTS_SPRITES_PROVISION_DIR ?? '',
+          egress: e.OPENBOTS_SPRITES_EGRESS ?? [],
+          urlAuth: e.OPENBOTS_SPRITES_URL_AUTH,
         }
       : undefined,
     deployment: e.OPENBOTS_DEPLOYMENT,

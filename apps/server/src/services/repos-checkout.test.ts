@@ -9,6 +9,7 @@ import {
   REPO_PATH,
   type CoderWorld,
 } from './__fixtures__/coders/setup.js';
+import { realRepo } from './__fixtures__/coders/real-git.js';
 import { agentFor } from './computer.js';
 import {
   checkoutPathFor,
@@ -89,6 +90,32 @@ describe('repos checkout', () => {
     active.abort();
     expect(await operation).toMatchObject({ code: null, error: 'sleep was cancelled' });
     // Cancellation may win before the computer's process-open promise resolves.
+    await w.until(() => expect(w.coder.calls.at(-1)?.ended).toBe(true));
+  });
+
+  it('ends a command when the git context is cancelled: a checkout lock that was lost', async () => {
+    const [computer] = await w.t.db
+      .select()
+      .from(schema.computers)
+      .where(eq(schema.computers.id, computerId));
+    const lock = new AbortController();
+    const ctx = {
+      deps: w.t.ownerDeps,
+      agent: agentFor(w.t.ownerDeps, computer!),
+      owner: { id: w.ownerId, workspaceId: w.workspaceId },
+      signal: lock.signal,
+    };
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    w.coder.agent = () => {
+      started();
+    };
+    const operation = runAsRunner(ctx, 'sleep', ['3600']);
+    await running;
+    lock.abort();
+    expect(await operation).toMatchObject({ code: null, error: 'sleep was cancelled' });
     await w.until(() => expect(w.coder.calls.at(-1)?.ended).toBe(true));
   });
 
@@ -323,6 +350,36 @@ describe('repos checkout', () => {
         : defaultGit(args);
     const row = await w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId));
     expect(row.state).toBe('dirty');
+  });
+
+  it('makes a checkout of an empty repository, with no head yet', async () => {
+    // A repository with no commits: HEAD is unborn, origin has no branch.
+    const repo = realRepo({ empty: true });
+    try {
+      w.coder.git = (args) =>
+        repo.answer(args, args.includes('-C') ? args[args.indexOf('-C') + 1] : undefined) ??
+        defaultGit(args);
+      const row = await w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId));
+      expect(row).toMatchObject({
+        state: 'ready',
+        headSha: null,
+        ahead: 0,
+        behind: 0,
+        error: null,
+      });
+    } finally {
+      repo.remove();
+    }
+  });
+
+  it('never marks a checkout ready when git gives no answer about origin', async () => {
+    // The count against origin is killed before it says anything.
+    w.coder.git = (args) =>
+      args.includes('rev-list') ? { code: null as unknown as number } : defaultGit(args);
+    await expect(
+      w.t.inOrganization(() => ensureCheckout(w.t.deps, w.repoId, computerId)),
+    ).rejects.toThrow(/git rev-list failed/);
+    expect(await checkoutRow()).toMatchObject({ state: 'error' });
   });
 
   it("records git's error and throws", async () => {

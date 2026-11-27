@@ -302,6 +302,27 @@
       "when": 1794464543454,
       "tag": "0042_drop_bot_skills",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1795044579334,
+      "tag": "0043_sprites_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1795047155105,
+      "tag": "0044_computer_usage_intervals",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1795047200000,
+      "tag": "0045_retired_computers",
+      "breakpoints": true
     }
   ]
 }

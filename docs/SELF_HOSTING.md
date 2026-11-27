@@ -63,6 +63,11 @@ In `.env`:
    does not start without it.
 3. Set `OPENBOTS_DB_APP_PASSWORD=` to the second password. The server uses it for a database role
    held to row-level security between organizations.
+   If `DATABASE_URL` goes through a connection pooler (a hosted database's pooled host, such as
+   one with `-pooler` in its name, or PgBouncer), also set `DATABASE_DIRECT_URL=` to a direct
+   connection to the same database. The server holds the locks that keep two operations on one
+   repository checkout apart on that connection, since a pooler can lose them. It refuses those
+   locks, and says so at start, when the only URL looks pooled. Left empty, `DATABASE_URL` is used.
 4. From a fork, set `OPENBOTS_IMAGE_PREFIX=ghcr.io/<owner in lower case>/openbots`.
 5. Optional: add a model provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...), or add
    providers later in Settings > Models.
@@ -144,6 +149,39 @@ use it keeps it, and every other account is told the computer is unavailable.
 `OPENBOTS_COMPUTER_AGENT_SHARED=true` opens it to every account. Each Bot still gets its own
 screen, but all accounts share the files under `/home/bot` and every browser login (cookies sync
 across every screen). Turn it on only when the accounts fully trust each other.
+
+### Computers on Fly Sprites (managed service)
+
+The hosted service gives each account its own [Fly Sprite](https://docs.fly.io/sprites/) instead of
+a Docker container. A self-hosted install does not need it and leaves these empty.
+`OPENBOTS_SPRITES_TOKEN` (a Sprites org token) turns it on, and
+`OPENBOTS_SPRITES_PROVISION_DIR` points at the provisioning files from `docker/sprites/`. A remote
+agent (`OPENBOTS_COMPUTER_AGENT_URL`) still takes precedence; Docker is used only when neither is
+set. Each Sprite gets a DNS egress allowlist: the Sprites defaults, the model vendors' hosts and
+the domains in `OPENBOTS_SPRITES_EGRESS`. See `.env.example` for the name prefix and URL settings.
+The server calls the Sprites API with Fly's `@fly/sprites` SDK. The SDK can add client headers to
+its requests to the Sprites API: `Fly-Client-Interactive` and `Fly-Client-Parent` (whether the
+process has a terminal, its parent process's kind), `Fly-Client-CI`, and `Fly-Client-Agent` with
+`Fly-Client-Agent-Source` (a coding agent it detects from environment variables, such as
+`claude-code` when the server runs under one), and the same in its User-Agent. The server turns
+them off unless `SPRITES_CLIENT_SIGNALS` is set (to 1 to send them). The User-Agent still names the
+SDK and its version (`sprites-js/0.2.4`). These go only to the Sprites API host.
+
+A full reset (one that also forgets the sign-ins) deletes the member's computer and everything
+on it. Nothing keeps or restores it, and only a person can ask for one: the app or a paired device,
+not an API key. On Sprites the member's computer gets a new Sprite name at once, so it can start
+again right away, and the old Sprite is deleted before the reset answers. Until it is gone the
+server refuses its old agent token in every process. If the deletion fails, or the process dies
+part way, the worker deletes it later: it retries after a minute, doubling up to six hours, and
+after 12 failed attempts it gives up and logs an error. The worker deletes it once more about an
+hour after the reset, in case a start the reset cancelled made it again. An operator lists the old
+computers not deleted yet with `openbots computers retired --org <organization id>`, only those
+the worker gave up on with `--gave-up`, and retries one with `openbots computers retry <id> --by
+<your name> --org <organization id>`. `--by` names the operator in the audit log. A self-hosted
+install with one organization can leave out `--org`. A start under way does not hold up a reset:
+the reset cancels it. A stop under way holds it up while the process doing it is alive; a stop
+whose process died is taken over a minute later, and the worker finishes a stop or a start that a
+stopped process left behind. Docker computers are deleted before the reset answers.
 
 ### Egress proxy for the computers
 

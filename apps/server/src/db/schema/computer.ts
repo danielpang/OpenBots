@@ -1,12 +1,23 @@
-import { boolean, integer, jsonb, pgEnum, pgTable, text, unique, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  text,
+  unique,
+  uuid,
+} from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { users } from './auth.js';
 import { bots } from './bots.js';
 import { bytea, createdAt, id, timestamptz } from './columns.js';
-import { workspaceId } from './workspace.js';
+import { workspaceId, workspaces } from './workspace.js';
 
 // Plan 4.5: Computer (K1 to K7).
 
-export const computerProvider = pgEnum('computer_provider', ['docker', 'remote']);
+export const computerProvider = pgEnum('computer_provider', ['docker', 'remote', 'sprites']);
 
 /** One per account in each organization (K1, plan 21.3). */
 export const computers = pgTable(
@@ -19,7 +30,27 @@ export const computers = pgTable(
       .references(() => users.id),
     provider: computerProvider('provider').notNull().default('docker'),
     spec: jsonb('spec').notNull().default({}),
+    /**
+     * What names the machine where the provider names it (Sprites), instead of
+     * the row's id (`ComputerSpec.machineKey`): a full reset gives the row a
+     * new one, so its next machine is a new one while the old one is deleted.
+     * A column of its own, not part of `spec`, which many paths write whole.
+     */
+    machineKey: text('machine_key'),
     status: text('status').notNull(),
+    /**
+     * When `status` last changed (a trigger keeps it, drizzle/0045): a busy
+     * status a process left behind when it died is found by its age, from
+     * any process (computer.ts `recoverStaleComputers`).
+     */
+    statusAt: timestamptz('status_at').notNull().defaultNow(),
+    /**
+     * Bumped by every reset, stop, start and claim of the row (not by a
+     * provisioning job's own writes): a job writes only while the row still
+     * has the generation it read, so nothing that moved the row on meanwhile
+     * is overwritten.
+     */
+    generation: integer('generation').notNull().default(0),
     containerId: text('container_id'),
     agentUrl: text('agent_url'),
     agentToken: bytea('agent_token'),
@@ -53,4 +84,103 @@ export const botScreens = pgTable(
     controlledSince: timestamptz('controlled_since'),
   },
   (t) => [unique().on(t.computerId, t.displayNumber)],
+);
+
+/**
+ * When a member's computer was in use (plan 9.5): one row per stretch of use
+ * a server process saw, from the first use to the last plus, on a provider
+ * that pauses itself, the tail before it pauses. `ended_at` and `seconds` are
+ * null while it is open; `seen_at` is its last heartbeat, so one a crashed
+ * process left open is closed at its last sign of life. `seconds` counts only
+ * time no other closed interval of the computer already covers, so the
+ * seconds of a computer add up to its time in use even when two processes
+ * (the API's terminal, a worker's run) used it at once. For usage billing
+ * later (`ServerExtensions.onComputerUsage`); nothing reads it yet.
+ */
+export const computerUsageIntervals = pgTable(
+  'computer_usage_intervals',
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    computerId: uuid('computer_id')
+      .notNull()
+      .references(() => computers.id, { onDelete: 'cascade' }),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    provider: computerProvider('provider').notNull(),
+    /** What began it: `run`, `coding_session`, `exec`, `terminal` or `screen`. */
+    reason: text('reason').notNull(),
+    startedAt: timestamptz('started_at').notNull(),
+    seenAt: timestamptz('seen_at').notNull(),
+    endedAt: timestamptz('ended_at'),
+    seconds: integer('seconds'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('computer_usage_intervals_owner').on(t.workspaceId, t.ownerId, t.startedAt),
+    index('computer_usage_intervals_computer').on(t.computerId, t.startedAt),
+  ],
+);
+
+/**
+ * The old machine of a full reset, until it is deleted (plan 9.5; the
+ * owner's decision: a full reset deletes the old machine). One row per
+ * machine a full reset took off a member's computer on a provider that names
+ * machines by key (Sprites), written in the transaction that takes it off;
+ * the reset deletes it at once, and the retired-computers job retries a
+ * deletion that failed or never ran (services/computer-retire.ts). Docker
+ * removes the machine before its reset answers and records nothing here.
+ *
+ * `status`: `deleting` until a deletion succeeded, then `deleted`; the row
+ * outlives the machine as the record of it. A row the job gave up on stays
+ * `deleting` with `gave_up_at` set until an operator retries it. The
+ * organization cannot be deleted while it has rows (`restrict`): there is no
+ * organization deletion yet, and whatever adds one must delete the machines
+ * first, so none is left behind unrecorded.
+ */
+export const retiredComputers = pgTable(
+  'retired_computers',
+  {
+    id: id(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'restrict' }),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    /** The computer it was; null once that row is gone. */
+    computerId: uuid('computer_id').references(() => computers.id, { onDelete: 'set null' }),
+    provider: computerProvider('provider').notNull(),
+    /** The machine as the provider names it (the Sprite's name). */
+    providerRef: text('provider_ref').notNull(),
+    status: text('status').notNull(),
+    /** When the reset took it off the computer. */
+    retiredAt: timestamptz('retired_at').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    /** When the job may next take it: a retry's backoff, or a claim's lease. */
+    nextAttemptAt: timestamptz('next_attempt_at'),
+    /**
+     * When the job stopped retrying it after `RETIRED_MAX_ATTEMPTS`; the sweep
+     * leaves it alone until an operator retries it (`openbots computers retry`).
+     */
+    gaveUpAt: timestamptz('gave_up_at'),
+    lastAttemptAt: timestamptz('last_attempt_at'),
+    lastError: text('last_error'),
+    deletedAt: timestamptz('deleted_at'),
+    /**
+     * The SHA-256, hex, of the computer's sealed agent token when the machine
+     * was taken off it (computer-fence.ts): any process refuses that token
+     * from the moment the record commits, whatever it missed on the bus.
+     */
+    fence: text('fence'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('retired_computers_owner').on(t.workspaceId, t.ownerId, t.retiredAt),
+    index('retired_computers_due').on(t.status, t.nextAttemptAt),
+    index('retired_computers_fence')
+      .on(t.createdAt)
+      .where(sql`fence is not null`),
+  ],
 );
